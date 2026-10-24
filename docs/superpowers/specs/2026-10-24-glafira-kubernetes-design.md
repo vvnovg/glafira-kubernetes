@@ -1,4 +1,4 @@
-# Glafira for OpenShift — спецификация
+# Glafira for Kubernetes — спецификация
 
 **Дата:** 2026-10-24
 **Статус:** черновик на ревью
@@ -12,22 +12,25 @@
 
 ## 1. Цель и аудитория
 
-Glafira for OpenShift — кроссплатформенное desktop-приложение для работы с кластерами OpenShift и их диагностики.
-Оно заменяет связку `oc get` / `oc describe` / `oc logs` / `oc adm top`, вкладок веб-консоли и самописных скриптов
-одним окном. Главная ценность — диагностика, собранная из трёх частей: детерминированные правила, анализ фактического
-потребления ресурсов и LLM-ассистент, подключённый через MCP-шлюз Glafira. Кластер меняет только человек — через формы
-приложения с предпросмотром и защитами.
+Glafira for Kubernetes — кроссплатформенное desktop-приложение для работы с кластерами Kubernetes и их диагностики.
+**В фокусе — OpenShift и Platform V DropApp (СберТех):** для них — свои адаптеры платформы (§4.3), сценарии и смоук.
+Остальные дистрибутивы и управляемые облака поддерживаются на общем уровне Kubernetes — в объёме, который не требует
+больших усилий (§1, «Поддерживаемые платформы»). Приложение заменяет связку `oc`/`kubectl get` / `describe` / `logs` /
+`top`, вкладок веб-консоли и самописных скриптов одним окном. Главная ценность — диагностика, собранная из трёх
+частей: детерминированные правила, анализ фактического потребления ресурсов и LLM-ассистент, подключённый через
+MCP-шлюз Glafira. Кластер меняет только человек — через формы приложения с предпросмотром и защитами.
 
 **Пользователи (namespace-first):**
 - **Разработчики и тестировщики** с правами на свои проекты в общем кластере: почему под в CrashLoopBackOff, почему
-  OOMKilled, какие поставить `requests`/`limits`, почему Route не открывается, что произошло во время выкладки.
-- **Администраторы платформы и SRE** с `cluster-reader`/`cluster-admin`: ноды, ClusterOperators, обновления,
-  MachineConfigPools, ёмкость. Панели уровня кластера появляются автоматически, если RBAC позволяет; без прав
-  диагностика мягко сужается до проектов.
+  OOMKilled, какие поставить `requests`/`limits`, почему Route или Ingress не открывается, что произошло во время
+  выкладки.
+- **Администраторы платформы и SRE** с `cluster-reader`/`cluster-admin` или аналогом: ноды, состояние API-сервера,
+  ёмкость; на OpenShift — ClusterOperators, обновления, MachineConfigPools. Панели уровня кластера появляются
+  автоматически, если RBAC позволяет; без прав диагностика мягко сужается до проектов.
 
 **Ключевые сценарии (критерии успеха MVP):**
-1. Подключиться меньше чем за минуту: импорт контекста из kubeconfig, токен (`oc whoami -t`) или вход через браузер
-   в OAuth OpenShift.
+1. Подключиться меньше чем за минуту: импорт контекста из kubeconfig (включая exec-плагины из списка разрешённых,
+   §5.2), токен (`oc whoami -t`) или вход через браузер в OAuth OpenShift.
 2. Увидеть доступные проекты и workloads со статусом, одним щелчком найти проблемные поды (CrashLoopBackOff,
    ImagePullBackOff, Pending, OOMKilled).
 3. Открыть под: логи (live tail, предыдущий контейнер, поиск), события, состояние контейнеров, YAML только для чтения.
@@ -42,9 +45,15 @@ Glafira for OpenShift — кроссплатформенное desktop-прил�
 сборок), редактирование RBAC, просмотр значений Secret, обновление кластера, многопользовательский или серверный режим.
 
 **Поддерживаемые платформы:**
-- кластеры: OpenShift 4.16+ (OCP, OKD, ROSA, ARO, OSD); Kubernetes 1.29+ — best effort: если в discovery нет групп
-  `route.openshift.io`, `config.openshift.io`, `project.openshift.io`, `apps.openshift.io`, соответствующие части
-  интерфейса скрываются, список проектов заменяется списком namespace;
+- **в фокусе:** OpenShift 4.16+ (OCP, OKD, ROSA, ARO, OSD) и Platform V DropApp (адаптер — этап O5, §4.3; до него
+  DropApp работает на общем уровне);
+- **общий уровень:** любой Kubernetes 1.29+ — kubeadm, k3s, RKE2 и Rancher (в том числе адрес через прокси Rancher),
+  Deckhouse, kind, minikube, Docker Desktop, управляемые EKS, GKE, AKS, Yandex Managed Kubernetes. Работает всё, что
+  не зависит от платформы: проекты как namespace, workloads, поды, логи, события, сеть, квоты, анализ ресурсов,
+  изменения, проверка (кроме правил OpenShift), MCP. Части интерфейса OpenShift видны только при наличии своих групп
+  API (`route.openshift.io`, `config.openshift.io`, `project.openshift.io`, `apps.openshift.io`);
+- **сеть:** Route (OpenShift), Ingress (`networking.k8s.io/v1`) и Gateway API, если его CRD установлены: Gateway и
+  HTTPRoute — с v1.0, GRPCRoute — с v1.1 (`gateway.networking.k8s.io/v1`);
 - рабочие места: macOS 11+ (arm64, x64), Windows x64, Linux x64 (deb, rpm, AppImage).
 
 ---
@@ -54,16 +63,19 @@ Glafira for OpenShift — кроссплатформенное desktop-прил�
 | Вопрос | Решение | Причина |
 |---|---|---|
 | Оболочка | **Tauri 2**, как у Kafka-версии | Лёгкий бинарник, нативный WebView, безопасная IPC-модель, готовая инфраструктура сборки |
-| Клиент Kubernetes | **`kube`** (client, runtime) + **`k8s-openapi`** с минимальной версией API, совместимой с Kubernetes 1.29; объекты, которых нет в выбранной версии, — через `DynamicObject` | Зрелый клиент, watcher, пагинация, подписи запросов, без внешних бинарей |
-| Типы OpenShift | Собственные минимальные структуры (только нужные поля) в `k8s/openshift/`, чтение через `Api<DynamicObject>` с `ApiResource` из discovery и разбор serde. Крейт `openshift-openapi` не используется — он не поддерживается | Меньше зависимостей, устойчивость к новым полям |
-| TLS | rustls (`kube` с `rustls-tls`), системные корни + CA из профиля | Без OpenSSL в цепочке Kubernetes-клиента; запасной вариант — фича `openssl-tls` (§20) |
-| Метрики | Трейт `MetricsSource`: Thanos Querier OpenShift → свой URL Prometheus/Thanos → `metrics.k8s.io` (автовыбор, §7.1) | Namespace-пользователям Thanos по маршруту обычно недоступен |
+| Клиент Kubernetes | **`kube`** 4.2 (client, runtime) + **`k8s-openapi`** 0.28 с фичей `v1_32` (самая ранняя в этой версии); используются только GA-группы API, совместимые с Kubernetes 1.29; объекты, которых нет в выбранной версии, — через `DynamicObject` | Зрелый клиент, watcher, пагинация, подписи запросов, без внешних бинарей |
+| Типы OpenShift и Gateway API | Собственные минимальные структуры (только нужные поля) в `k8s/openshift/` и `k8s/gateway/`, чтение через `Api<DynamicObject>` с `ApiResource` из discovery и разбор serde. Крейты `openshift-openapi` (не поддерживается) и `gateway-api` не используются | Меньше зависимостей, устойчивость к новым полям |
+| Платформа | Слой `platform/` (§4.3): тип платформы определяется по discovery при подключении — `openshift`, `dropapp` (с O5) или `kubernetes`, плюс справочный дистрибутив (EKS, GKE, Rancher…). Какие объекты показывать, решает наличие групп API, а не платформа | Одна кодовая база для фокусных платформ и любого Kubernetes; новая платформа — адаптер, а не переделка ядра |
+| Сеть | Route, Ingress и Gateway API (Gateway, HTTPRoute, GRPCRoute) — по наличию групп API, только чтение | Ingress есть в любом кластере, Gateway API — стандартный преемник Ingress; DropApp публикует сервисы через Ingress |
+| Вход через exec-плагины | Только из списка разрешённых команд (§5.2) с подтверждением человеком; запрещается политикой `allowExecAuth = false` | Без них не подключиться к EKS, GKE, AKS, Yandex Cloud и кластерам с OIDC; произвольные команды не запускаются |
+| TLS | rustls с провайдером ring (`kube` с `rustls-tls`, `reqwest` с `rustls-no-provider`). Без CA в профиле — системное хранилище ОС; заданный CA заменяет системные корни при проверке API-сервера (как `certificate-authority` в kubeconfig), а для OAuth-сервера добавляется к ним (его сертификат часто выпущен CA ingress) | Без OpenSSL и aws-lc-rs в зависимостях; запасной вариант — фича `openssl-tls` (§20) |
+| Метрики | Трейт `MetricsSource`: автопоиск платформы (Thanos Querier у OpenShift, Prometheus через прокси API-сервера у остальных) → свой URL Prometheus/Thanos → `metrics.k8s.io` (автовыбор, §7.1) | Namespace-пользователям Thanos по маршруту обычно недоступен |
 | Изменения кластера | Только человек, точечные операции с guard, server-side dry-run и diff (§9); LLM только предлагает (§10.5) | Концепция Glafira: решение и кнопка — у человека |
 | MCP | Перенос шлюза G1 (stdio-шим → локальный сокет/pipe, рукопожатие с токеном, подтверждение клиентов, лимиты, журнал); MCP-крейты без клиента Kubernetes | Архитектурная гарантия «через MCP кластер не изменить» |
 | Доступ LLM | Уровни на подключение `off` / `metadata` / `logs` + список проектов для LLM (§10.2) | Логи и значения конфигурации — самые чувствительные данные |
 | Переиспользование кода | Новый репозиторий; общие части Kafka-версии копируются отдельными модулями и крейтами с границами под будущий вынос в общий репозиторий (§3) | Kafka-версия не блокируется, старт быстрый |
 | Хранилище настроек | JSON-файлы в каталоге данных приложения, как у Kafka-версии | Простота, переносимость |
-| Секреты | OS keychain (`keyring`), сервис `glafira-openshift` | Токены и ключи не лежат на диске открытым текстом |
+| Секреты | OS keychain (`keyring`), сервис `glafira-kubernetes` | Токены и ключи не лежат на диске открытым текстом |
 | UI | React 19 + TypeScript + Vite, TanStack Query/Virtual, Zustand, i18next, `@floating-ui/react` — как у Kafka-версии; графики — **uPlot** (точная версия фиксируется в `package.json`) | Тот же дизайн и компоненты; uPlot — быстрые временные ряды при малом размере |
 | Лицензия | Apache License 2.0, все функции бесплатны, «Поддержать проект» | Как у Kafka-версии с 0.3.0 |
 
@@ -79,12 +91,12 @@ Glafira for OpenShift — кроссплатформенное desktop-прил�
 | Область | Что переносится | Как |
 |---|---|---|
 | Rust: основа | `storage/fs.rs` (атомарная запись, `read_json_or_quarantine`), `secrets.rs`, `settings.rs`, `policy/`, `logging.rs`, `diagnostics.rs`, `i18n.rs`, `sync.rs`, `product.rs`, `dock_name.rs`, `state.rs` (каркас) | как есть, новые идентификаторы; в политике — новые ключи (§12) |
-| Rust: папки и обмен | `storage/tree.rs`, `storage/connections.rs` (каркас профилей и папок, `extra`-поля), `storage/exchange.rs`, `commands/folders.rs` | адаптированы под профиль OpenShift (§5.1) |
+| Rust: папки и обмен | `storage/tree.rs`, `storage/connections.rs` (каркас профилей и папок, `extra`-поля), `storage/exchange.rs`, `commands/folders.rs` | адаптированы под профиль подключения (§5.1) |
 | Rust: защита и ошибки | `guard.rs`, `error.rs` | адаптированы: новые коды (§15), ввод имени пода (§9) |
-| Rust: проверка | `health/store.rs` (находки, скрытие, замечания, предложения, срок, лимиты), `health/service.rs` (`Checker`: одна проверка на подключение, ожидание идущей, дедлайн, событие), `health/texts.rs` (каркас) | адаптированы: объекты (`target`) OpenShift, свои правила (§8) |
+| Rust: проверка | `health/store.rs` (находки, скрытие, замечания, предложения, срок, лимиты), `health/service.rs` (`Checker`: одна проверка на подключение, ожидание идущей, дедлайн, событие), `health/texts.rs` (каркас) | адаптированы: объекты (`target`) Kubernetes и OpenShift, свои правила (§8) |
 | Rust: MCP в приложении | `mcp/approvals.rs`, `mcp/controller.rs`, `mcp/files.rs`, `mcp/shim.rs` | как есть, новые имена файлов, сокета и pipe |
 | Крейт `glafira-mcp-core` | из `crates/glafira-mcp`: `endpoint.rs`, `handshake.rs`, `audit.rs`, `limits.rs`, реестр сессий и доступ (`SessionView`, `SessionAccess`, `ClientIdent`), общая обвязка вызова инструмента (проверка доступа сессии, лимиты, журнал, усечение ответа до 100 КБ) из `server/mod.rs` | выделяется без доменных типов |
-| Крейт `glafira-mcp-openshift` | структура `server/*_tools.rs`, `rules.rs` (усечение, скрытие чувствительного), `observe.rs` (каркас хронологии), `health.rs`, `proposals.rs` (каркас) | новые инструменты и типы ответов (§10) |
+| Крейт `glafira-mcp-kubernetes` | структура `server/*_tools.rs`, `rules.rs` (усечение, скрытие чувствительного), `observe.rs` (каркас хронологии), `health.rs`, `proposals.rs` (каркас) | новые инструменты и типы ответов (§10) |
 | Фронтенд | `styles.css`, `components/common/*` (ConfirmDialog, ErrorBanner, Hint, EnvBadge, ConfigTable), `components/help/*`, `guide/*`, `i18n/*`, `components/settings/McpSection`, `components/mcp/*`, `components/about/*`, `components/connections/tree/*`, `components/health/*` (CheckBar, FindingsPanel, HealthBlock, ProposalItem, ProposalBanner, useActivePrefill), `state/workspace.ts` (каркас), `lib/*` (format, formatAgo, focusTrap, activate, useAppMenu, useHelpShortcut, useLanguageSync, useMcpStatus, useHealth, useDebouncedValue, plainInputs, links), `test/*` | дизайн и поведение — как есть; `TabSpec` и тексты — новые |
 | Скрипты и CI | `scripts/i18n-check.mjs`, `check-dist-compat.mjs`, `guide-publish.mjs`, `third-party.mjs`, `.github/workflows/*`, `deny.toml` | адаптированы: без librdkafka, cmake и Docker-Kafka |
 | Документы | `LICENSE`, `NOTICE`, `TRADEMARK.md`, `SECURITY.md`, `CONTRIBUTING.md`, `docs/i18n/glossary.md`, `docs/i18n/README.md`, `docs/release-checklist.md`, `docs/admin.md` (каркас) | адаптированы |
@@ -105,9 +117,12 @@ Glafira for OpenShift — кроссплатформенное desktop-прил�
 ┌───────────┴──────────────── Rust core ───────▼───────────────────┐
 │ commands/   — тонкий слой IPC, валидация, маппинг ошибок          │
 │ k8s/        — пул kube::Client, discovery, права, чтение,         │
-│               ReadClient (только get/list/watch/logs), openshift/ │
+│               ReadClient (только get/list/watch/logs),            │
+│               типы openshift/ и gateway/                          │
+│ platform/   — определение платформы по discovery, адаптеры:       │
+│               вход, автопоиск метрик, обзор и правила кластера    │
 │ auth/       — kubeconfig, токен, OAuth PKCE, клиентские           │
-│               сертификаты, истечение сессии                       │
+│               сертификаты, exec-плагины, истечение сессии         │
 │ watch/      — сессии watcher для открытых списков                 │
 │ logs/       — сессии логов: follow, previous, фильтр              │
 │ metrics/    — MetricsSource: Thanos | Prometheus | metrics.k8s.io │
@@ -118,17 +133,17 @@ Glafira for OpenShift — кроссплатформенное desktop-прил�
 │ mcp/        — реализация Backend, подтверждения, сервер, шим      │
 │ storage/ secrets/ policy/ settings/ i18n/ logging/ diagnostics/   │
 └───────────────────────────────────────────────────────────────────┘
-crates/glafira-mcp-core      — транспорт, рукопожатие, сессии, лимиты, журнал
-crates/glafira-mcp-openshift — инструменты, типы ответов для LLM, маскировка,
-                               трейт Backend; без kube, k8s-openapi и крейта приложения
+crates/glafira-mcp-core       — транспорт, рукопожатие, сессии, лимиты, журнал
+crates/glafira-mcp-kubernetes — инструменты, типы ответов для LLM, маскировка,
+                                трейт Backend; без kube, k8s-openapi и крейта приложения
 ```
 
 ### 4.1 Принципы
 
 - **Вся работа с кластером — в Rust.** Фронтенд не знает о `kube`; он вызывает команды и получает потоки данных.
 - **Изоляция для тестов:** `k8s`, `logs`, `watch`, `metrics`, `health`, `ops` зависят от трейтов (`ClusterReader`,
-  `ClusterWriter`, `MetricsSource`), которые подменяются в тестах; правила, движок рекомендаций, PromQL-шаблоны
-  и маскировка — чистые функции.
+  `ClusterWriter`, `MetricsSource`), которые подменяются в тестах; правила, движок рекомендаций, PromQL-шаблоны,
+  маскировка, определение платформы и проверка exec-команды по списку разрешённых — чистые функции.
 - **Гарантия MCP «только чтение».** Крейты `glafira-mcp-*` не зависят от `kube`, `k8s-openapi`, `reqwest` и крейта
   приложения — тест `tests/manifest.rs` читает их `Cargo.toml`. Реализация `Backend` в `src-tauri/src/mcp/` получает
   только `ReadClient` (newtype без доступа к внутреннему `kube::Client`: get, list, watch, logs и GET-запросы
@@ -146,12 +161,12 @@ crates/glafira-mcp-openshift — инструменты, типы ответов
 
 | Группа | Команды |
 |---|---|
-| Подключения | `list_connections`, `save_connection`, `delete_connection`, `test_connection`, `connect`, `disconnect`, `set_connection_token`, `start_oauth_login`, `cancel_oauth_login`, `preview_kubeconfig_import`, `apply_kubeconfig_import` |
+| Подключения | `list_connections`, `save_connection`, `delete_connection`, `test_connection`, `connect`, `disconnect`, `set_connection_token`, `start_oauth_login`, `cancel_oauth_login` (и ожидание exec-плагина), `resolve_exec_command`, `preview_kubeconfig_import`, `apply_kubeconfig_import` |
 | Папки и обмен | `list_folders`, `create_folder`, `rename_folder`, `delete_folder`, `move_items`, `export_connections`, `preview_import`, `apply_import` |
-| Права | `get_capabilities(connectionId)`, `get_namespace_access(connectionId, namespace)` |
+| Права и платформа | `get_capabilities(connectionId)` (права, группы API, платформа и дистрибутив, §4.3), `get_namespace_access(connectionId, namespace)` |
 | Кластер | `get_cluster_overview`, `list_nodes`, `get_node`, `list_cluster_operators` |
 | Проекты | `list_projects`, `get_project_overview`, `get_quotas` |
-| Объекты | `list_workloads`, `get_workload`, `get_rollout_history`, `list_pods`, `get_pod`, `list_events`, `list_services`, `list_routes`, `list_config_maps`, `list_secrets` (имена, типы, ключи), `list_pvcs`, `list_hpas`, `get_yaml(ref)` |
+| Объекты | `list_workloads`, `get_workload`, `get_rollout_history`, `list_pods`, `get_pod`, `list_events`, `list_services`, `list_routes`, `list_ingresses`, `list_gateways`, `list_gateway_routes`, `list_config_maps`, `list_secrets` (имена, типы, ключи), `list_pvcs`, `list_hpas`, `get_yaml(ref)` |
 | Watch и логи | `start_watch(params, channel) -> SessionId`, `start_logs(params, channel) -> SessionId`, `save_logs`, `stop_session` |
 | Ресурсы | `get_metrics_source_status`, `get_workload_usage(ref, window)`, `get_project_usage(namespace, window, channel) -> SessionId`, `recommend_resources(ref, window)` |
 | Изменения | `preview_change(connectionId, change) -> ChangePreview`, `apply_change(connectionId, change, expectedResourceVersion, confirm?, proposalId?)` |
@@ -161,6 +176,70 @@ crates/glafira-mcp-openshift — инструменты, типы ответов
 
 Все команды возвращают `Result<T, AppError>` (§15).
 
+### 4.3 Платформа
+
+Две независимые вещи:
+- **Группы API** из discovery решают, какие объекты читаются и показываются: Route — при `route.openshift.io`,
+  DeploymentConfig — при `apps.openshift.io`, проекты — при `project.openshift.io` (иначе список namespace), Ingress —
+  всегда, Gateway API — при `gateway.networking.k8s.io/v1`. Правило одно для всех платформ: кластер DropApp с CRD
+  `Route` покажет Route.
+- **Платформа** — то, что у вендоров устроено по-разному и из групп API не выводится. Трейт `Platform` в `platform/`,
+  реализация выбирается при `connect`:
+
+| Что задаёт платформа | `openshift` | `dropapp` (этап O5) | `kubernetes` |
+|---|---|---|---|
+| Вход через браузер (§5.2) | OAuth OpenShift | уточняется на O5 | не предлагается |
+| Автопоиск метрик (§7.1) | Thanos Querier в `openshift-monitoring` | уточняется на O5 | Prometheus через прокси API-сервера по списку известных сервисов |
+| Обзор и правила уровня кластера (§6.2, §8.2) | `/readyz`, ClusterVersion, ClusterOperators, MachineConfigPools; правила `cluster.*` | `/readyz`; состояние компонентов платформы — уточняется на O5 | `/readyz`, правило `cluster.apiNotReady` |
+| Срок токена в обзоре подключения (§5.2) | `useroauthaccesstokens` | — | — |
+| Название в интерфейсе и MCP | «OpenShift 4.18» или «OKD 4.15» (по строке версии ClusterVersion) | «DropApp <версия>» | «Kubernetes 1.31», с дистрибутивом — «Kubernetes 1.31 (EKS)» |
+
+**Определение** — чистая функция `platform::detect(discovery, version) -> PlatformInfo { kind, distribution?, version }`,
+вызывается при `connect` и на шаге 4 `test_connection`, признаки проверяются по порядку:
+1. группа `config.openshift.io` → `openshift`;
+2. признак DropApp (устанавливается на этапе O5 по живому кластеру) → `dropapp`. CRD Kubelatte признаком не считаются:
+   это open-source, его ставят где угодно;
+3. иначе — `kubernetes`.
+
+**Дистрибутив** (`distribution`) — справочное поле платформы `kubernetes`, только из discovery, `/version` и нод:
+`eks` (`-eks-` в `gitVersion`), `gke` (`-gke.`), `aks` (метки нод `kubernetes.azure.com/*`, если ноды читаются),
+`rancher` (группы `*.cattle.io`), `deckhouse` (`deckhouse.io`), `k3s` и `rke2` (`+k3s`, `+rke2` в `gitVersion`).
+Показывается в обзоре и MCP и влияет только на порядок кандидатов автопоиска метрик; неизвестный дистрибутив
+не показывается.
+
+Ручного выбора платформы в профиле нет: ошибку определения исправляет адаптер, а не настройка. Платформа и
+дистрибутив видны в проверке подключения, обзоре кластера, `get_capabilities` и в MCP (`list_connections`,
+`get_cluster_overview`). Крейты `glafira-mcp-*` получают только перечисление `PlatformKind` и строку дистрибутива.
+
+#### Platform V DropApp
+
+Фокусная платформа; адаптер — этап O5. Публично известно (октябрь 2026): сборка Kubernetes и набора операторов
+(реестр отечественного ПО, запись № 18621), по материалам производителя — Cilium для CNI и service mesh; при
+переезде с OpenShift Route переводятся в Ingress (`ingressClassName: nginx`), DeploymentConfig — в Deployment,
+поведение SCC повторяет admission-webhook Kubelatte; веб-консоль внешне похожа на консоль OpenShift (вероятно,
+переиспользована консоль OKD — не подтверждено). Документация производителя закрыта. Источник о переезде — доклад
+СберТеха на Saint Highload++ (https://habr.com/ru/articles/905816).
+
+До O5 DropApp работает как `kubernetes`: Ingress, workloads, поды, логи, анализ ресурсов, изменения, проверка без
+правил OpenShift, MCP. Первая задача O5 — обследование живого кластера; по его итогам пишется спека этапа:
+- признак для `detect` — группы API операторов DropApp; если найдутся `config.openshift.io`, кластер уже определяется
+  как `openshift`, и адаптер не нужен;
+- способ входа людей: OIDC через `kubectl oidc-login` закрывается exec-плагинами (§5.2), иное — отдельная задача;
+- где Prometheus и как до него добраться namespace-пользователю;
+- объекты состояния платформы и операторов — для обзора и правил уровня кластера;
+- мультитенантность (что заменяет проекты OpenShift) и serverless (если это Knative — Knative Service как вид
+  workload'а);
+- ingress-классы и service mesh (в том числе Platform V Synapse Service Mesh) — что показывать в «Сети».
+
+#### Кандидаты после MVP
+
+Адаптер появляется, когда есть стенд и спрос; до этого платформа работает на общем уровне.
+
+| Платформа | Признак | Что даст адаптер |
+|---|---|---|
+| Deckhouse (Флант) | `deckhouse.io` | автопоиск Prometheus, правила по `NodeGroup`, `ModuleConfig`, `DeckhouseRelease` |
+| Rancher (SUSE) | `*.cattle.io` | состояние кластера в Rancher, проекты Rancher как группы namespace |
+
 ---
 
 ## 5. Подключения
@@ -169,9 +248,10 @@ crates/glafira-mcp-openshift — инструменты, типы ответов
 
 - имя, цвет, **окружение** (`local` / `dev` / `test` / `stage` / `prod`), флаг **только чтение**, папка и порядок;
   новый профиль с окружением `prod` по умолчанию «только чтение»;
-- **адрес API-сервера** (`https://api.<cluster>:6443`);
+- **адрес API-сервера** (`https://api.<cluster>:6443`); допускается путь — например, прокси Rancher
+  `https://rancher.example.com/k8s/clusters/c-xxxxx`;
 - **аутентификация** — §5.2; секреты (токен, ключ клиентского сертификата, токен Prometheus) — только в keychain
-  под ключом `glafira-openshift/<connection-id>/<field>`;
+  под ключом `glafira-kubernetes/<connection-id>/<field>`;
 - **CA:** системные корни, файл или PEM; `insecure-skip-tls-verify` — с постоянным предупреждением в форме и в обзоре,
   запрещается политикой `allowInsecureTls = false`;
 - **прокси:** системный (`HTTPS_PROXY` / `NO_PROXY`), свой URL или без прокси;
@@ -194,22 +274,55 @@ crates/glafira-mcp-openshift — инструменты, типы ответов
 | **Токен** | `sha256~…` (OAuth OpenShift) или токен ServiceAccount | заголовок `Authorization: Bearer`; в логах маскируется |
 | **Вход через браузер** | — | discovery `GET <api>/.well-known/oauth-authorization-server` → Authorization Code + PKCE (S256) с OAuthClient `openshift-cli-client` и loopback-redirect `http://127.0.0.1:<случайный порт>/callback` (как `oc login --web`); ожидание до 5 мин, отмена — `cancel_oauth_login`. Если клиента нет или он отклоняет redirect — фолбэк: открыть `/oauth/token/request` в системном браузере, пользователь вставляет токен |
 | **Клиентский сертификат** | сертификат + ключ PEM (например, kubeconfig установщика) | ключ — в keychain |
+| **Exec-плагин** | команда, аргументы и переменные окружения (обычно из kubeconfig) | только из списка разрешённых (ниже); Glafira запускает команду напрямую, без оболочки, с таймаутом и отменой, и держит учётные данные до `expirationTimestamp` (не через `kube`: там запуск блокирующий, без таймаута, а текст ошибки содержит переменные окружения) |
 | **Импорт kubeconfig** | файл (по умолчанию `~/.kube/config` и `$KUBECONFIG`), выбор контекстов | §5.5 |
+
+**Exec-плагины.** Список разрешённых — константа модуля `auth/exec.rs`; команда сверяется по имени исполняемого файла
+и первым позиционным аргументам (ведущие ключи `--ключ значение` пропускаются: `aws eks update-kubeconfig` пишет
+`--region` перед `eks get-token`):
+
+| Команда | Аргументы | Для чего |
+|---|---|---|
+| `aws` | `eks get-token …` | EKS |
+| `aws-iam-authenticator` | `token …` | EKS, старые kubeconfig |
+| `gke-gcloud-auth-plugin` | любые | GKE |
+| `kubelogin` | `get-token …` | AKS (Azure kubelogin) и OIDC (int128/kubelogin) |
+| `kubectl` | `oidc-login get-token …` | OIDC: Keycloak, Dex (в том числе Deckhouse) |
+| `oc` | `get-token …` | OpenShift с внешним OIDC (ROSA HCP с external auth) |
+| `yc` | `k8s create-token …` | Yandex Managed Kubernetes |
+| `rancher` | `token …` | Rancher без генерации токенов в kubeconfig |
+
+- При импорте и сохранении профиля команда разрешается в абсолютный путь: PATH оболочки входа пользователя и
+  стандартные каталоги (`/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`; на Windows — PATH и `%LOCALAPPDATA%`).
+  Человек видит полную строку запуска (путь, аргументы, переменные окружения; значения переменных с именами, похожими
+  на секреты, скрыты) и подтверждает её. Подтверждённая строка хранится в профиле (отпечаток SHA-256); её изменение
+  требует нового подтверждения. Подтверждение принимается только от формы и диалога импорта kubeconfig, не из самого
+  профиля. В форме путь к команде ищет кнопка «Найти» (`resolve_exec_command`).
+- `interactiveMode: Always` не поддерживается — у приложения нет терминала. Плагины, которые открывают браузер
+  (`kubectl oidc-login`, `kubelogin`), работают; ожидание — до 5 мин, отмена — как у входа через браузер.
+- Политика `allowExecAuth = false` запрещает импорт и подключение таких профилей с ошибкой «запрещено вашей
+  организацией».
+- Строка запуска входит в экспорт профилей без подтверждения и без значений переменных, похожих на секреты; при импорте
+  файла она подтверждается заново.
 
 - **Истечение сессии:** ответ 401 переводит подключение в статус «Сессия истекла» (`SESSION_EXPIRED`) с кнопкой
   «Войти снова» (браузер) или «Вставить токен»; открытые вкладки остаются и перечитываются после входа.
 - **Срок токена** показывается в обзоре подключения, если его можно прочитать через `useroauthaccesstokens`
   (`oauth.openshift.io/v1`); за 1 час до истечения — ненавязчивое предупреждение.
-- **Не поддерживаются в MVP:** `exec`- и `auth-provider`-плагины kubeconfig (запускают произвольные команды), логин
-  и пароль через `openshift-challenging-client`, внешний OIDC без OAuth-сервера OpenShift (ROSA HCP с external auth).
+- **Платформа:** вход через браузер — только OAuth-сервер OpenShift. На других платформах способ в форме доступен,
+  но без метаданных OAuth завершается `AUTH_FAILED` с подсказкой: токен, kubeconfig или exec-плагин. «Войти снова»
+  через браузер и срок токена — только у `openshift`; у exec-плагина «Войти снова» запускает плагин повторно.
+- **Не поддерживаются в MVP:** `auth-provider`-плагины kubeconfig (устаревший механизм), exec-плагины вне списка
+  разрешённых, логин и пароль через `openshift-challenging-client`.
 
 ### 5.3 Проверка подключения
 
 `test_connection` идёт по шагам и показывает, на каком шаге ошибка, с подсказкой:
-1. DNS / TCP до API-сервера (с учётом прокси);
+1. DNS / TCP до API-сервера (с учётом прокси); у exec-плагина после него — запуск плагина (шаг `exec`);
 2. TLS: цепочка, имя хоста, срок сертификата («сертификат подписан неизвестным CA — укажите CA кластера»);
 3. аутентификация: `SelfSubjectReview` (`authentication.k8s.io/v1`), имя пользователя и группы;
-4. discovery: признак OpenShift, версия (`ClusterVersion`, если читается, иначе `/version`);
+4. discovery: платформа и дистрибутив (§4.3), версия (`ClusterVersion`, если читается, иначе `/version`), найдены ли
+   группы OpenShift и Gateway API;
 5. проекты: число доступных;
 6. метрики: какой источник выбран бы в режиме `auto` и почему отвергнуты остальные (§7.1).
 
@@ -225,9 +338,10 @@ crates/glafira-mcp-openshift — инструменты, типы ответов
 ### 5.5 Импорт kubeconfig, папки, экспорт
 
 - **Импорт kubeconfig:** `preview_kubeconfig_import(path)` разбирает файл и показывает контексты: кластер, пользователь,
-  namespace, способ аутентификации, поддерживается ли он (с причиной, если нет), есть ли уже такой профиль (совпадение
-  адреса API и пользователя). `apply_kubeconfig_import(path, contexts, targetFolderId?)` создаёт профили; токены и ключи
-  уходят в keychain; namespace контекста становится избранным проектом; окружение — `dev`, его выбирает человек.
+  namespace, способ аутентификации, поддерживается ли он (с причиной, если нет; для exec-плагина — строка запуска
+  на подтверждение, §5.2), есть ли уже такой профиль (совпадение имени и адреса API: имени пользователя профиль
+  не хранит). `apply_kubeconfig_import(path, contexts, targetFolderId?)` создаёт профили; токены и ключи уходят
+  в keychain; namespace контекста становится избранным проектом; окружение — `dev`, его выбирает человек.
   Связи с файлом нет: данные копируются в момент импорта.
 - **Папки, экспорт и импорт профилей** — как в Kafka-версии: вложенные папки, перетаскивание, фильтр, экспорт дерева
   или папки без секретов (флаги «нужен токен» / «нужен ключ»), импорт с предпросмотром и слиянием.
@@ -249,10 +363,14 @@ crates/glafira-mcp-openshift — инструменты, типы ответов
 
 ### 6.2 Обзор кластера
 
-- Версия, канал и число доступных обновлений, условия `ClusterVersion` (`Failing`, `Progressing`), платформа
-  (`Infrastructure`), адрес консоли.
-- Ноды: готовые / всего по ролям; ClusterOperators: список `Degraded` / `Unavailable` / `Progressing`;
-  MachineConfigPools: деградировавшие и обновляющиеся.
+- Платформа, дистрибутив и версия (§4.3); состояние API-сервера по `/readyz?verbose` (по умолчанию читается любым
+  пользователем: роль `system:public-info-viewer`).
+- Ноды: готовые / всего по ролям; классы Ingress (IngressClass, какой по умолчанию) и Gateway (GatewayClass), если
+  читаются.
+- `openshift`: канал и число доступных обновлений, условия `ClusterVersion` (`Failing`, `Progressing`), инфраструктура
+  (`Infrastructure`: AWS, vSphere, bare metal…), адрес консоли; ClusterOperators: список `Degraded` / `Unavailable` /
+  `Progressing`; MachineConfigPools: деградировавшие и обновляющиеся.
+- `dropapp`: состояние компонентов платформы — состав уточняется на этапе O5.
 - Без прав — то, что доступно (`/version`, число проектов), и пояснение «Остальное скрыто правами».
 - Кнопка «Проверить» и строка последней проверки (§8).
 
@@ -265,8 +383,12 @@ crates/glafira-mcp-openshift — инструменты, типы ответов
   образы, возраст, значок замечаний; фильтр по виду и имени;
 - **Pods** — имя, статус (с причиной ожидания или завершения), готовность контейнеров, рестарты, нода, возраст, QoS;
   фильтр «только проблемные»;
-- **Сеть** — Services (тип, порты, готовые endpoints по EndpointSlices), Routes (хост, путь, TLS-терминация,
-  `Admitted`, срок встроенного сертификата);
+- **Сеть** — Services (тип, порты, готовые endpoints по EndpointSlices); Routes (хост, путь, TLS-терминация,
+  `Admitted`, срок встроенного сертификата); Ingress (класс, хосты и пути → Service и порт, TLS — хосты и имя
+  Secret, адрес из `status.loadBalancer`; на OpenShift — созданные из него Routes); HTTPRoute и GRPCRoute (хосты,
+  родительские Gateway, правила → бэкенды, условия `Accepted` и `ResolvedRefs` по каждому родителю); Gateway проекта
+  (класс, listeners, адреса, `Programmed`). Каждый вид — только если есть его группа API (§4.3); экспериментальные
+  TLSRoute, TCPRoute и UDPRoute в MVP не показываются;
 - **Конфигурация** — ConfigMaps (ключи; значения — по щелчку), Secrets (имя, тип, ключи; значения не показываются);
 - **Хранилище** — PVC: статус, класс, ёмкость, режим доступа, кем смонтирован;
 - **События** — таблица с фильтрами по типу, причине и объекту;
@@ -319,11 +441,20 @@ crates/glafira-mcp-openshift — инструменты, типы ответов
 Режим `auto` выбирает первый работающий источник; выбор, окно данных и причина отказа от остальных всегда видны
 в интерфейсе и в ответах MCP.
 
-1. **Thanos Querier OpenShift.** Адрес: маршрут `thanos-querier` в `openshift-monitoring`, если его можно прочитать;
-   иначе выводится из домена приложений (`ingresses.config.openshift.io/cluster`, а если он не читается — из хоста
-   OAuth-сервера `oauth-openshift.<apps-домен>`). Проверка доступа — `GET /api/v1/query?query=vector(1)` с токеном
-   подключения: 200 — источник подходит, 401/403 — «нет прав на мониторинг кластера (нужна роль
-   `cluster-monitoring-view` или аналог)». История — до срока хранения (в OpenShift по умолчанию 15 дней).
+1. **Автопоиск платформы** (§4.3):
+   - `openshift` — **Thanos Querier.** Адрес: маршрут `thanos-querier` в `openshift-monitoring`, если его можно прочитать;
+     иначе выводится из домена приложений (`ingresses.config.openshift.io/cluster`, а если он не читается — из хоста
+     OAuth-сервера `oauth-openshift.<apps-домен>`). Проверка доступа — `GET /api/v1/query?query=vector(1)` с токеном
+     подключения: 200 — источник подходит, 401/403 — «нет прав на мониторинг кластера (нужна роль
+     `cluster-monitoring-view` или аналог)». История — до срока хранения (в OpenShift по умолчанию 15 дней).
+   - `kubernetes` — **Prometheus через прокси API-сервера**
+     (`GET <api>/api/v1/namespaces/<ns>/services/<схема>:<сервис>:<порт>/proxy/api/v1/query`) по списку известных
+     сервисов — константа модуля `metrics/discovery.rs`: `cattle-monitoring-system/rancher-monitoring-prometheus:9090`
+     (Rancher), `monitoring/prometheus-k8s:9090` (kube-prometheus), `prometheus-operated:9090` в `monitoring` и
+     `observability` (Prometheus Operator); кандидаты дистрибутива проверяются первыми. Нужно право
+     `get services/proxy` в namespace сервиса — обычно оно есть только у администраторов; 403 — «нет прав на прокси
+     к Prometheus». `ReadClient` пропускает через прокси только GET к `/api/v1/query` и `/api/v1/query_range`;
+   - `dropapp` — уточняется на этапе O5.
 2. **Свой URL Thanos или Prometheus** из профиля (например, tenancy-endpoint, открытый администраторами) с выбранной
    авторизацией.
 3. **`metrics.k8s.io`** (`PodMetrics`): только текущее значение; обычно доступно с ролью `view`.
@@ -427,8 +558,8 @@ request и limit, пометки и нарушения ограничений; �
 - скрытие находки для объекта, файл `health/<id>.json`, вкладка «Замечания», значки в дереве и списках, блоки на
   экранах объектов, событие `health://changed` — как в Kafka G2/G3.
 
-Виды объектов (`target.kind`): `cluster`, `node`, `project`, `workload`, `pod`, `service`, `route`, `pvc`, `hpa`,
-`quota`.
+Виды объектов (`target.kind`): `cluster`, `node`, `project`, `workload`, `pod`, `service`, `route`, `ingress`,
+`httproute`, `grpcroute`, `gateway`, `pvc`, `hpa`, `quota`.
 
 ### 8.2 Каталог правил
 
@@ -436,6 +567,7 @@ request и limit, пометки и нарушения ограничений; �
 
 | `ruleId` | Объект | Условие | prod | stage | прочие |
 |---|---|---|---|---|---|
+| `cluster.apiNotReady` | cluster | `/readyz?verbose` отвечает не 200 или в нём есть непройденные проверки (`[-]…`); список (до 20) | К | К | П |
 | `cluster.operatorDegraded` | cluster | у ClusterOperator `Degraded=True` или `Available=False`; список (до 20) | К | К | П |
 | `cluster.updateFailing` | cluster | у ClusterVersion `Failing=True` | К | К | П |
 | `cluster.mcpDegraded` | cluster | у MachineConfigPool `Degraded=True`; список | К | К | П |
@@ -459,9 +591,15 @@ request и limit, пометки и нарушения ограничений; �
 | `pvc.pending` | pvc | `Pending` дольше 5 мин или `Lost` | К | П | П |
 | `hpa.atMax` | hpa | `ScalingLimited=True` с причиной `TooManyReplicas` | П | П | И |
 | `hpa.unableToScale` | hpa | `AbleToScale=False` или `ScalingActive=False` (например, нет requests для метрики) | П | П | И |
-| `service.noEndpoints` | service | Service с селектором без готовых endpoints | П | П | И |
+| `service.noEndpoints` | service | Service с селектором без готовых endpoints; в `params` — Route, Ingress, HTTPRoute и GRPCRoute, которые на него ссылаются | П | П | И |
 | `route.notAdmitted` | route | нет статуса роутера или `Admitted=False` | К | П | П |
 | `route.certExpiring` | route | встроенный сертификат Route истекает меньше чем через 30 дней; истёк — строгость К / К / П | П | П | И |
+| `ingress.classMissing` | ingress | `spec.ingressClassName` (или аннотация `kubernetes.io/ingress.class`) ссылается на несуществующий IngressClass, либо класс не указан и IngressClass по умолчанию нет | К | П | П |
+| `ingress.backendMissing` | ingress | бэкенд правила или `defaultBackend` ссылается на Service или его порт, которых нет в проекте; список (до 20) | К | П | П |
+| `ingress.tlsSecretMissing` | ingress | Secret из `spec.tls[].secretName` не найден по имени дольше 5 мин после создания Ingress (cert-manager создаёт Secret не сразу); значения Secret не читаются | К | П | П |
+| `gatewayRoute.notAccepted` | httproute / grpcroute | у родителя в `status.parents` условие `Accepted=False` с причиной (`NotAllowedByListeners`, `NoMatchingListenerHostname`…) или статуса родителя нет дольше 5 мин | К | П | П |
+| `gatewayRoute.refsUnresolved` | httproute / grpcroute | условие `ResolvedRefs=False`: `BackendNotFound`, `RefNotPermitted` (нет ReferenceGrant), `InvalidKind` | К | П | П |
+| `gateway.notProgrammed` | gateway | Gateway, доступный на чтение, с `Accepted=False` или `Programmed=False` дольше 5 мин | К | К | П |
 | `resources.cpuThrottled` | workload | троттлинг контейнера с CPU limit > 25 % в среднем за 24 ч | П | П | И |
 | `resources.memoryNearLimit` | workload | max памяти контейнера за 24 ч ≥ 90 % memory-limit | П | П | И |
 | `resources.overProvisioned` | workload | CPU request ≥ 3 × p95 за 24 ч и разница ≥ 0,5 ядра на под, или memory request ≥ 2 × max за 24 ч и разница ≥ 512Mi на под | И | И | И |
@@ -471,7 +609,14 @@ request и limit, пометки и нарушения ограничений; �
 - правила `resources.*` работают, только если есть источник истории метрик (§7.1); проверка использует окно 24 ч и
   агрегирующие instant-запросы по namespace (не больше 6 запросов на проект). Подробный анализ за 7 дней — на вкладке
   «Ресурсы». Без источника — пометка в `check.partial`;
-- правила `cluster.*` и `node.*` требуют прав уровня кластера; без них — пометка в `check.partial`, а не находка;
+- правила `cluster.*` и `node.*` требуют прав уровня кластера (кроме `cluster.apiNotReady`); без них — пометка
+  в `check.partial`, а не находка. `cluster.operatorDegraded`, `cluster.updateFailing` и `cluster.mcpDegraded` — только
+  у платформы `openshift`; правила уровня кластера для `dropapp` добавляет этап O5;
+- правила Route, Ingress и Gateway API работают, только если есть соответствующая группа API. Ingress, из которого
+  OpenShift создал Routes (Route с `ownerReference` на Ingress), проверяется правилами `route.*` по этим Routes,
+  а `ingress.classMissing` к нему не применяется. Пустой `status.loadBalancer` находкой не считается: не все
+  контроллеры его заполняют. `ingress.classMissing` требует чтения `ingressclasses`, `ingress.tlsSecretMissing` —
+  права `list secrets` в проекте; без прав — пометка в `check.partial`;
 - `route.certExpiring` проверяет только сертификаты, заданные в `spec.tls.certificate` самого Route (сертификат
   роутера по умолчанию не читается);
 - тексты для человека — ключи `health.rules.<ruleId>.title|details|fix` во всех словарях; для LLM — короткие
@@ -500,7 +645,7 @@ request и limit, пометки и нарушения ограничений; �
    - профиль «только чтение» → `READ_ONLY` (никакое подтверждение не помогает);
    - окружение `prod` и `confirm` ≠ имя подключения → `CONFIRMATION_REQUIRED`;
    - `deletePod` пода без контроллера — дополнительно ввод имени пода.
-3. Запрос с `fieldManager=glafira-openshift` и `expectedResourceVersion` из предпросмотра; объект изменился —
+3. Запрос с `fieldManager=glafira-kubernetes` и `expectedResourceVersion` из предпросмотра; объект изменился —
    `CONFLICT` с кнопкой «Обновить и повторить».
 4. Запись в журнал приложения (подключение, вид, объект, исход; без значений env и конфигурации).
 5. Если передан `proposalId` — отметка «применено» (§10.5).
@@ -514,14 +659,14 @@ request и limit, пометки и нарушения ограничений; �
 ### 10.1 Транспорт, клиенты, интерфейс
 
 Переносятся из Kafka G1 без изменения поведения:
-- stdio-шим — режим того же бинаря: `glafira-openshift mcp`; соединяется с запущенной Glafira через локальный сокет
+- stdio-шим — режим того же бинаря: `glafira-kubernetes mcp`; соединяется с запущенной Glafira через локальный сокет
   (`<каталог данных>/mcp.sock`, при длинном пути — `$XDG_RUNTIME_DIR` или временный каталог) или named pipe
-  `\\.\pipe\glafira-openshift-mcp-<16 hex>` на Windows; запускает Glafira, если она не открыта, и ждёт до 30 с;
+  `\\.\pipe\glafira-kubernetes-mcp-<16 hex>` на Windows; запускает Glafira, если она не открыта, и ждёт до 30 с;
 - рукопожатие `GLAFIRA-MCP/1 <token>` с токеном из `mcp.json` (0600, существует, пока сервер работает);
 - подтверждение каждого нового клиента диалогом, список подтверждённых, отзыв, отключение сессий;
 - «Настройки» → «LLM-ассистенты (MCP)»: выключатель (по умолчанию выключен), статус, фрагменты конфига для Claude
-  Desktop (`"glafira-openshift": {"command": "<путь>", "args": ["mcp"]}`), Claude Code
-  (`claude mcp add glafira-openshift -- "<путь>" mcp`) и любого stdio-клиента, подтверждённые клиенты, сессии, журнал;
+  Desktop (`"glafira-kubernetes": {"command": "<путь>", "args": ["mcp"]}`), Claude Code
+  (`claude mcp add glafira-kubernetes -- "<путь>" mcp`) и любого stdio-клиента, подтверждённые клиенты, сессии, журнал;
 - индикатор «LLM: <клиент>» внизу боковой панели, значок «LLM» у подключений с `llmAccess ≠ off`.
 
 ### 10.2 Доступ модели
@@ -544,7 +689,7 @@ request и limit, пометки и нарушения ограничений; �
 
 ### 10.3 Маскировка
 
-Чистые функции крейта `glafira-mcp-openshift/src/mask.rs`, применяются к ответу до его сборки:
+Чистые функции крейта `glafira-mcp-kubernetes/src/mask.rs`, применяются к ответу до его сборки:
 - **имена полей** из списка подключения (по умолчанию: `password`, `passwd`, `secret`, `token`, `apikey`, `api_key`,
   `api-key`, `credentials`, `private`, `authorization`, без учёта регистра): значение env, ключа ConfigMap,
   аннотации, флага `--name=value` в `command`/`args` и пары `name=value` / `"name": value` в строке лога;
@@ -562,8 +707,8 @@ request и limit, пометки и нарушения ограничений; �
 
 | Инструмент | Уровень | Параметры | Ответ |
 |---|---|---|---|
-| `list_connections` | metadata | — | `{ connections [{ id, name, environment, folderPath, readOnly, llmAccess, isOpenShift }] }` |
-| `get_cluster_overview` | metadata | `connectionId` | версия, канал, платформа, ноды (готово / всего по ролям), ClusterOperators не в норме, MachineConfigPools не в норме, `capabilities` (что пользователю разрешено читать) |
+| `list_connections` | metadata | — | `{ connections [{ id, name, environment, folderPath, readOnly, llmAccess, platform, distribution? }] }` |
+| `get_cluster_overview` | metadata | `connectionId` | платформа, дистрибутив и версия (§4.3), состояние `/readyz`; для `openshift` — канал, инфраструктура, ноды (готово / всего по ролям), ClusterOperators не в норме, MachineConfigPools не в норме, `capabilities` (что пользователю разрешено читать) |
 | `list_projects` | metadata | `connectionId`, `filter?`, `offset`, `limit` (≤ 500) | `{ total, items [{ name, displayName?, phase }], nextOffset? }` — только из `llmNamespaces` |
 | `list_nodes` | metadata | `connectionId`, `filter?`, `role?` | `{ items [{ name, roles, ready, conditions, unschedulable, allocatable, requested }] }` |
 | `describe_node` | metadata | `connectionId`, `name` | условия, taints, allocatable, сумма requests и limits подов, число подов, версия kubelet |
@@ -573,7 +718,7 @@ request и limit, пометки и нарушения ограничений; �
 | `describe_pod` | metadata | `connectionId`, `namespace`, `name` | контейнеры (state, lastState с причиной и exit code, рестарты, ресурсы, пробы), условия, QoS, нода, владелец, последние события |
 | `list_events` | metadata | `connectionId`, `namespace`, `object? { kind, name }`, `type?` (`Warning`), `sinceSeconds = 3600` (≤ 86400), `limit` | `{ items [{ lastSeen, type, reason, object, message, count }], truncated }` |
 | `get_quotas` | metadata | `connectionId`, `namespace` | ResourceQuota (использовано / лимит), LimitRange |
-| `get_network` | metadata | `connectionId`, `namespace`, `filter?` | Services (тип, порты, готовые endpoints), Routes (хост, путь, сервис, TLS-терминация, `admitted`, срок встроенного сертификата) |
+| `get_network` | metadata | `connectionId`, `namespace`, `filter?` | Services (тип, порты, готовые endpoints), Routes (хост, путь, сервис, TLS-терминация, `admitted`, срок встроенного сертификата), Ingress (класс, хосты, пути → сервис и порт, TLS-хосты и имя Secret, адрес), HTTPRoute и GRPCRoute (хосты, родители с условиями, бэкенды), Gateway проекта (класс, listeners, `programmed`); виды без группы API в кластере не возвращаются |
 | `get_resource_usage` | metadata | `connectionId`, `namespace`, `workload { kind, name }`, `windowDays = 7` (1–30) | статистика §7.2 по контейнерам, ряды (≤ 200 точек), источник, окно, покрытие |
 | `recommend_resources` | metadata | `connectionId`, `namespace`, `workload`, `windowDays = 7` | результат движка §7.3 |
 | `observe_workload` | metadata | `connectionId`, `namespace`, `workload`, `durationSeconds = 30` (10–50) | хронология: `replicasChanged`, `podAdded`, `podRemoved`, `podReady`, `podNotReady`, `containerRestarted { reason, exitCode }`, `rolloutProgress`, `warningEvent { reason, message }`; не больше 500 событий; `summary` |
@@ -616,7 +761,8 @@ request и limit, пометки и нарушения ограничений; �
 ### 10.6 Инструкции сервера
 
 `instructions` при `initialize` (по-английски), по образцу Kafka-версии:
-- Glafira — шлюз к кластерам OpenShift, которые пользователь явно разрешил; через него ничего в кластере не меняется;
+- Glafira — шлюз к кластерам Kubernetes (в том числе OpenShift и DropApp), которые пользователь явно разрешил;
+  через него ничего в кластере не меняется;
   нужные изменения предлагаются `propose_change`, человек применяет их сам; решение смотреть в `list_proposals`;
   при `readOnly: true` попросить снять read-only, а не искать обход; удаление объектов и другие операции вне четырёх
   видов — только описать словами;
@@ -648,7 +794,8 @@ request и limit, пометки и нарушения ограничений; �
 - раскладка: дерево слева (260 px), рабочая область с вкладками справа; вкладки переставляются и закрываются;
 - полоса окружения сверху рабочей области и бейдж окружения во вкладке (`PROD` — красный), замок read-only;
 - статус подключения в дереве: подключено / подключение / сессия истекла / ошибка;
-- подсказки «?» (`Hint`) у непонятных полей: окружение, способы входа, `insecure-skip-tls-verify`, источник метрик,
+- подсказки «?» (`Hint`) у непонятных полей: окружение, способы входа, строка запуска exec-плагина, платформа и
+  дистрибутив, `insecure-skip-tls-verify`, источник метрик,
   окно анализа, уверенность, каждый показатель рекомендации, `fieldManager`, dry-run, уровни доступа LLM, проекты
   для LLM, маскировка, подтверждение для prod;
 - справка: вкладка «Справка», F1 открывает главу текущего экрана, меню Help на macOS;
@@ -673,7 +820,9 @@ request и limit, пометки и нарушения ограничений; �
   - `mcpLogsEnabled` (bool, по умолчанию `true`) — §10.2;
   - `allowInsecureTls` (bool, по умолчанию `true`) — при `false` нельзя сохранить или импортировать подключение
     с `insecure-skip-tls-verify`, существующие такие подключения не подключаются с ошибкой «запрещено вашей
-    организацией».
+    организацией»;
+  - `allowExecAuth` (bool, по умолчанию `true`) — при `false` нельзя сохранить или импортировать подключение
+    с exec-плагином (§5.2), существующие такие подключения не подключаются с той же ошибкой.
   Включить что-либо за пользователя политика не может. Примеры — `docs/admin/policy.json`, `.mobileconfig`, `.reg`.
 
 ---
@@ -681,14 +830,14 @@ request и limit, пометки и нарушения ограничений; �
 ## 13. Хранение
 
 ```
-<app_data>/                      # macOS: ~/Library/Application Support/io.github.vvnovg.glafira.openshift/
+<app_data>/                      # macOS: ~/Library/Application Support/io.github.vvnovg.glafira.kubernetes/
   connections.json               # профили и папки без секретов, schemaVersion
   settings.json                  # язык, тема, MCP (enabled, approvedClients), открытые вкладки, окна анализа по умолчанию
   health/<connectionId>.json     # последняя проверка, скрытые находки, замечания и предложения LLM
   mcp.json  mcp.sock             # пока работает MCP-сервер
   mcp-audit.jsonl (+ .1.jsonl)   # журнал MCP
   logs/                          # журнал приложения (ротация, 7 дней)
-keychain: сервис glafira-openshift, ключи <connection-id>/<field>
+keychain: сервис glafira-kubernetes, ключи <connection-id>/<field>
 ```
 
 - Файлы 0600, каталоги 0700 на macOS и Linux; атомарная запись; повреждённый файл переименовывается в
@@ -706,7 +855,7 @@ keychain: сервис glafira-openshift, ключи <connection-id>/<field>
 | Проект с 2000 подов | список < 2 с, плавный скролл |
 | Логи | ≥ 5000 строк/с в интерфейсе без фризов (≤ 200 байт на строку) |
 | Память | < 500 МБ при 100 000 строк логов в буфере |
-| Анализ ресурсов workload'а за 7 дней | < 5 с при доступном Thanos |
+| Анализ ресурсов workload'а за 7 дней | < 5 с при доступном Thanos или Prometheus |
 | Размер установщика | < 30 МБ |
 | Таймауты | ни одна операция не блокирует UI; у всех сетевых операций есть таймаут и отмена |
 
@@ -721,7 +870,7 @@ keychain: сервис glafira-openshift, ключи <connection-id>/<field>
 |---|---|---|
 | `CONNECTION_FAILED` | API недоступен, DNS, прокси | баннер с «Повторить» |
 | `TLS_ERROR` | неизвестный CA, имя хоста, истёкший сертификат | подсказка по причине |
-| `AUTH_FAILED` | токен отклонён при первом входе, ошибка OAuth | ссылка «Изменить подключение» |
+| `AUTH_FAILED` | токен отклонён при первом входе, ошибка OAuth или exec-плагина (код выхода, stderr без секретов) | ссылка «Изменить подключение» |
 | `SESSION_EXPIRED` | 401 при работающем подключении | «Войти снова» / «Вставить токен» |
 | `FORBIDDEN` | 403: в `params` — verb, resource, namespace | объяснение «нет прав: …», действие неактивно |
 | `NOT_FOUND` | объект удалён | закрыть или обновить вкладку |
@@ -741,16 +890,16 @@ keychain: сервис glafira-openshift, ключи <connection-id>/<field>
 
 ## 16. Локализация и документация
 
-- Все строки интерфейса — ключами словарей с первого этапа; O1–O4 ведут `en` и `ru`, O5 добавляет остальные 10
+- Все строки интерфейса — ключами словарей с первого этапа; O1–O5 ведут `en` и `ru`, O6 добавляет остальные 10
   языков Kafka-версии (de, fr, es, it, pl, pt-BR, zh-CN, zh-TW, ja, ko); `pnpm i18n:check --require-all-languages`
-  обязателен с O5.
+  обязателен с O6.
 - Глоссарий (`docs/i18n/glossary.md`) дополняется терминами Kubernetes и OpenShift: названия видов ресурсов (Pod,
-  Deployment, Route, ConfigMap, Secret, HPA…) и `request`/`limit` не переводятся; «проект», «под», «находка»,
-  «замечание», «предложение», «уверенность», «троттлинг» — по глоссарию.
+  Deployment, Route, Ingress, Gateway, HTTPRoute, ConfigMap, Secret, HPA…) и `request`/`limit` не переводятся;
+  «проект», «под», «находка», «замечание», «предложение», «уверенность», «троттлинг» — по глоссарию.
 - Тексты для LLM (описания инструментов, `instructions`, ошибки инструментов) не локализуются.
 - **Руководство** — встроенная справка и публикация в репозитории релизов, 10 глав: `getting-started`, `connections`,
   `projects-workloads`, `pods-logs`, `resources`, `changes`, `health-check`, `llm-mcp`, `updates`, `troubleshooting`.
-  Каждый этап пишет свои разделы на en и ru, O5 переводит на остальные языки. Метки `[[ui:ключ]]` и якоря — как
+  Каждый этап пишет свои разделы на en и ru, O6 переводит на остальные языки. Метки `[[ui:ключ]]` и якоря — как
   в Kafka-версии.
 - README (для разработчика), `docs/admin.md` (политика), `CHANGELOG.md`, чек-листы смоука `docs/smoke/oN.md`.
 
@@ -762,12 +911,18 @@ keychain: сервис glafira-openshift, ключи <connection-id>/<field>
   разбор OAuth-метаданных, `guard`; правила — табличные тесты на снимках-фикстурах во всех пяти окружениях, матрица
   строгости сверяется с таблицей §8.2, граничные значения (ровно 90 %, 5 мин, 24 ч, 30 дней); движок рекомендаций —
   табличные тесты (OOM, троттлинг, отсутствие CPU limit, `LimitRange`, квота, HPA, округления, уверенность);
-  PromQL-шаблоны и экранирование; diff предпросмотра; хранилище замечаний и предложений; маскировка.
+  PromQL-шаблоны и экранирование; diff предпросмотра; хранилище замечаний и предложений; маскировка; определение
+  платформы и дистрибутива — табличные тесты на снимках discovery и `/version` (OCP, OKD, Kubernetes, Kubernetes
+  с CRD `Route`, Gateway API, EKS, GKE, k3s, Rancher); список разрешённых exec-команд (имя, первые аргументы, новое
+  подтверждение при смене строки запуска); адрес API с путём (прокси Rancher); правила Ingress и Gateway API, включая
+  исключение для Ingress с созданными из него Routes.
 - **Интеграция** (`src-tauri/tests/`, включается переменными `GO_IT_KUBECONFIG` и `GO_IT_THANOS_URL`; без них тест
   пропускается): `kind` с установленными CRD OpenShift (`Route`, `ClusterOperator`, `ClusterVersion`,
   `MachineConfigPool`, `DeploymentConfig`) и kube-state-metrics; сценарии — проблемные поды (CrashLoop, ImagePull,
   OOM, Pending), проверка с окружением `prod`, применение каждого вида `Change` с dry-run и `CONFLICT`, read-only;
-  мок-HTTP Thanos с записанными ответами для источников метрик и движка.
+  мок-HTTP Thanos с записанными ответами для источников метрик и движка. Второй прогон — `kind` без CRD OpenShift,
+  с ingress-nginx, CRD Gateway API (standard channel) и kube-prometheus: платформа `kubernetes`, правила Ingress и
+  Gateway API, автопоиск Prometheus через прокси API-сервера.
 - **MCP-крейты:** фейковый `Backend`, MCP-клиент rmcp — список инструментов и аннотации, сторожок имён, уровни
   доступа (`not_allowed`, `logs_disabled`), `llmNamespaces`, маскировка в ответах, усечение до 100 КБ, лимиты,
   рукопожатие, журнал без содержимого; `tests/manifest.rs` — нет зависимости от `kube`, `k8s-openapi`, `reqwest` и
@@ -777,22 +932,24 @@ keychain: сервис glafira-openshift, ключи <connection-id>/<field>
   подтверждением, «Замечания», MCP-настройки; IPC мокается.
 - **Смоук** `docs/smoke/oN.md` на каждый этап: OpenShift Local (CRC) или dev-кластер — вход через браузер, токен,
   kubeconfig; namespace-пользователь без прав на мониторинг (метрики через `metrics.k8s.io`); пользователь с
-  `cluster-monitoring-view` (Thanos); Claude Desktop и Claude Code; Windows и Linux AppImage.
+  `cluster-monitoring-view` (Thanos); кластер Kubernetes без OpenShift (kind или k3s) с Ingress и Gateway API, вход
+  через exec-плагин (`kubectl oidc-login` или облачный); с O5 — кластер DropApp; Claude Desktop и Claude Code; Windows
+  и Linux AppImage.
 
 ---
 
 ## 18. Сборка и дистрибуция
 
-- `productName` «Glafira for OpenShift», `mainBinaryName` `glafira-openshift`, `identifier`
-  `io.github.vvnovg.glafira.openshift`, версия с `0.1.0`.
+- `productName` «Glafira for Kubernetes», `mainBinaryName` `glafira-kubernetes`, `identifier`
+  `io.github.vvnovg.glafira.kubernetes`, версия с `0.1.0`.
 - GitHub Actions по образцу Kafka-версии: матрица macOS (arm64, x64), Windows, Linux; без librdkafka и cmake;
   `cargo deny`, `pnpm i18n:check`, `scripts/check-dist-compat.mjs`, `THIRD_PARTY.md`.
 - Подписание и нотаризация на macOS, Windows — без подписи до появления сертификата (как в Kafka-версии).
-- Автообновление — Tauri updater со своим ключом подписи; репозиторий релизов `vvnovg/glafira-openshift-releases`
+- Автообновление — Tauri updater со своим ключом подписи; репозиторий релизов `vvnovg/glafira-kubernetes-releases`
   (установщики, `latest.json`, руководство, `SUPPORT.md`).
-- Товарные знаки: README и «О программе» — «OpenShift is a trademark of Red Hat, Inc. Kubernetes is a trademark of
-  The Linux Foundation. This project is not affiliated with Red Hat or The Linux Foundation»; `TRADEMARK.md` — имя
-  Glafira и значок.
+- Товарные знаки: README и «О программе» — «Kubernetes is a registered trademark of The Linux Foundation. OpenShift
+  is a trademark of Red Hat, Inc. Platform V and DropApp are trademarks of their respective owners. This project is
+  not affiliated with The Linux Foundation, Red Hat or SberTech»; `TRADEMARK.md` — имя Glafira и значок.
 
 ---
 
@@ -802,16 +959,18 @@ keychain: сервис glafira-openshift, ключи <connection-id>/<field>
 
 | Этап | Содержимое |
 |---|---|
-| **O1. Каркас и чтение** | Новый репозиторий, перенос основы (§3) и `PORTED.md`; хранилище, keychain, настройки, политика (включая `allowInsecureTls`), журнал, словари en/ru, подсказки, справка (каркас), папки, экспорт и импорт; подключения (токен, сертификат, вход через браузер, импорт kubeconfig), проверка подключения, права; дерево, обзор кластера, проекты, workloads, поды, события, сеть, конфигурация, хранилище, квоты, YAML, логи, watch |
-| **O2. MCP-шлюз и проверка** | `glafira-mcp-core` (перенос), `glafira-mcp-openshift`; уровень `metadata`, `llmNamespaces`, маскировка `command`/`args`/аннотаций; проверка (`health/`, 27 правил без `resources.*`), вкладка «Замечания», значки и блоки; 17 инструментов (все, кроме `get_resource_usage`, `recommend_resources`, предложений и логов) |
-| **O3. Ресурсы, изменения, предложения** | Источники метрик, PromQL-шаблоны, движок рекомендаций, вкладки «Ресурсы» workload'а и проекта, графики; правила `resources.*`; изменяющие операции §9 с dry-run и guard; `get_resource_usage`, `recommend_resources`, `propose_change`, `list_proposals`, `withdraw_proposal` с заполнением форм (22 инструмента) |
+| **O1. Каркас и чтение** | Два плана. **O1a «Каркас и подключения»:** новый репозиторий, перенос основы (§3) и `PORTED.md`; хранилище, keychain, настройки, политика (включая `allowInsecureTls`), журнал, словари en/ru, подсказки, справка (главы «Начало работы» и «Подключения»), папки, экспорт и импорт; подключения (токен, сертификат, вход через браузер, exec-плагины из списка разрешённых и политика `allowExecAuth`, импорт kubeconfig, адрес API с путём), проверка подключения, права; слой платформы (`openshift`, `kubernetes`) и дистрибутив по discovery (§4.3; трейт `Platform` с адаптерами — в O1b вместе с обзором кластера); дерево, вкладка подключения (кто вошёл, платформа и дистрибутив, права), «О программе». **O1b «Чтение кластера»:** обзор кластера (включая `/readyz`, классы Ingress и Gateway), проекты, workloads, поды, события, сеть (Services, Routes, Ingress, Gateway, HTTPRoute, GRPCRoute), конфигурация, хранилище, квоты, YAML, логи, watch, срок токена |
+| **O2. MCP-шлюз и проверка** | `glafira-mcp-core` (перенос), `glafira-mcp-kubernetes`; уровень `metadata`, `llmNamespaces`, маскировка `command`/`args`/аннотаций; проверка (`health/`, 34 правила без `resources.*`, в том числе `cluster.apiNotReady`, `ingress.*`, `gatewayRoute.*`, `gateway.*`), вкладка «Замечания», значки и блоки; 17 инструментов (все, кроме `get_resource_usage`, `recommend_resources`, предложений и логов) |
+| **O3. Ресурсы, изменения, предложения** | Источники метрик (включая автопоиск Prometheus через прокси API-сервера), PromQL-шаблоны, движок рекомендаций, вкладки «Ресурсы» workload'а и проекта, графики; правила `resources.*`; изменяющие операции §9 с dry-run и guard; `get_resource_usage`, `recommend_resources`, `propose_change`, `list_proposals`, `withdraw_proposal` с заполнением форм (22 инструмента) |
 | **O4. Логи для LLM** | Уровень `logs`, маскировка логов и значений, политика `mcpLogsEnabled`, `get_pod_logs`, `search_workload_logs` (24 инструмента) |
-| **O5. Раздача** | Остальные 10 языков и глоссарий, руководство на 12 языках, `docs/admin.md` и примеры политики со всеми ключами, подписание, установщики, updater, репозиторий релизов |
+| **O5. DropApp** | Обследование живого кластера DropApp и спека этапа (§4.3); адаптер `dropapp`: признак для `detect`, вход, автопоиск метрик, обзор и правила уровня кластера, найденное по мультитенантности, serverless и сети; смоук на DropApp. Условие начала — стенд DropApp и доступ к документации; без них этап переносится, и O6 его не ждёт |
+| **O6. Раздача** | Остальные 10 языков и глоссарий, руководство на 12 языках, `docs/admin.md` и примеры политики со всеми ключами, подписание, установщики, updater, репозиторий релизов |
 
 **После MVP (кандидаты):** `query_metrics` (произвольный PromQL с принудительным ограничением по namespace), локальная
 запись образцов `metrics.k8s.io` для истории без прав на мониторинг, exec и port-forward, rollback workload'а,
 cordon/drain нод, настраиваемые коэффициенты рекомендаций, сравнение двух проектов или кластеров, просмотр сборок и
-пайплайнов, MCP prompts и resources, вынос общих крейтов Glafira в отдельный репозиторий.
+пайплайнов, MCP prompts и resources, вынос общих крейтов Glafira в отдельный репозиторий, адаптеры Deckhouse и Rancher
+(§4.3), экспериментальные ресурсы Gateway API (TLSRoute, TCPRoute, UDPRoute).
 
 ---
 
@@ -831,6 +990,11 @@ cordon/drain нод, настраиваемые коэффициенты рек�
 | Рекомендация занижает память для JVM и Go | Пометки OOM, подсказки по env, уверенность; LLM инструктирована спрашивать конфигурацию среды выполнения |
 | Расхождение общего кода с Kafka-версией | `PORTED.md` с коммитом источника, границы крейтов под будущий вынос |
 | Windows: stdio шима из GUI-бинаря | Решение Kafka-версии переносится; проверка — первая задача плана O2 |
+| Неверное определение платформы | Признаки — группы API и строка версии, а не имена namespace; объекты показываются по наличию групп API, а не по платформе; платформа видна в проверке подключения; табличные тесты на снимках discovery |
+| Документация DropApp закрыта, стенда нет | До O5 DropApp работает на общем уровне; O5 начинается с обследования живого кластера и переносится, если стенда нет |
+| Exec-плагины запускают внешние команды | Список разрешённых, абсолютный путь, подтверждение строки запуска человеком (повторно — при её изменении и при импорте файла), запуск без оболочки, политика `allowExecAuth` |
+| GUI-приложение не видит PATH оболочки (macOS) | Путь к команде exec-плагина ищется в PATH оболочки входа и стандартных каталогах при импорте и сохраняется в профиле; его можно поправить в форме |
+| Товарный знак Kubernetes в названии продукта | Форма «for Kubernetes» описывает совместимость; перед первым релизом сверить с правилами использования знаков The Linux Foundation |
 
 ---
 
