@@ -175,13 +175,21 @@ pub async fn check_cluster(
                 ),
             ));
         }
-        Err(e) if matches!(e.code, ErrorCode::SessionExpired | ErrorCode::AuthFailed) => {
-            steps.push(passed("tls", tls_ok));
-            steps.push(failed_step("auth", e));
+        // Ошибка транспорта: до ответа сервера дело не дошло, значит, не прошёл TLS (или связь).
+        Err(e)
+            if matches!(
+                e.code,
+                ErrorCode::TlsError | ErrorCode::ConnectionFailed | ErrorCode::Timeout
+            ) || (e.code == ErrorCode::Internal && e.key != "errors.k8s.unexpectedResponse") =>
+        {
+            steps.push(failed_step("tls", e));
             return false;
         }
+        // Любой ответ сервера (401, 403, 404, 400/422 или не-API страница) доказывает, что
+        // TLS-рукопожатие прошло, — виноват вход.
         Err(e) => {
-            steps.push(failed_step("tls", e));
+            steps.push(passed("tls", tls_ok));
+            steps.push(failed_step("auth", e));
             return false;
         }
     }
@@ -403,6 +411,131 @@ mod tests {
             steps[3].message.key,
             "messages.connectionTest.projectsManual"
         );
+    }
+
+    /// Шаги проверки, когда сервер отвечает `answer` на любой запрос.
+    async fn steps_for_answer(
+        answer: (u16, serde_json::Value),
+        p: &ConnectionProfile,
+    ) -> (bool, Vec<TestStep>) {
+        let (client, _server) = mock_client(move |_| answer.clone());
+        let mut steps = Vec::new();
+        let ok = check_cluster(&mut steps, &client, p).await;
+        (ok, steps)
+    }
+
+    /// Любой ответ сервера — доказательство, что TLS-рукопожатие прошло: 403 на «кто я» — это
+    /// проблема входа, а не сертификата.
+    #[tokio::test]
+    async fn forbidden_whoami_fails_auth_not_tls() {
+        let (ok, steps) = steps_for_answer(
+            status(
+                403,
+                "Forbidden",
+                r#"selfsubjectreviews.authentication.k8s.io is forbidden: User "u" cannot create resource "selfsubjectreviews" in API group "authentication.k8s.io" at the cluster scope"#,
+            ),
+            &sample_profile("a"),
+        )
+        .await;
+        assert!(!ok);
+        assert_eq!(names(&steps), [("tls", true), ("auth", false)]);
+        assert_eq!(steps[0].message.key, "messages.connectionTest.tlsOk");
+        assert_eq!(steps[1].error.as_ref().unwrap().code, ErrorCode::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn not_found_whoami_fails_auth_not_tls() {
+        // Статус API-сервера и «чужая» страница с кодом 404 (не `kind: Status`).
+        for answer in [
+            status(
+                404,
+                "NotFound",
+                "the server could not find the requested resource",
+            ),
+            (404, serde_json::json!("<html>404 page not found</html>")),
+        ] {
+            let (ok, steps) = steps_for_answer(answer, &sample_profile("a")).await;
+            assert!(!ok);
+            assert_eq!(names(&steps), [("tls", true), ("auth", false)]);
+            assert_eq!(steps[1].error.as_ref().unwrap().code, ErrorCode::NotFound);
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_request_fails_auth_not_tls() {
+        for code in [400, 422] {
+            let (ok, steps) =
+                steps_for_answer(status(code, "Invalid", "bad request"), &sample_profile("a"))
+                    .await;
+            assert!(!ok);
+            assert_eq!(names(&steps), [("tls", true), ("auth", false)], "{code}");
+            assert_eq!(
+                steps[1].error.as_ref().unwrap().code,
+                ErrorCode::InvalidInput,
+                "{code}"
+            );
+        }
+    }
+
+    /// Ответ не от API-сервера (например, HTML-страница): соединение и TLS в порядке.
+    #[tokio::test]
+    async fn unexpected_response_fails_auth_not_tls() {
+        let (ok, steps) = steps_for_answer(
+            (200, serde_json::json!("<html>Welcome</html>")),
+            &sample_profile("a"),
+        )
+        .await;
+        assert!(!ok);
+        assert_eq!(names(&steps), [("tls", true), ("auth", false)]);
+        let e = steps[1].error.as_ref().unwrap();
+        assert_eq!(e.code, ErrorCode::Internal);
+        assert_eq!(e.key, "errors.k8s.unexpectedResponse");
+    }
+
+    #[tokio::test]
+    async fn insecure_profile_reports_unverified_certificate_when_server_answers() {
+        let mut p = sample_profile("a");
+        p.ca = CaConfig::Insecure;
+        let (_, steps) = steps_for_answer(status(403, "Forbidden", "forbidden"), &p).await;
+        assert_eq!(names(&steps), [("tls", true), ("auth", false)]);
+        assert_eq!(steps[0].message.key, "messages.connectionTest.tlsInsecure");
+    }
+
+    /// Клиент, у которого каждый запрос обрывается транспортной ошибкой с текстом `text`.
+    fn failing_client(text: &'static str) -> kube::Client {
+        let (svc, mut handle) = tower_test::mock::pair::<
+            http::Request<kube::client::Body>,
+            http::Response<kube::client::Body>,
+        >();
+        tokio::spawn(async move {
+            while let Some((_req, send)) = handle.next_request().await {
+                send.send_error(std::io::Error::other(text));
+            }
+        });
+        kube::Client::new(svc, "default")
+    }
+
+    /// Ошибки транспорта (до ответа сервера) по-прежнему относятся к шагу `tls`.
+    #[tokio::test]
+    async fn transport_errors_fail_tls() {
+        for (text, code) in [
+            (
+                "invalid peer certificate: UnknownIssuer",
+                ErrorCode::TlsError,
+            ),
+            (
+                "tcp connect error: connection refused",
+                ErrorCode::ConnectionFailed,
+            ),
+            ("operation timed out", ErrorCode::Timeout),
+            ("something odd happened", ErrorCode::Internal),
+        ] {
+            let client = failing_client(text);
+            let mut steps = Vec::new();
+            assert!(!check_cluster(&mut steps, &client, &sample_profile("a")).await);
+            assert_eq!(names(&steps), [("tls", false)], "{text}");
+            assert_eq!(steps[0].error.as_ref().unwrap().code, code, "{text}");
+        }
     }
 
     #[tokio::test]
