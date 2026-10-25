@@ -113,21 +113,27 @@ fn has_children(kind: &str) -> bool {
     )
 }
 
-/// Строчные латинские буквы и цифры: алфавит имён, которые Kubernetes генерирует сам.
-fn lower_alnum(s: &str) -> bool {
-    !s.is_empty()
-        && s.bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+/// Алфавит случайных частей имён, которые Kubernetes генерирует сам (`rand.String` в
+/// `k8s.io/apimachinery`): согласные и цифры без 0, 1 и 3. Гласных в нём нет, поэтому обычное
+/// слово (`migrate`, `agent`) под него не подходит, и соседи вида `api-migrate` у `api` отсекаются.
+const GENERATED: &[u8] = b"bcdfghjklmnpqrstvwxz2456789";
+
+fn generated(s: &str, len: std::ops::RangeInclusive<usize>) -> bool {
+    len.contains(&s.len()) && s.bytes().all(|b| GENERATED.contains(&b))
+}
+
+/// `pod-template-hash` ReplicaSet: от пяти до десяти символов алфавита.
+fn template_hash(s: &str) -> bool {
+    generated(s, 5..=10)
+}
+
+/// Случайный суффикс `generateName`: пять символов алфавита.
+fn random5(s: &str) -> bool {
+    generated(s, 5..=5)
 }
 
 fn digits(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
-}
-
-/// Случайный суффикс `generateName`: пять символов. Настоящий алфавит уже (без гласных и
-/// похожих символов), но для отсечения «соседей» хватает длины и строчных букв с цифрами.
-fn random5(s: &str) -> bool {
-    s.len() == 5 && lower_alnum(s)
 }
 
 /// `<голова>-<хвост>` ровно с одним дефисом: у лишних сегментов (`web-api-…` у `web`) нет шанса
@@ -138,21 +144,27 @@ fn pair(s: &str, head: impl Fn(&str) -> bool, tail: impl Fn(&str) -> bool) -> bo
 
 /// Подходит ли `rest` — имя ребёнка вида `child` без префикса `{workload}-` — под имя, которое
 /// порождает workload вида `parent`. Остальные виды детей workload не создаёт и не получает.
+/// Имена длиннее примерно 46 символов Kubernetes обрезает при генерации, дефис перед суффиксом
+/// пропадает, и такие дети не находятся.
 fn is_child(parent: &str, child: &str, rest: &str) -> bool {
     match (parent, child) {
         // ReplicaSet `web-<hash>`, под `web-<hash>-<5>`.
-        ("Deployment", "ReplicaSet") => lower_alnum(rest),
-        ("Deployment", "Pod") => pair(rest, lower_alnum, random5),
+        ("Deployment", "ReplicaSet") => template_hash(rest),
+        ("Deployment", "Pod") => pair(rest, template_hash, random5),
         // Под `db-<порядковый номер>`.
         ("StatefulSet", "Pod") => digits(rest),
+        // Поды Job с индексами (`<job>-<idx>-<5>`) не находятся: их не отличить от Job `<job>-<n>`.
         ("DaemonSet" | "Job" | "ReplicaSet", "Pod") => random5(rest),
-        // Job `report-<время расписания>`, его под `report-<время>-<5>`.
+        // Job `report-<время расписания>`, его под `report-<время>-<5>`. Job, созданные из CronJob
+        // вручную, называются как угодно и не находятся (вкладка «Поды» находит их по владельцу).
         ("CronJob", "Job") => digits(rest),
         ("CronJob", "Pod") => pair(rest, digits, random5),
         // ReplicationController `legacy-<n>`, его под `legacy-<n>-<5>`, под выкладки
-        // `legacy-<n>-deploy`.
+        // `legacy-<n>-deploy` и поды хуков `legacy-<n>-hook-pre|mid|post`.
         ("DeploymentConfig", "ReplicationController") => digits(rest),
-        ("DeploymentConfig", "Pod") => pair(rest, digits, |t| random5(t) || t == "deploy"),
+        ("DeploymentConfig", "Pod") => pair(rest, digits, |t| {
+            random5(t) || t == "deploy" || matches!(t, "hook-pre" | "hook-mid" | "hook-post")
+        }),
         _ => false,
     }
 }
@@ -263,8 +275,8 @@ mod tests {
             name: "web".into(),
         };
         assert!(concerns(&row("Deployment", "web"), &web));
-        assert!(concerns(&row("ReplicaSet", "web-7d9f"), &web));
-        assert!(concerns(&row("Pod", "web-7d9f-x5k2m"), &web));
+        assert!(concerns(&row("ReplicaSet", "web-7d9f5c8b6"), &web));
+        assert!(concerns(&row("Pod", "web-7d9f5c8b6-x5k2m"), &web));
         assert!(
             !concerns(&row("Pod", "webhook-1"), &web),
             "только по префиксу «web-»"
@@ -304,7 +316,7 @@ mod tests {
             ("Pod", "web-api-6b8f9c7d5-x5k2m"),
             // CronJob `web-cleanup`: его Job и поды Job.
             ("Job", "web-cleanup-28123456"),
-            ("Pod", "web-cleanup-28123456-ab12c"),
+            ("Pod", "web-cleanup-28123456-bd7kz"),
             // Deployment не создаёт Job и ReplicationController.
             ("Job", "web-7d9f5c8b6"),
             ("ReplicationController", "web-7d9f5c8b6"),
@@ -328,6 +340,39 @@ mod tests {
     }
 
     #[test]
+    fn a_deployment_skips_pods_of_single_word_sibling_jobs_and_daemon_sets() {
+        // Helm-раскладка: Deployment `api` и Job `api-migrate`, Deployment `web` и DaemonSet
+        // `web-agent`. Слово с гласными не бывает ни хешем, ни случайным суффиксом.
+        let (api, web) = (object("Deployment", "api"), object("Deployment", "web"));
+        for suffix in ["x5k2m", "bd7kz", "c9wt4"] {
+            assert!(
+                !concerns(&row("Pod", &format!("api-migrate-{suffix}")), &api),
+                "Job api-migrate, суффикс {suffix}"
+            );
+            assert!(
+                !concerns(&row("Pod", &format!("web-agent-{suffix}")), &web),
+                "DaemonSet web-agent, суффикс {suffix}"
+            );
+            assert!(
+                concerns(&row("Pod", &format!("api-6b8f9c7d5-{suffix}")), &api),
+                "настоящий под Deployment api, суффикс {suffix}"
+            );
+        }
+        // Те же поды у своих владельцев.
+        assert!(concerns(
+            &row("Pod", "api-migrate-x5k2m"),
+            &object("Job", "api-migrate")
+        ));
+        assert!(concerns(
+            &row("Pod", "web-agent-x5k2m"),
+            &object("DaemonSet", "web-agent")
+        ));
+        // И ReplicaSet соседа.
+        assert!(!concerns(&row("ReplicaSet", "api-migrate"), &api));
+        assert!(!concerns(&row("ReplicaSet", "web-agent"), &web));
+    }
+
+    #[test]
     fn events_of_a_workload_include_the_children_it_creates() {
         let cases = [
             ("Deployment", "web", "ReplicaSet", "web-6b8f9c7d5"),
@@ -335,17 +380,23 @@ mod tests {
             ("StatefulSet", "db", "Pod", "db-0"),
             ("StatefulSet", "db", "Pod", "db-12"),
             ("DaemonSet", "agent", "Pod", "agent-x5k2m"),
-            ("Job", "migrate", "Pod", "migrate-ab12c"),
+            ("Job", "migrate", "Pod", "migrate-bd7kz"),
             ("CronJob", "report", "Job", "report-28123456"),
-            ("CronJob", "report", "Pod", "report-28123456-ab12c"),
+            ("CronJob", "report", "Pod", "report-28123456-bd7kz"),
             (
                 "DeploymentConfig",
                 "legacy",
                 "ReplicationController",
                 "legacy-7",
             ),
-            ("DeploymentConfig", "legacy", "Pod", "legacy-7-ab12c"),
+            ("DeploymentConfig", "legacy", "Pod", "legacy-7-bd7kz"),
             ("DeploymentConfig", "legacy", "Pod", "legacy-7-deploy"),
+            ("DeploymentConfig", "legacy", "Pod", "legacy-7-hook-pre"),
+            ("DeploymentConfig", "legacy", "Pod", "legacy-7-hook-mid"),
+            ("DeploymentConfig", "legacy", "Pod", "legacy-7-hook-post"),
+            // Хеш — от пяти до десяти символов алфавита.
+            ("Deployment", "web", "ReplicaSet", "web-7d9f5"),
+            ("Deployment", "web", "ReplicaSet", "web-6b8f9c7d5k"),
             ("ReplicaSet", "web-6b8f9c7d5", "Pod", "web-6b8f9c7d5-x5k2m"),
         ];
         for (parent, name, kind, child) in cases {
@@ -374,13 +425,13 @@ mod tests {
             ("DaemonSet", "agent", "Pod", "agent-extra-x5k2m"),
             ("DaemonSet", "agent", "Pod", "agent-0"),
             ("Job", "migrate", "Job", "migrate-28123456"),
-            ("Job", "migrate", "Pod", "migrate-1-ab12c-zz"),
-            ("Job", "migrate", "Pod", "migrate-ab12"),
+            ("Job", "migrate", "Pod", "migrate-1-bd7kz-zz"),
+            ("Job", "migrate", "Pod", "migrate-bd7k"),
             // CronJob: Job `<цифры>`, под `<цифры>-<5>`.
             ("CronJob", "report", "Job", "report-manual"),
             ("CronJob", "report", "Job", "report-daily-28123456"),
-            ("CronJob", "report", "Pod", "report-daily-28123456-ab12c"),
-            ("CronJob", "report", "Pod", "report-ab12c"),
+            ("CronJob", "report", "Pod", "report-daily-28123456-bd7kz"),
+            ("CronJob", "report", "Pod", "report-bd7kz"),
             ("CronJob", "report", "ReplicaSet", "report-28123456"),
             // DeploymentConfig: RC `<n>`, под `<n>-<5>` или `<n>-deploy`.
             ("DeploymentConfig", "legacy", "ReplicaSet", "legacy-7"),
@@ -390,13 +441,23 @@ mod tests {
                 "ReplicationController",
                 "legacy-api-7",
             ),
-            ("DeploymentConfig", "legacy", "Pod", "legacy-api-7-ab12c"),
-            ("DeploymentConfig", "legacy", "Pod", "legacy-ab12c"),
+            ("DeploymentConfig", "legacy", "Pod", "legacy-api-7-bd7kz"),
+            ("DeploymentConfig", "legacy", "Pod", "legacy-bd7kz"),
             ("DeploymentConfig", "legacy", "Pod", "legacy-7-redeploy"),
+            ("DeploymentConfig", "legacy", "Pod", "legacy-7-hook-late"),
+            ("DeploymentConfig", "legacy", "Pod", "legacy-api-hook-pre"),
+            ("DeploymentConfig", "legacy", "Pod", "legacy-7-hook-pre-x"),
             // Deployment: ReplicaSet `<hash>` и под `<hash>-<5>`, и больше ничего.
             ("Deployment", "web", "Pod", "web-6b8f9c7d5"),
             ("Deployment", "web", "Pod", "web-x5k2m"),
             ("Deployment", "web", "ReplicaSet", "web-6b8f9c7d5-x5k2m"),
+            // Хеш короче пяти, длиннее десяти символов или с гласной — не хеш.
+            ("Deployment", "web", "ReplicaSet", "web-7d9f"),
+            ("Deployment", "web", "ReplicaSet", "web-6b8f9c7d5kz"),
+            ("Deployment", "web", "ReplicaSet", "web-6b8f9c7a5"),
+            ("Deployment", "web", "ReplicaSet", "web-staging"),
+            ("Deployment", "web", "Pod", "web-7d9f-x5k2m"),
+            ("Deployment", "web", "Pod", "web-6b8f9c7d5-x5k2a"),
             (
                 "Deployment",
                 "redis",
