@@ -7,7 +7,7 @@ import { tr } from "../../i18n/text";
 import { useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Hint } from "../common/Hint";
-import { formatArgs, formatEnv, launchKey, launchLine, needsExecConfirmation, newExec, parseArgs, parseEnv } from "./exec";
+import { formatArgs, formatEnv, hasSecretValues, launchKey, launchLine, maskArgs, maskEnv, needsExecConfirmation, newExec, parseArgs, parseEnv } from "./exec";
 import { formatNamespaces, parseNamespaces, withAuthMethod, withCaMode, withProxyMode } from "./profile";
 import { folderPaths } from "./tree/folderTree";
 
@@ -33,6 +33,8 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
   const [lastExec, setLastExec] = useState(initialExec);
   const [execArgs, setExecArgs] = useState(formatArgs(initialExec.args));
   const [execEnv, setExecEnv] = useState(formatEnv(initialExec.env));
+  // Значения секретных аргументов и переменных скрыты (поля только для чтения), пока не нажата «Показать».
+  const [secretsShown, setSecretsShown] = useState(() => !hasSecretValues(initialExec));
   // Подтверждение привязано к строке: хранится ключ подтверждённой строки. Правка строки не обнуляет ключ, а делает производный флаг ложным (ключ не совпадает); обнуляет его только смена способа входа.
   const [confirmedExec, setConfirmedExec] = useState<string | null>(null);
   const [report, setReport] = useState<TestReport | null>(null);
@@ -268,9 +270,31 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
               </button>
             </span>
             <label htmlFor="cf-exec-args">{t("connections.form.exec.args")}</label>
-            <textarea id="cf-exec-args" rows={3} placeholder="get-token" value={execArgs} onChange={(e) => setExecArgs(e.target.value)} />
+            <textarea
+              id="cf-exec-args"
+              rows={3}
+              placeholder="get-token"
+              readOnly={!secretsShown}
+              value={secretsShown ? execArgs : formatArgs(maskArgs(parseArgs(execArgs)))}
+              onChange={(e) => setExecArgs(e.target.value)}
+            />
             <label htmlFor="cf-exec-env">{t("connections.form.exec.env")}</label>
-            <textarea id="cf-exec-env" rows={2} placeholder="AWS_PROFILE=dev" value={execEnv} onChange={(e) => setExecEnv(e.target.value)} />
+            <textarea
+              id="cf-exec-env"
+              rows={2}
+              placeholder="AWS_PROFILE=dev"
+              readOnly={!secretsShown}
+              value={secretsShown ? execEnv : formatEnv(maskEnv(parseEnv(execEnv)))}
+              onChange={(e) => setExecEnv(e.target.value)}
+            />
+            {!secretsShown && (
+              <p className="muted full">
+                {t("connections.form.exec.secretsHidden")}{" "}
+                <button type="button" className="link" onClick={() => setSecretsShown(true)}>
+                  {t("connections.form.exec.showSecrets")}
+                </button>
+              </p>
+            )}
             <span className="field-label">
               <span>{t("connections.form.exec.line")}</span>
               <Hint k="hints.connections.execLine" label={t("connections.form.exec.line")} />

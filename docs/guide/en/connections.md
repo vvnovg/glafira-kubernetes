@@ -48,7 +48,9 @@ contain a command too, so check it before you confirm the line.
 
 The form shows the exact launch line: the path, the arguments and the environment variables. A value is hidden
 (`••••`) when the name of the variable or option contains TOKEN, SECRET, PASS, KEY, CREDENTIAL, BEARER or COOKIE, for
-example `--client-secret x`, `--oidc-client-secret=x` or `AWS_SECRET_ACCESS_KEY`. Glafira runs the line only after you
+example `--client-secret x`, `--oidc-client-secret=x` or `AWS_SECRET_ACCESS_KEY`. The argument and variable fields
+hide such values too and stay read-only until you click [[ui:connections.form.exec.showSecrets]]. Glafira runs the
+line only after you
 tick [[ui:connections.form.exec.confirm]]. The confirmation is bound to the exact line: any change to the command, the
 arguments or the variables needs a new confirmation. In the form, a switch of the sign-in method also drops a tick you
 have set; a line that was saved confirmed and is unchanged stays confirmed. A connection that arrives from an export

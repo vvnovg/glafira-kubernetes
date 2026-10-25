@@ -279,6 +279,40 @@ describe("ConnectionForm", () => {
     expect(api.cancelConnectionTest).toHaveBeenCalledWith("e1");
   });
 
+  it("exec-плагин: значения секретов скрыты до «Показать», поля до этого только для чтения", async () => {
+    const withSecrets: ConnectionProfile = {
+      ...newProfile(),
+      id: "e2",
+      name: "oidc",
+      auth: {
+        method: "exec",
+        command: "/opt/homebrew/bin/kubectl",
+        args: ["oidc-login", "get-token", "--oidc-client-secret=c1i3nt"],
+        env: [
+          { name: "AWS_PROFILE", value: "dev" },
+          { name: "AWS_SECRET_ACCESS_KEY", value: "s3cr3t" },
+        ],
+        apiVersion: "client.authentication.k8s.io/v1",
+        provideClusterInfo: false,
+        approved: "fp",
+      },
+    };
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionForm initial={withSecrets} tabId="t" />);
+    const args = screen.getByLabelText("Аргументы (по одному в строке)");
+    const env = screen.getByLabelText("Переменные окружения (ИМЯ=значение, по одной в строке)");
+    expect(args).toHaveValue("oidc-login\nget-token\n--oidc-client-secret=••••");
+    expect(env).toHaveValue("AWS_PROFILE=dev\nAWS_SECRET_ACCESS_KEY=••••");
+    expect(args).toHaveAttribute("readonly");
+    expect(screen.queryByDisplayValue(/s3cr3t|c1i3nt/)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Показать" }));
+    expect(env).toHaveValue("AWS_PROFILE=dev\nAWS_SECRET_ACCESS_KEY=s3cr3t");
+    expect(args).toHaveValue("oidc-login\nget-token\n--oidc-client-secret=c1i3nt");
+    expect(args).not.toHaveAttribute("readonly");
+    expect(screen.queryByRole("button", { name: "Показать" })).not.toBeInTheDocument();
+  });
+
   it("удаление с подтверждением закрывает вкладки подключения", async () => {
     vi.mocked(api.deleteConnection).mockResolvedValue();
     useWorkspace.getState().open({ kind: "cluster", connectionId: "c1" });

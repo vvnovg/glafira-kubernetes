@@ -46,38 +46,52 @@ function quote(s: string): string {
   return s === "" || /[\s'"\\$`]/.test(s) ? `'${s.replace(/'/g, `'\\''`)}'` : s;
 }
 
+/** Чем заменяются скрытые значения секретов. */
+const MASK = "••••";
+
 /**
- * Аргументы для строки запуска, значения секретных ключей скрыты, как в Rust (`secret_args`).
- * Ключ — аргумент с `-`, чьё имя без ведущих дефисов и до первого `=` подходит под `isSecretName`.
- * `--имя=значение` показывается как `--имя=••••`; в паре `--имя значение` скрывается следующий
+ * Аргументы со скрытыми значениями секретных ключей, как в Rust (`secret_args`). Ключ — аргумент
+ * с `-`, чьё имя без ведущих дефисов и до первого `=` подходит под `isSecretName`.
+ * `--имя=значение` становится `--имя=••••`; в паре `--имя значение` скрывается следующий
  * элемент, каким бы он ни был; ключ без значения в конце списка ничего не скрывает. Пустое
  * значение не скрывается.
  */
-function maskedArgs(args: string[]): string[] {
+export function maskArgs(args: string[]): string[] {
   const out: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     const eq = a.indexOf("=");
     const secret = a.startsWith("-") && isSecretName((eq < 0 ? a : a.slice(0, eq)).replace(/^-+/, ""));
     if (!secret) {
-      out.push(quote(a));
+      out.push(a);
     } else if (eq >= 0) {
-      // Имя с пробелом (`--client secret=x`) квотируется вместе с маской, как и открытый аргумент.
-      out.push(a.length > eq + 1 ? quote(`${a.slice(0, eq + 1)}••••`) : quote(a));
+      out.push(a.length > eq + 1 ? `${a.slice(0, eq + 1)}${MASK}` : a);
     } else if (i + 1 < args.length) {
       const value = args[++i];
-      out.push(quote(a), value ? "••••" : quote(value));
+      out.push(a, value ? MASK : value);
     } else {
-      out.push(quote(a));
+      out.push(a);
     }
   }
   return out;
 }
 
+/** Переменные окружения со скрытыми значениями секретных имён (пустое значение не скрывается). */
+export function maskEnv(env: ExecEnv[]): ExecEnv[] {
+  return env.map((v) => (isSecretName(v.name) && v.value ? { ...v, value: MASK } : v));
+}
+
+/** Есть ли у плагина значения, которые форма скрывает до «Показать». */
+export function hasSecretValues(e: ExecAuth): boolean {
+  const masked = maskArgs(e.args);
+  return masked.some((a, i) => a !== e.args[i]) || maskEnv(e.env).some((v, i) => v.value !== e.env[i].value);
+}
+
 /** Строка запуска для подтверждения: переменные и значения секретных ключей скрыты, путь к команде и аргументы. */
 export function launchLine(e: ExecAuth): string {
-  const env = e.env.map((v) => `${v.name}=${isSecretName(v.name) && v.value ? "••••" : quote(v.value)}`);
-  return [...env, quote(e.command), ...maskedArgs(e.args)].join(" ");
+  // Аргумент с пробелом квотируется и замаскированным (`'--client secret=••••'`), как открытый.
+  const env = maskEnv(e.env).map((v) => `${v.name}=${quote(v.value)}`);
+  return [...env, quote(e.command), ...maskArgs(e.args).map(quote)].join(" ");
 }
 
 /**

@@ -218,7 +218,9 @@
         "line": "Launch line",
         "confirm": "I allow Glafira to run this command",
         "approved": "Launch line confirmed",
-        "forbidden": "Connections with exec plugins are forbidden by your organization."
+        "forbidden": "Connections with exec plugins are forbidden by your organization.",
+        "secretsHidden": "Values of secret arguments and variables are hidden.",
+        "showSecrets": "Show"
       },
       "secretKeep": "leave empty to keep unchanged",
       "ca": "Trusted CA",

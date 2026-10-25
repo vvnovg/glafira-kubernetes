@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AuthConfig } from "../../api/types";
-import { formatArgs, formatEnv, isSecretName, launchKey, launchLine, needsExecConfirmation, newExec, parseArgs, parseEnv } from "./exec";
+import { formatArgs, formatEnv, hasSecretValues, isSecretName, launchKey, launchLine, maskArgs, maskEnv, needsExecConfirmation, newExec, parseArgs, parseEnv } from "./exec";
 
 const exec = (patch: Partial<ReturnType<typeof newExec>> = {}): AuthConfig => ({
   method: "exec",
@@ -74,6 +74,27 @@ describe("exec", () => {
     expect(line(["get-token", "--password"])).toBe("plugin get-token --password");
     expect(line(["--password="])).toBe("plugin --password=");
     expect(line(["--password", ""])).toBe("plugin --password ''");
+  });
+
+  it("поля формы: значения секретов скрыты без кавычек, остальное как есть", () => {
+    expect(maskArgs(["get-token", "--oidc-client-secret=abc", "--client-secret", "x y", "--cluster-name", "c"])).toEqual([
+      "get-token",
+      "--oidc-client-secret=••••",
+      "--client-secret",
+      "••••",
+      "--cluster-name",
+      "c",
+    ]);
+    expect(maskEnv([{ name: "AWS_PROFILE", value: "dev" }, { name: "AWS_SECRET_ACCESS_KEY", value: "s3cr3t" }, { name: "TOKEN", value: "" }])).toEqual([
+      { name: "AWS_PROFILE", value: "dev" },
+      { name: "AWS_SECRET_ACCESS_KEY", value: "••••" },
+      { name: "TOKEN", value: "" },
+    ]);
+    const plain = { ...newExec(), command: "plugin", args: ["get-token"], env: [{ name: "AWS_PROFILE", value: "dev" }] };
+    expect(hasSecretValues(plain)).toBe(false);
+    expect(hasSecretValues({ ...plain, args: ["--password=p"] })).toBe(true);
+    expect(hasSecretValues({ ...plain, env: [{ name: "API_KEY", value: "k" }] })).toBe(true);
+    expect(hasSecretValues({ ...plain, env: [{ name: "API_KEY", value: "" }] })).toBe(false);
   });
 
   it("подтверждение нужно для новой, изменённой и неподтверждённой строки", () => {
