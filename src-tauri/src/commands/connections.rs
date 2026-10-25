@@ -5,16 +5,16 @@ use serde::Deserialize;
 use tauri::State;
 
 use super::blocking;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::k8s::cluster::ConnectionInfo;
 use crate::k8s::connectivity::{TestReport, ensure_allowed};
 use crate::secrets::{CLIENT_KEY, OverlayStore, SecretStore, TOKEN, secret_key};
 use crate::state::AppState;
-use crate::storage::profile::{AuthConfig, ConnectionProfile};
+use crate::storage::profile::{AuthConfig, ConnectionProfile, REDACTED};
 
 /// Секреты из формы. Для каждого: нет или `null` — оставить сохранённый, `""` — удалить,
-/// иное — сохранить.
-#[derive(Debug, Default, Clone, Deserialize)]
+/// иное — сохранить. `Debug` печатает вместо значений `***`.
+#[derive(Default, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SecretsInput {
     #[serde(default)]
@@ -23,7 +23,18 @@ pub struct SecretsInput {
     pub client_key: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// Токен и приватный ключ не печатаются: структура может попасть в лог или сообщение об ошибке.
+impl std::fmt::Debug for SecretsInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let hide = |secret: &Option<String>| secret.as_ref().map(|_| REDACTED);
+        f.debug_struct("SecretsInput")
+            .field("token", &hide(&self.token))
+            .field("client_key", &hide(&self.client_key))
+            .finish()
+    }
+}
+
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionInput {
     pub profile: ConnectionProfile,
@@ -33,6 +44,17 @@ pub struct ConnectionInput {
     /// из самого профиля не принимается.
     #[serde(default)]
     pub confirm_exec: bool,
+}
+
+/// Секреты формы печатаются как `***` (`SecretsInput`); профиль секретов не содержит.
+impl std::fmt::Debug for ConnectionInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectionInput")
+            .field("profile", &self.profile)
+            .field("secrets", &self.secrets)
+            .field("confirm_exec", &self.confirm_exec)
+            .finish()
+    }
 }
 
 /// Подтверждение строки запуска: новое — по согласию в форме, иначе — прежнее сохранённое
@@ -115,17 +137,19 @@ pub fn save_connection_blocking(
     set_exec_approval(&mut profile, previous.as_ref(), confirm_exec);
     // upsert проверяет профиль — секреты трогаем только после успешного сохранения.
     let saved = st.connections.upsert(profile)?;
-    let result = secret_ops(&saved, &secrets)
-        .into_iter()
-        .try_for_each(|(field, op)| {
-            let key = secret_key(&saved.id, field);
-            match op {
-                SecretOp::Keep => Ok(()),
-                SecretOp::Set(v) => st.secrets.set(&key, &v),
-                SecretOp::Delete => st.secrets.delete(&key),
-            }
-        });
-    if let Err(e) = result {
+    // Сначала `Set`, потом `Delete`: если keychain не примет новый секрет после смены способа
+    // входа, прежний ещё на месте, и откат профиля не оставляет его без секрета.
+    let mut ops = secret_ops(&saved, &secrets);
+    ops.sort_by_key(|(_, op)| *op == SecretOp::Delete);
+    let result = ops.into_iter().try_for_each(|(field, op)| {
+        let key = secret_key(&saved.id, field);
+        match op {
+            SecretOp::Keep => Ok(()),
+            SecretOp::Set(v) => st.secrets.set(&key, &v),
+            SecretOp::Delete => st.secrets.delete(&key),
+        }
+    });
+    if result.is_err() {
         let rollback = match previous {
             Some(p) => st.connections.upsert(p).map(|_| ()),
             None => st.connections.delete(&saved.id),
@@ -133,11 +157,11 @@ pub fn save_connection_blocking(
         if let Err(r) = rollback {
             tracing::error!("failed to roll back profile {}: {r}", saved.id);
         }
-        return Err(e);
     }
     // Клиент работает со старыми адресом и учётными данными: следующий вызов подключится заново.
+    // Сбрасывается и после отката: клиент, открытый на промежуточном профиле, не нужен.
     st.evict_connection(&saved.id);
-    Ok(saved)
+    result.map(|()| saved)
 }
 
 #[tauri::command]
@@ -226,14 +250,20 @@ pub async fn set_connection_token(
     blocking(move || set_token_blocking(&st, &connection_id, &token)).await
 }
 
+/// Способ входа подключения не хранит токен (сертификат, exec-плагин): вставить токен
+/// и войти через браузер нельзя.
+pub(super) fn token_not_used() -> AppError {
+    app_err!(
+        crate::error::ErrorCode::InvalidInput,
+        "errors.connections.tokenNotUsed",
+        "This connection does not sign in with a token"
+    )
+}
+
 pub fn set_token_blocking(st: &AppState, id: &str, token: &str) -> AppResult<()> {
     let p = st.connections.get(id)?;
     if !p.auth.uses_token() {
-        return Err(app_err!(
-            crate::error::ErrorCode::InvalidInput,
-            "errors.connections.tokenNotUsed",
-            "This connection does not sign in with a token"
-        ));
+        return Err(token_not_used());
     }
     st.secrets.set(&secret_key(id, TOKEN), token.trim())?;
     st.evict_connection(id);
@@ -243,7 +273,7 @@ pub fn set_token_blocking(st: &AppState, id: &str, token: &str) -> AppResult<()>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::{AppError, ErrorCode};
+    use crate::error::ErrorCode;
     use crate::secrets::MemoryStore;
     use crate::storage::profile::{CaConfig, TEST_CERT_PEM, sample_profile};
 
@@ -429,5 +459,81 @@ mod tests {
             set_token_blocking(&st, "c", "t").unwrap_err().key,
             "errors.connections.tokenNotUsed"
         );
+    }
+    /// Хранилище, которое не принимает одну запись (`Set` по этому ключу).
+    struct RejectsKey {
+        inner: MemoryStore,
+        key: String,
+    }
+    impl SecretStore for RejectsKey {
+        fn get(&self, key: &str) -> AppResult<Option<String>> {
+            self.inner.get(key)
+        }
+        fn set(&self, key: &str, value: &str) -> AppResult<()> {
+            if key == self.key {
+                return Err(AppError::internal_with("keychain locked"));
+            }
+            self.inner.set(key, value)
+        }
+        fn delete(&self, key: &str) -> AppResult<()> {
+            self.inner.delete(key)
+        }
+    }
+
+    #[test]
+    fn failed_set_after_method_switch_keeps_the_old_secret_and_drops_the_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RejectsKey {
+            inner: MemoryStore::default(),
+            key: secret_key("a", CLIENT_KEY),
+        };
+        let st = AppState::new(dir.path(), Arc::new(store)).unwrap();
+        let saved =
+            save_connection_blocking(&st, input(sample_profile("a"), Some("old"), None)).unwrap();
+        let generation = st.pool.generation("a");
+        // Токен -> сертификат: ключ keychain не принял, токен удалять нельзя.
+        let mut cert = saved.clone();
+        cert.auth = AuthConfig::ClientCert {
+            certificate_pem: TEST_CERT_PEM.into(),
+        };
+        let e = save_connection_blocking(&st, input(cert, None, Some("KEY"))).unwrap_err();
+        assert_eq!(e.key, "errors.internal");
+        assert_eq!(secret(&st, "a", TOKEN).as_deref(), Some("old"));
+        assert_eq!(st.connections.get("a").unwrap().auth, AuthConfig::Token);
+        assert!(
+            st.pool.generation("a") > generation,
+            "клиент сброшен и при ошибке"
+        );
+    }
+
+    #[test]
+    fn debug_output_hides_secrets() {
+        let secrets = SecretsInput {
+            token: Some("sha256~tok-123".into()),
+            client_key: Some("KEY-456".into()),
+        };
+        let connection = ConnectionInput {
+            profile: sample_profile("a"),
+            secrets: secrets.clone(),
+            confirm_exec: true,
+        };
+        for text in [
+            format!("{secrets:?}"),
+            format!("{secrets:#?}"),
+            format!("{connection:?}"),
+            format!("{connection:#?}"),
+        ] {
+            assert!(
+                !text.contains("tok-123") && !text.contains("KEY-456"),
+                "{text}"
+            );
+            assert!(text.contains("***"), "{text}");
+        }
+        let text = format!("{:?}", SecretsInput::default());
+        assert!(
+            !text.contains("***"),
+            "нет секрета — нечего скрывать: {text}"
+        );
+        assert!(format!("{connection:?}").contains("conn-a"));
     }
 }

@@ -351,6 +351,35 @@ pub fn resolve_command(
     })
 }
 
+/// Обычный файл, который можно запустить как команду: на unix — с правом исполнения (иначе
+/// `kubelogin` без права `x` в раннем каталоге PATH закрыл бы настоящий в позднем), на остальных
+/// системах — любой файл. Предикат для `resolve_command`; делает `stat`, поэтому вызывается
+/// не на async-потоке.
+pub fn is_executable_file(p: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        p.is_file()
+    }
+}
+
+/// Файл для тестов поиска команд: на unix — с правами `mode`, на остальных системах — обычный.
+#[cfg(test)]
+pub(crate) fn write_test_file(path: &Path, mode: u32) {
+    std::fs::write(path, "#!/bin/sh\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+}
+
 /// Учётные данные от плагина: токен или клиентский сертификат и срок действия.
 #[derive(Debug, Clone)]
 pub struct PluginCredential {
@@ -1038,6 +1067,22 @@ mod tests {
             None
         );
         assert_eq!(resolve_command(" ", None, &dirs, &is_file), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_executable_regular_files_are_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let (plain, exe) = (dir.path().join("plain"), dir.path().join("exe"));
+        write_test_file(&plain, 0o644);
+        write_test_file(&exe, 0o755);
+        assert!(!is_executable_file(&plain), "без бита исполнения");
+        assert!(is_executable_file(&exe));
+        assert!(
+            !is_executable_file(dir.path()),
+            "каталог с битом x — не команда"
+        );
+        assert!(!is_executable_file(&dir.path().join("missing")));
     }
 
     #[test]

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use crate::error::{AppError, AppResult, ErrorCode};
+use crate::k8s::connectivity::ensure_allowed;
 use crate::k8s::pool::{ClientPool, Connected, open};
 use crate::secrets::SecretStore;
 use crate::storage::connections::ConnectionStore;
@@ -41,7 +42,8 @@ impl AppState {
 
     /// Клиент подключения: из пула или новое подключение (`fresh` — всегда новое; истекающие
     /// учётные данные exec-плагина — тоже). Подключения одного профиля идут по очереди, ожидание
-    /// exec-плагина отменяется так же, как вход через браузер (`logins`).
+    /// exec-плагина отменяется так же, как вход через браузер (`logins`). Подключение, которое
+    /// запрещено политикой (CA `insecure`, exec-плагин), не открывается.
     pub async fn connected(&self, id: &str, fresh: bool) -> AppResult<Arc<Connected>> {
         let _turn = self.pool.connect_lock(id).await;
         if fresh {
@@ -53,6 +55,8 @@ impl AppState {
         }
         let generation = self.pool.generation(id);
         let profile = self.connections.get(id)?;
+        // Политика проверяется здесь, а не только в командах: ни одна из них её не обойдёт.
+        ensure_allowed(&profile, &self.policy.status)?;
         let login = matches!(profile.auth, AuthConfig::Exec(_)).then(|| self.logins.begin(id));
         let (n, cancel) = match login {
             Some((n, rx)) => (Some(n), rx),
@@ -114,6 +118,34 @@ mod tests {
         let st = state(dir.path());
         let e = st.connected("nope", false).await.err().unwrap();
         assert_eq!(e.code, ErrorCode::NotFound);
+    }
+
+    #[tokio::test]
+    async fn connect_obeys_the_policy_whatever_the_caller() {
+        use crate::storage::profile::{AuthConfig, CaConfig, sample_exec};
+        let dir = tempfile::tempdir().unwrap();
+        let mut policy = crate::policy::Policy::default();
+        policy.status.allow_insecure_tls = false;
+        policy.status.allow_exec_auth = false;
+        let st = state(dir.path()).with_policy(policy);
+        // Закрытый порт: без проверки политики ошибка была бы другой (соединение или вход).
+        let mut insecure = sample_profile("insecure");
+        insecure.api_url = "https://127.0.0.1:1".into();
+        insecure.ca = CaConfig::Insecure;
+        let mut exec = sample_profile("exec");
+        exec.api_url = "https://127.0.0.1:1".into();
+        exec.auth = AuthConfig::Exec(sample_exec());
+        st.connections.upsert(insecure).unwrap();
+        st.connections.upsert(exec).unwrap();
+        for (id, key) in [
+            ("insecure", "errors.connections.insecureForbidden"),
+            ("exec", "errors.connections.execForbidden"),
+        ] {
+            for fresh in [false, true] {
+                let e = st.connected(id, fresh).await.err().unwrap();
+                assert_eq!(e.key, key, "{id}, fresh = {fresh}");
+            }
+        }
     }
 
     #[test]
