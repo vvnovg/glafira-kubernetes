@@ -11,7 +11,7 @@ use secrecy::SecretString;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::secrets::{CLIENT_KEY, SecretStore, TOKEN, secret_key};
 use crate::storage::profile::{
-    AuthConfig, CaConfig, ConnectionProfile, ProxyConfig, pem_certificates,
+    AuthConfig, CaConfig, ConnectionProfile, ProxyConfig, pem_certificates, without_userinfo,
 };
 
 /// Значение переменной окружения (в тестах подменяется).
@@ -39,6 +39,21 @@ pub fn system_proxy(host: &str, env: EnvLookup) -> Option<String> {
         }
     }
     Some(proxy.trim().to_string())
+}
+
+/// Адрес прокси без имени и пароля для текста ошибки. Если адрес не разбирается как URL с
+/// хостом (нет схемы, пробел в хосте), отбрасывается всё до последней «@».
+fn redact_proxy(raw: &str) -> String {
+    match url::Url::parse(raw) {
+        Ok(u) if u.host().is_some() => without_userinfo(&u),
+        _ => match raw.rsplit_once('@') {
+            Some((head, tail)) => match head.split_once("://") {
+                Some((scheme, _)) => format!("{scheme}://{tail}"),
+                None => tail.to_string(),
+            },
+            None => raw.to_string(),
+        },
+    }
 }
 
 fn invalid_url(p: &ConnectionProfile) -> AppError {
@@ -81,6 +96,9 @@ pub fn build_kube_config(
     c.connect_timeout = Some(Duration::from_millis(p.connect_timeout_ms));
     c.read_timeout = None;
     c.write_timeout = Some(request_timeout(p));
+    // Встроенный повтор kube (429/503/504 до 15 раз) скрыл бы за таймаутом запроса ошибки
+    // «слишком много запросов» и «сервер недоступен» и повторял бы изменяющие запросы.
+    c.default_retry = false;
     c.tls_server_name = p.tls_server_name.clone();
     match &p.ca {
         CaConfig::System => {}
@@ -102,14 +120,21 @@ pub fn build_kube_config(
     };
     c.proxy_url = proxy
         .map(|u| {
-            u.parse::<http::Uri>().map_err(|_| {
+            // Адрес из HTTPS_PROXY может нести пароль: в ошибке он показан без имени и пароля.
+            let bad = || {
                 app_err!(
                     ErrorCode::InvalidInput,
                     "errors.connections.badProxyUrl",
                     "Invalid proxy address “{{url}}”: use http://host:port",
-                    url = u
+                    url = redact_proxy(&u)
                 )
-            })
+            };
+            // Другие схемы kube отвергнет позже, с полным адресом в тексте ошибки.
+            let uri = u.parse::<http::Uri>().map_err(|_| bad())?;
+            match uri.scheme_str() {
+                Some("http" | "https") => Ok(uri),
+                _ => Err(bad()),
+            }
         })
         .transpose()?;
     c.auth_info = match &p.auth {
@@ -371,5 +396,73 @@ mod tests {
         assert_eq!(c.tls_server_name.as_deref(), Some("api.internal"));
         assert_eq!(c.connect_timeout, Some(Duration::from_secs(2)));
         assert_eq!(request_timeout(&p), Duration::from_secs(5));
+    }
+
+    /// Конфиг профиля с системным прокси из `HTTPS_PROXY`.
+    fn config_with_env_proxy(value: &str) -> AppResult<kube::Config> {
+        let value = value.to_string();
+        let env = move |name: &str| (name == "HTTPS_PROXY").then(|| value.clone());
+        build_kube_config(&sample_profile("a"), &with_token("a"), &env)
+    }
+
+    /// Имя и пароль прокси доходят до клиента: kube отправит их как `Proxy-Authorization: Basic`.
+    #[test]
+    fn proxy_credentials_reach_the_client() {
+        let c = config_with_env_proxy("http://user:pass@proxy:3128").unwrap();
+        let uri = c.proxy_url.unwrap();
+        assert_eq!(uri.authority().unwrap().as_str(), "user:pass@proxy:3128");
+    }
+
+    /// Плохой адрес прокси даёт `badProxyUrl`, а пароль не попадает ни в параметр, ни в текст.
+    #[test]
+    fn bad_proxy_url_is_reported_without_credentials() {
+        for (raw, shown) in [
+            ("socks5://user:pass@proxy:1080", "socks5://proxy:1080"),
+            ("http://user:pa ss@proxy:3128", "http://proxy:3128"),
+            ("user:pass@proxy:3128", "proxy:3128"),
+            ("http://user:pass@pro xy:3128", "http://pro xy:3128"),
+        ] {
+            let e = config_with_env_proxy(raw).unwrap_err();
+            assert_eq!(
+                (e.code, e.key.as_str()),
+                (ErrorCode::InvalidInput, "errors.connections.badProxyUrl"),
+                "{raw}"
+            );
+            assert_eq!(e.params["url"], shown, "{raw}");
+            let json = serde_json::to_string(&e).unwrap();
+            for secret in ["pass", "pa ss", "user"] {
+                assert!(!json.contains(secret), "{raw}: {json}");
+            }
+        }
+    }
+
+    /// Принимаются только `http` и `https`: остальные схемы kube всё равно отвергнет,
+    /// но уже с полным адресом в тексте.
+    #[test]
+    fn only_http_and_https_proxies_are_accepted() {
+        let mut p = sample_profile("a");
+        p.proxy = ProxyConfig::Url {
+            url: "ftp://proxy:21".into(),
+        };
+        let e = build_kube_config(&p, &with_token("a"), &no_env).unwrap_err();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (ErrorCode::InvalidInput, "errors.connections.badProxyUrl")
+        );
+        for url in ["http://proxy:3128", "https://proxy:3128"] {
+            p.proxy = ProxyConfig::Url { url: url.into() };
+            assert!(
+                build_kube_config(&p, &with_token("a"), &no_env).is_ok(),
+                "{url}"
+            );
+        }
+    }
+
+    /// Встроенный повтор kube (429/503/504 до 15 раз) скрыл бы классификацию ошибок и
+    /// повторял бы изменяющие запросы.
+    #[test]
+    fn builtin_retry_is_disabled() {
+        let c = build_kube_config(&sample_profile("a"), &with_token("a"), &no_env).unwrap();
+        assert!(!c.default_retry);
     }
 }

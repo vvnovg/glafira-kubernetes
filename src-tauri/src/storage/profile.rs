@@ -222,16 +222,21 @@ fn has_userinfo(u: &url::Url) -> bool {
     !u.username().is_empty() || u.password().is_some()
 }
 
-/// Ошибка «учётные данные в адресе»; в тексте адрес показан без имени и пароля.
-fn credentials_in_url(u: &url::Url) -> AppError {
+/// Адрес без имени и пароля и без завершающего «/» — для текста ошибки.
+pub(crate) fn without_userinfo(u: &url::Url) -> String {
     let mut clean = u.clone();
-    // Ошибка возможна только для адреса без хоста, а у проверяемых адресов хост есть.
+    // Ошибка возможна только для адреса без хоста; вызывающий код такие адреса сюда не передаёт.
     let _ = clean.set_username("");
     let _ = clean.set_password(None);
+    clean.as_str().trim_end_matches('/').to_string()
+}
+
+/// Ошибка «учётные данные в адресе»; в тексте адрес показан без имени и пароля.
+fn credentials_in_url(u: &url::Url) -> AppError {
     invalid(ltext!(
         "errors.connections.credentialsInUrl",
         "Remove the user name and password from “{{url}}”: credentials do not belong in the address (a proxy with a password is set via the system HTTPS_PROXY)",
-        url = clean.as_str().trim_end_matches('/')
+        url = without_userinfo(u)
     ))
 }
 
