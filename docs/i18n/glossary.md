@@ -1,0 +1,41 @@
+# Глоссарий переводов Glafira for Kubernetes
+
+Единые решения по терминам. Эталон ключей и параметров — `en.json`, эталон смысла — `ru.json`. Меняя решение,
+исправьте его во всех словарях одним коммитом. Общие правила стиля — как в Glafira for Apache Kafka: коротко и
+нейтрально, параметры `{{…}}` и теги `<code>` не переводятся, многоточие — `…`, тире — `—`.
+
+## Не переводится
+OpenShift, OKD, Kubernetes, Platform V DropApp, Glafira, OAuth, OIDC, TLS, PEM, DNS, TCP, CA, API, URL, JSON, MCP,
+LLM, kubeconfig, `oc`, `kubectl`; названия дистрибутивов (EKS, GKE, AKS, Rancher, Deckhouse, k3s, RKE2); названия
+видов ресурсов (Pod, Deployment, StatefulSet, DaemonSet, DeploymentConfig, Job, CronJob, Route, Ingress, Gateway,
+HTTPRoute, GRPCRoute, Service, ConfigMap, Secret, PVC, HPA, ResourceQuota, LimitRange, ClusterOperator) и групп API
+(Gateway API); `request` / `limit` в значении полей ресурсов; команды, адреса и имена переменных (`HTTPS_PROXY`,
+`NO_PROXY`, `oc login --web`, `interactiveMode`).
+
+## Термины
+
+| en | ru | Примечание |
+|---|---|---|
+| connection | подключение | |
+| cluster | кластер | |
+| project | проект | namespace OpenShift; «namespace» — только там, где речь об обычном Kubernetes |
+| node | нода | |
+| pod | под | в тексте; вид ресурса в таблицах — Pod |
+| workload | workload | |
+| sign in / sign-in | войти / вход | не «логин» |
+| token | токен | |
+| client certificate | клиентский сертификат | |
+| trusted CA | доверенный CA | |
+| certificate verification | проверка сертификата | |
+| proxy | прокси | |
+| read-only | только чтение | |
+| environment | окружение | local, dev, test, stage, prod не переводятся |
+| folder | папка | |
+| session expired | сессия истекла | |
+| rights / permissions | права | «нет прав: …» |
+| connection check / test connection | проверка подключения / проверить подключение | |
+| platform | платформа | OpenShift или Kubernetes (§4.3 спеки) |
+| distribution | дистрибутив | EKS, GKE, Rancher… |
+| exec plugin | exec-плагин | команда kubeconfig, которая выдаёт учётные данные |
+| launch line | строка запуска | путь, аргументы и переменные exec-плагина |
+| allow (to run a command) | разрешить (запуск) | подтверждение строки запуска |
