@@ -172,6 +172,7 @@ pub fn save_connection_blocking(
 pub async fn delete_connection(state: State<'_, AppState>, id: String) -> AppResult<()> {
     let st = state.inner().clone();
     st.logins.cancel(&id);
+    st.logins.cancel(&crate::auth::test_key(&id));
     blocking(move || st.delete_connection_full(&id)).await
 }
 
@@ -228,14 +229,19 @@ pub async fn connect(
     connection_id: String,
     fresh: bool,
 ) -> AppResult<ConnectionInfo> {
-    let st = state.inner().clone();
-    ensure_allowed(&st.connections.get(&connection_id)?, &st.policy.status)?;
-    match st.connected(&connection_id, fresh).await {
+    connection_info(state.inner(), &connection_id, fresh).await
+}
+
+/// Сведения о подключении для `connect`; политика проверяется и для клиента из пула.
+pub async fn connection_info(st: &AppState, id: &str, fresh: bool) -> AppResult<ConnectionInfo> {
+    ensure_allowed(&st.connections.get(id)?, &st.policy.status)?;
+    match st.connected(id, fresh).await {
         Ok(c) => Ok(c.info.clone()),
-        Err(e) => {
-            st.evict_if_broken(&connection_id, &e);
-            Err(e)
-        }
+        // Ошибку самого подключения в `evict_if_broken` не передаём (он — для ошибок уже
+        // полученного клиента): неудачная попытка в пул не попадает, а сброс сменил бы
+        // поколение, и ожидавшие очереди не получили бы её итог — каждый снова запустил бы
+        // exec-плагин или вход.
+        Err(e) => Err(e),
     }
 }
 

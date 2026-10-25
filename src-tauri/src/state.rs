@@ -183,20 +183,20 @@ mod tests {
         count
     }
 
-    /// Три чтения подключаются одновременно: плагин запускается один раз, все получают его ошибку.
+    /// Три чтения подключаются одновременно (`connect` — одно подключение профиля `e`): плагин
+    /// запускается один раз, все получают его ошибку.
     #[cfg(unix)]
-    async fn concurrent_connects(st: &AppState) -> Vec<AppError> {
-        let first = tokio::spawn({
-            let st = st.clone();
-            async move { st.connected("e", false).await }
-        });
+    async fn concurrent_connects<T, F>(
+        st: &AppState,
+        connect: impl Fn(AppState) -> F,
+    ) -> Vec<AppError>
+    where
+        T: Send + 'static,
+        F: std::future::Future<Output = AppResult<T>> + Send + 'static,
+    {
+        let first = tokio::spawn(connect(st.clone()));
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let rest: Vec<_> = (0..2)
-            .map(|_| {
-                let st = st.clone();
-                tokio::spawn(async move { st.connected("e", false).await })
-            })
-            .collect();
+        let rest: Vec<_> = (0..2).map(|_| tokio::spawn(connect(st.clone()))).collect();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let mut errors = Vec::new();
         for h in std::iter::once(first).chain(rest) {
@@ -205,33 +205,41 @@ mod tests {
         errors
     }
 
+    /// Плагин падает: ожидавшие получают его ошибку, следующее подключение — новая попытка.
     #[cfg(unix)]
-    #[tokio::test]
-    async fn waiters_share_the_failure_instead_of_rerunning_the_plugin() {
+    async fn waiters_share_the_failure<T, F>(connect: impl Fn(AppState) -> F + Copy)
+    where
+        T: Send + 'static,
+        F: std::future::Future<Output = AppResult<T>> + Send + 'static,
+    {
         let dir = tempfile::tempdir().unwrap();
         let st = state(dir.path());
         let count = counting_plugin(&st, dir.path(), "fail");
-        let errors = concurrent_connects(&st).await;
+        let errors = concurrent_connects(&st, connect).await;
         assert!(
             errors.iter().all(|e| e.key == "errors.exec.failed"),
             "{errors:?}"
         );
         assert_eq!(std::fs::read_to_string(&count).unwrap().lines().count(), 1);
         // Следующее подключение после неудачи — новая попытка.
-        let e = st.connected("e", false).await.err().unwrap();
+        let e = connect(st.clone()).await.err().unwrap();
         assert_eq!(e.key, "errors.exec.failed");
         assert_eq!(std::fs::read_to_string(&count).unwrap().lines().count(), 2);
     }
 
+    /// Ожидание плагина отменили: отмена — итог всех ожидавших, плагин больше не запускается.
     #[cfg(unix)]
-    #[tokio::test]
-    async fn cancelling_the_plugin_cancels_every_waiter() {
+    async fn cancel_reaches_every_waiter<T, F>(connect: impl Fn(AppState) -> F + Send + 'static)
+    where
+        T: Send + 'static,
+        F: std::future::Future<Output = AppResult<T>> + Send + 'static,
+    {
         let dir = tempfile::tempdir().unwrap();
         let st = state(dir.path());
         let count = counting_plugin(&st, dir.path(), "wait");
         let waiting = tokio::spawn({
             let st = st.clone();
-            async move { concurrent_connects(&st).await }
+            async move { concurrent_connects(&st, connect).await }
         });
         // Плагин запущен (записал строку) — отменяем его ожидание.
         let started = async {
@@ -250,6 +258,30 @@ mod tests {
             "{errors:?}"
         );
         assert_eq!(std::fs::read_to_string(&count).unwrap().lines().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn waiters_share_the_failure_instead_of_rerunning_the_plugin() {
+        waiters_share_the_failure(|st| async move { st.connected("e", false).await }).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_the_plugin_cancels_every_waiter() {
+        cancel_reaches_every_waiter(|st| async move { st.connected("e", false).await }).await;
+    }
+
+    /// То же через команду `connect`: её ошибка подключения не сбрасывает клиент, иначе новое
+    /// поколение лишило бы ожидавших общего итога и каждый запустил бы плагин заново.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_command_waiters_share_the_failure_and_the_cancel() {
+        let connect = |st: AppState| async move {
+            crate::commands::connections::connection_info(&st, "e", false).await
+        };
+        waiters_share_the_failure(connect).await;
+        cancel_reaches_every_waiter(connect).await;
     }
 
     #[test]
