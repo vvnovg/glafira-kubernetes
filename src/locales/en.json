@@ -166,6 +166,10 @@
       "favorites": "Shown first in the tree. Separate with commas.",
       "manualNamespaces": "If the cluster does not let you list projects, list the ones you work with here.",
       "test": "Checks step by step: address, TLS, sign-in, platform and projects. Unsaved fields are tested too."
+    },
+    "cluster": {
+      "platform": "Detected from the API groups and the version: OpenShift, or Kubernetes with its distribution (EKS, GKE, AKS, Rancher, Deckhouse, k3s, RKE2).",
+      "apiGroups": "What the cluster offers beyond plain Kubernetes: Route, projects and DeploymentConfig (OpenShift), Gateway API. They decide which objects are shown."
     }
   },
   "connections": {
@@ -236,6 +240,39 @@
         "discovery": "Platform",
         "projects": "Projects"
       }
+    }
+  },
+  "cluster": {
+    "connection": {
+      "connecting": "Connecting…",
+      "reconnect": "Reconnect",
+      "edit": "Edit connection",
+      "user": "Signed in as",
+      "platform": "Platform",
+      "version": "Kubernetes version",
+      "apiGroups": "Found in the cluster",
+      "capabilities": "What you can read at the cluster level",
+      "groups_one": "{{count}} group",
+      "groups_other": "{{count}} groups"
+    },
+    "capability": {
+      "listProjects": "List of projects",
+      "listNodes": "Nodes",
+      "listAllPods": "Pods in all projects",
+      "readClusterOperators": "Cluster operators",
+      "readClusterVersion": "Cluster version and updates"
+    },
+    "session": {
+      "title": "Sign in again",
+      "loginBrowser": "Sign in via browser",
+      "waitingBrowser": "Waiting for sign-in in the browser…",
+      "cancelLogin": "Cancel",
+      "loginExec": "Run the exec plugin again",
+      "waitingExec": "Waiting for the exec plugin… If it opened the browser, finish signing in there.",
+      "pasteToken": "Token",
+      "saveToken": "Save token",
+      "tokenPage": "Get a token on the cluster page",
+      "editConnection": "Edit connection"
     }
   }
 }

@@ -166,6 +166,10 @@
       "favorites": "Показываются первыми в дереве. Через запятую.",
       "manualNamespaces": "Если кластер не даёт вам список проектов, перечислите здесь те, с которыми работаете.",
       "test": "Проверяет по шагам: адрес, TLS, вход, платформу и проекты. Несохранённые поля тоже проверяются."
+    },
+    "cluster": {
+      "platform": "Определяется по группам API и версии: OpenShift или Kubernetes с дистрибутивом (EKS, GKE, AKS, Rancher, Deckhouse, k3s, RKE2).",
+      "apiGroups": "Что есть в кластере сверх обычного Kubernetes: Route, проекты и DeploymentConfig (OpenShift), Gateway API. От этого зависит, какие объекты показываются."
     }
   },
   "connections": {
@@ -236,6 +240,41 @@
         "discovery": "Платформа",
         "projects": "Проекты"
       }
+    }
+  },
+  "cluster": {
+    "connection": {
+      "connecting": "Подключение…",
+      "reconnect": "Подключиться заново",
+      "edit": "Изменить подключение",
+      "user": "Вход выполнен как",
+      "platform": "Платформа",
+      "version": "Версия Kubernetes",
+      "apiGroups": "Найдено в кластере",
+      "capabilities": "Что вам доступно на уровне кластера",
+      "groups_one": "{{count}} группа",
+      "groups_few": "{{count}} группы",
+      "groups_many": "{{count}} групп",
+      "groups_other": "{{count}} группы"
+    },
+    "capability": {
+      "listProjects": "Список проектов",
+      "listNodes": "Ноды",
+      "listAllPods": "Поды во всех проектах",
+      "readClusterOperators": "Операторы кластера",
+      "readClusterVersion": "Версия кластера и обновления"
+    },
+    "session": {
+      "title": "Войдите снова",
+      "loginBrowser": "Войти через браузер",
+      "waitingBrowser": "Ожидание входа в браузере…",
+      "cancelLogin": "Отменить",
+      "loginExec": "Запустить exec-плагин снова",
+      "waitingExec": "Ожидание exec-плагина… Если он открыл браузер, завершите вход там.",
+      "pasteToken": "Токен",
+      "saveToken": "Сохранить токен",
+      "tokenPage": "Получить токен на странице кластера",
+      "editConnection": "Изменить подключение"
     }
   }
 }
