@@ -86,6 +86,8 @@ pub fn run() {
             commands::cluster::list_cluster_operators,
             commands::projects::list_projects,
             commands::projects::get_namespace_access,
+            commands::objects::list_workloads,
+            commands::objects::get_workload,
         ])
         .run(tauri::generate_context!())
         .expect("error while building tauri application");

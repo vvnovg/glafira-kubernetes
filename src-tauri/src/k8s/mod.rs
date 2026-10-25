@@ -4,6 +4,7 @@ pub mod access;
 pub mod cluster;
 pub mod config;
 pub mod connectivity;
+pub mod containers;
 pub mod errors;
 pub mod kubeconfig;
 pub mod nodes;
@@ -12,6 +13,8 @@ pub mod overview;
 pub mod pool;
 pub mod projects;
 pub mod read;
+pub mod selectors;
 #[cfg(test)]
 pub(crate) mod testing;
 pub mod view;
+pub mod workloads;

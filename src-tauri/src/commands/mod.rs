@@ -4,6 +4,7 @@ pub mod cluster;
 pub mod connections;
 pub mod folders;
 pub mod kubeconfig;
+pub mod objects;
 pub mod projects;
 pub mod sessions;
 pub mod settings;
