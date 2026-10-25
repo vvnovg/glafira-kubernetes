@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>PayloadContent</key>
+  <array>
+    <dict>
+      <key>PayloadType</key><string>io.github.vvnovg.glafira.kubernetes</string>
+      <key>PayloadIdentifier</key><string>io.github.vvnovg.glafira.kubernetes.policy</string>
+      <key>PayloadUUID</key><string>00000000-0000-0000-0000-000000000001</string>
+      <key>PayloadVersion</key><integer>1</integer>
+      <key>updatesEnabled</key><false/>
+      <key>updateUrl</key><string>https://mirror.example.corp/glafira-kubernetes/latest.json</string>
+      <key>language</key><string>en</string>
+      <key>mcpEnabled</key><false/>
+      <key>allowInsecureTls</key><false/>
+      <key>allowExecAuth</key><false/>
+    </dict>
+  </array>
+  <key>PayloadDisplayName</key><string>Glafira for Kubernetes policy</string>
+  <key>PayloadIdentifier</key><string>io.github.vvnovg.glafira.kubernetes.profile</string>
+  <key>PayloadType</key><string>Configuration</string>
+  <key>PayloadUUID</key><string>00000000-0000-0000-0000-000000000002</string>
+  <key>PayloadVersion</key><integer>1</integer>
+</dict>
+</plist>

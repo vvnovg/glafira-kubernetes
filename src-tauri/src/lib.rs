@@ -1,14 +1,23 @@
 #[macro_use]
 pub mod i18n;
+pub mod commands;
 mod dock_name;
 pub mod error;
 pub mod logging;
+pub mod policy;
 pub mod product;
 pub mod secrets;
+pub mod settings;
+pub mod state;
 pub mod storage;
 pub mod sync;
 
+use std::sync::Arc;
+
 use tauri::Manager;
+
+use crate::secrets::KeyringStore;
+use crate::state::AppState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -21,8 +30,18 @@ pub fn run() {
             if !crate::dock_name::set(crate::product::PRODUCT_NAME) {
                 tracing::warn!("dock name was not set: LaunchServices refused");
             }
+            let dir = app.path().app_data_dir()?;
+            let policy = crate::policy::sources::load();
+            tracing::info!(managed = policy.status.managed, "policy");
+            let st = AppState::new(&dir, Arc::new(KeyringStore::default()))?.with_policy(policy);
+            app.manage(st);
             Ok(())
         })
+        .invoke_handler(tauri::generate_handler![
+            commands::settings::get_language_settings,
+            commands::settings::set_language,
+            commands::settings::get_policy_status,
+        ])
         .run(tauri::generate_context!())
         .expect("error while building tauri application");
 }

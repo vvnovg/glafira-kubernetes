@@ -1,0 +1,9 @@
+Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Glafira\Kubernetes]
+"updatesEnabled"=dword:00000000
+"updateUrl"="https://mirror.example.corp/glafira-kubernetes/latest.json"
+"language"="en"
+"mcpEnabled"=dword:00000000
+"allowInsecureTls"=dword:00000000
+"allowExecAuth"=dword:00000000
