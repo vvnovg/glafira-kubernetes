@@ -69,7 +69,8 @@ fn needs_secret(secrets: &dyn SecretStore, p: &ConnectionProfile) -> AppResult<N
 }
 
 /// Exec-плагин в файле обмена: строка запуска переносится, но её подтверждение — нет
-/// (получатель подтверждает её заново), значения переменных, похожих на секреты, не пишутся.
+/// (получатель подтверждает её заново), значения переменных и аргументов, похожих на секреты,
+/// не пишутся.
 fn strip_exec_for_export(p: &mut ConnectionProfile) {
     if let AuthConfig::Exec(e) = &mut p.auth {
         e.approved = None;
@@ -78,6 +79,7 @@ fn strip_exec_for_export(p: &mut ConnectionProfile) {
                 v.value.clear();
             }
         }
+        e.args = crate::auth::exec::blank_secret_args(&e.args);
     }
 }
 
@@ -394,16 +396,28 @@ fn parents_first(folders: &[ConnectionFolder]) -> Vec<(&ConnectionFolder, bool)>
     out
 }
 
-/// Настройки подключения без места в дереве и локальных неизвестных полей.
-fn same_settings(a: &ConnectionProfile, b: &ConnectionProfile) -> bool {
-    let strip = |p: &ConnectionProfile| ConnectionProfile {
-        id: String::new(),
-        folder_id: None,
-        order: 0,
-        extra: Default::default(),
-        ..p.clone()
+/// Настройки подключения без места в дереве и локальных неизвестных полей. У exec-плагина не
+/// учитывается подтверждение (файл его не несёт), а пустое значение секрета во входящем файле
+/// считается совпадающим с локальным: файл секретов не несёт.
+fn same_settings(local: &ConnectionProfile, incoming: &ConnectionProfile) -> bool {
+    let strip = |p: &ConnectionProfile| {
+        let mut p = ConnectionProfile {
+            id: String::new(),
+            folder_id: None,
+            order: 0,
+            extra: Default::default(),
+            ..p.clone()
+        };
+        if let AuthConfig::Exec(e) = &mut p.auth {
+            e.approved = None;
+        }
+        p
     };
-    strip(a) == strip(b)
+    let mut incoming = incoming.clone();
+    if let (AuthConfig::Exec(l), AuthConfig::Exec(i)) = (&local.auth, &mut incoming.auth) {
+        crate::auth::exec::inherit_secrets(i, l);
+    }
+    strip(local) == strip(&incoming)
 }
 
 /// Строит новое состояние хранилища и предпросмотр импорта. Функция чистая: разрешение
@@ -500,6 +514,16 @@ pub(crate) fn plan_import(
             profile.folder_id = slot.folder_id.clone();
             profile.order = slot.order;
             profile.extra = std::mem::take(&mut slot.extra);
+            // Секреты exec-плагина тоже локальные: файл их не несёт. Подтверждение остаётся,
+            // только если строка запуска с этими секретами не изменилась (спец. §5.2).
+            if let (AuthConfig::Exec(new), AuthConfig::Exec(old)) = (&mut profile.auth, &slot.auth)
+            {
+                crate::auth::exec::inherit_secrets(new, old);
+                new.approved = old
+                    .approved
+                    .clone()
+                    .filter(|a| *a == crate::auth::exec::fingerprint(new));
+            }
             updated.push((TreeItemKind::Connection, profile.id.clone()));
             *slot = profile;
             continue;
@@ -1041,6 +1065,133 @@ mod tests {
             p.preview.skipped[0].reason.key,
             "errors.import.execForbidden"
         );
+    }
+
+    /// Exec-плагин с секретами в переменной окружения и в аргументах (оба вида записи), подтверждённый.
+    fn approved_exec_with_secrets() -> crate::storage::profile::ExecAuth {
+        let mut exec = crate::storage::profile::sample_exec();
+        exec.env.push(crate::storage::profile::ExecEnv {
+            name: "AWS_SECRET_ACCESS_KEY".into(),
+            value: "s3cr3t".into(),
+        });
+        exec.args.extend([
+            "--oidc-client-secret=top-secret".to_string(),
+            "--client-secret".to_string(),
+            "pair-secret".to_string(),
+        ]);
+        exec.approved = Some(crate::auth::exec::fingerprint(&exec));
+        exec
+    }
+
+    /// Локальное хранилище с одним подтверждённым exec-подключением и его экспорт в виде JSON.
+    fn exec_store_and_export() -> (StoreData, serde_json::Value) {
+        let (_d, s) = store();
+        let mut p = sample_profile("e");
+        p.auth = AuthConfig::Exec(approved_exec_with_secrets());
+        s.upsert(p).unwrap();
+        let out = build_export(&s, &MemoryStore::default(), None, "1", "now").unwrap();
+        (s.snapshot(), serde_json::to_value(&out).unwrap())
+    }
+
+    fn exec_of(p: &ConnectionProfile) -> &crate::storage::profile::ExecAuth {
+        let AuthConfig::Exec(e) = &p.auth else {
+            panic!("exec")
+        };
+        e
+    }
+
+    #[test]
+    fn exec_secret_arguments_are_not_exported() {
+        let (_data, v) = exec_store_and_export();
+        let text = serde_json::to_string(&v).unwrap();
+        for secret in ["s3cr3t", "top-secret", "pair-secret"] {
+            assert!(!text.contains(secret), "{secret} в файле экспорта");
+        }
+        let args = &v["connections"][0]["auth"]["args"];
+        assert_eq!(args[2], "--oidc-issuer-url=https://sso.corp/realms/k8s");
+        assert_eq!(args[3], "--oidc-client-secret=");
+        assert_eq!(args[4], "--client-secret");
+        assert_eq!(args[5], "");
+    }
+
+    /// Повторный импорт собственного экспорта ничего не меняет: подтверждение и секреты остаются.
+    #[test]
+    fn reimporting_own_export_leaves_exec_connection_unchanged() {
+        let (data, v) = exec_store_and_export();
+        let bytes = serde_json::to_vec(&v).unwrap();
+        let p = plan(&data, &bytes, &opts(None));
+        assert_eq!(preview_ids(&p.preview.unchanged), ["e"]);
+        assert!(p.preview.updated.is_empty() && p.preview.added.is_empty());
+        assert_eq!(conn(&p.next, "e"), conn(&data, "e"));
+        let e = exec_of(conn(&p.next, "e"));
+        assert!(crate::auth::exec::is_approved(e));
+        assert_eq!(e.env[1].value, "s3cr3t");
+        assert_eq!(e.args[3], "--oidc-client-secret=top-secret");
+        assert_eq!(e.args[5], "pair-secret");
+    }
+
+    /// Изменённый аргумент: секреты остаются локальными, но строка запуска другая — нужно новое подтверждение.
+    #[test]
+    fn import_changing_an_argument_keeps_secrets_and_drops_approval() {
+        let (data, mut v) = exec_store_and_export();
+        v["connections"][0]["auth"]["args"]
+            .as_array_mut()
+            .unwrap()
+            .push("--v=1".into());
+        let bytes = serde_json::to_vec(&v).unwrap();
+        let p = plan(&data, &bytes, &opts(None));
+        assert_eq!(preview_ids(&p.preview.updated), ["e"]);
+        let e = exec_of(conn(&p.next, "e"));
+        assert_eq!(e.args.last().map(String::as_str), Some("--v=1"));
+        assert_eq!(e.env[1].value, "s3cr3t");
+        assert_eq!(e.args[3], "--oidc-client-secret=top-secret");
+        assert_eq!(e.args[5], "pair-secret");
+        assert_eq!(e.approved, None);
+        assert!(!crate::auth::exec::is_approved(e));
+    }
+
+    /// Изменились только настройки вне строки запуска: подтверждение остаётся.
+    #[test]
+    fn import_keeping_the_launch_line_keeps_approval() {
+        let (data, mut v) = exec_store_and_export();
+        v["connections"][0]["apiUrl"] = "https://api.other:6443".into();
+        let bytes = serde_json::to_vec(&v).unwrap();
+        let p = plan(&data, &bytes, &opts(None));
+        assert_eq!(preview_ids(&p.preview.updated), ["e"]);
+        let c = conn(&p.next, "e");
+        assert_eq!(c.api_url, "https://api.other:6443");
+        let e = exec_of(c);
+        assert!(crate::auth::exec::is_approved(e));
+        assert_eq!(e.env[1].value, "s3cr3t");
+        assert_eq!(e.args[5], "pair-secret");
+    }
+
+    /// Непустое значение секрета из файла заменяет локальное и тоже требует нового подтверждения.
+    #[test]
+    fn import_with_a_new_secret_value_replaces_it_and_drops_approval() {
+        let (data, mut v) = exec_store_and_export();
+        v["connections"][0]["auth"]["env"][1]["value"] = "rotated".into();
+        let bytes = serde_json::to_vec(&v).unwrap();
+        let p = plan(&data, &bytes, &opts(None));
+        assert_eq!(preview_ids(&p.preview.updated), ["e"]);
+        let e = exec_of(conn(&p.next, "e"));
+        assert_eq!(e.env[1].value, "rotated");
+        assert_eq!(e.args[3], "--oidc-client-secret=top-secret");
+        assert_eq!(e.approved, None);
+    }
+
+    /// Подключение, которого нет локально, приходит с пустыми секретами и без подтверждения.
+    #[test]
+    fn new_exec_connection_from_a_file_has_no_secrets_and_no_approval() {
+        let (_data, v) = exec_store_and_export();
+        let bytes = serde_json::to_vec(&v).unwrap();
+        let p = plan(&StoreData::default(), &bytes, &opts(None));
+        assert_eq!(preview_ids(&p.preview.added), ["e"]);
+        let e = exec_of(conn(&p.next, "e"));
+        assert_eq!(e.env[1].value, "");
+        assert_eq!(e.args[3], "--oidc-client-secret=");
+        assert_eq!(e.args[5], "");
+        assert_eq!(e.approved, None);
     }
 
     #[test]

@@ -1,5 +1,6 @@
-//! Профиль подключения к кластеру Kubernetes (спец. §5.1). Секреты в профиле не хранятся: токен и ключ
-//! клиентского сертификата лежат в keychain (`secrets::TOKEN`, `secrets::CLIENT_KEY`).
+//! Профиль подключения к кластеру Kubernetes (спец. §5.1). Токен и ключ клиентского сертификата в
+//! профиле не хранятся, они лежат в keychain (`secrets::TOKEN`, `secrets::CLIENT_KEY`); секретные
+//! значения exec-плагина остаются в профиле, как в kubeconfig (`ExecAuth`).
 
 use serde::{Deserialize, Serialize};
 
@@ -31,10 +32,11 @@ pub enum AuthConfig {
     Exec(ExecAuth),
 }
 
-/// Exec-плагин: что и как запускать. Секретов здесь нет (как и в kubeconfig, откуда он обычно
-/// приходит); значения переменных с именами, похожими на секреты, интерфейс скрывает,
-/// а экспорт не пишет.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Exec-плагин: что и как запускать. Секретные значения (переменные окружения вроде
+/// `AWS_SECRET_ACCESS_KEY`, аргументы вроде `--oidc-client-secret`) остаются в профиле, как в
+/// kubeconfig, откуда плагин обычно приходит; интерфейс их скрывает, экспорт не пишет, а `Debug`
+/// не печатает.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecAuth {
     /// Абсолютный путь к команде: имя из kubeconfig разрешается при импорте или кнопкой «Найти»
@@ -57,10 +59,46 @@ pub struct ExecAuth {
     pub approved: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecEnv {
     pub name: String,
     pub value: String,
+}
+
+/// Вместо секретных значений `Debug` печатает это.
+const REDACTED: &str = "***";
+
+/// Значение переменной с секретным именем не печатается, чтобы не попасть в лог или сообщение
+/// об ошибке.
+impl std::fmt::Debug for ExecEnv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = if crate::auth::exec::is_secret_name(&self.name) {
+            REDACTED
+        } else {
+            self.value.as_str()
+        };
+        f.debug_struct("ExecEnv")
+            .field("name", &self.name)
+            .field("value", &value)
+            .finish()
+    }
+}
+
+/// Секретные значения аргументов и (через `ExecEnv`) переменных окружения не печатаются.
+impl std::fmt::Debug for ExecAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExecAuth")
+            .field("command", &self.command)
+            .field(
+                "args",
+                &crate::auth::exec::mask_secret_args(&self.args, REDACTED),
+            )
+            .field("env", &self.env)
+            .field("api_version", &self.api_version)
+            .field("provide_cluster_info", &self.provide_cluster_info)
+            .field("approved", &self.approved)
+            .finish()
+    }
 }
 
 pub const EXEC_API_V1: &str = "client.authentication.k8s.io/v1";
@@ -529,6 +567,46 @@ mod tests {
             panic!("exec")
         };
         assert_eq!((e.api_version.as_str(), e.args.len()), (EXEC_API_V1, 0));
+    }
+
+    /// `{:?}` не печатает секретные значения: ни в переменных окружения, ни в аргументах; на диск
+    /// (serde) они при этом пишутся как есть.
+    #[test]
+    fn exec_debug_hides_secret_values() {
+        let mut e = sample_exec();
+        e.env.push(ExecEnv {
+            name: "AWS_SECRET_ACCESS_KEY".into(),
+            value: "s3cr3t".into(),
+        });
+        e.args.extend([
+            "--oidc-client-secret=top-secret".to_string(),
+            "--client-secret".to_string(),
+            "pair-secret".to_string(),
+        ]);
+        let mut p = sample_profile("x");
+        p.auth = AuthConfig::Exec(e.clone());
+        let texts = [
+            format!("{e:?}"),
+            format!("{:#?}", e),
+            format!("{p:?}"),
+            format!("{:?}", e.env),
+            format!("{:?}", e.env[1]),
+        ];
+        for text in &texts {
+            for secret in ["s3cr3t", "top-secret", "pair-secret"] {
+                assert!(!text.contains(secret), "{secret} в {text}");
+            }
+        }
+        let text = &texts[0];
+        assert!(text.contains("AWS_SECRET_ACCESS_KEY"), "{text}");
+        assert!(text.contains("http://proxy:3128"), "{text}");
+        assert!(
+            text.contains("--oidc-issuer-url=https://sso.corp/realms/k8s"),
+            "{text}"
+        );
+        assert!(text.contains("--oidc-client-secret=***"), "{text}");
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(json.contains("s3cr3t") && json.contains("pair-secret"));
     }
 
     type ExecChange = Box<dyn Fn(&mut ExecAuth)>;

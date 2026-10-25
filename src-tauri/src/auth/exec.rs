@@ -85,12 +85,144 @@ pub fn check_allowed(command: &str, args: &[String]) -> Result<(), LocalizedText
     Ok(())
 }
 
-/// Похоже ли имя переменной окружения на секрет: такие значения не показываются и не экспортируются.
+/// Похоже ли имя переменной окружения или ключа командной строки на секрет: такие значения
+/// не показываются и не экспортируются. `PASS` покрывает PASSWORD, PASSWD и PASSPHRASE.
 pub fn is_secret_name(name: &str) -> bool {
     let n = name.to_ascii_uppercase();
-    ["TOKEN", "SECRET", "PASSWORD", "PASSWD", "KEY", "CREDENTIAL"]
+    [
+        "TOKEN",
+        "SECRET",
+        "PASS",
+        "KEY",
+        "BEARER",
+        "COOKIE",
+        "CREDENTIAL",
+    ]
+    .iter()
+    .any(|w| n.contains(w))
+}
+
+/// Место значения секретного аргумента в списке аргументов.
+struct SecretArg {
+    /// Имя ключа без ведущих дефисов.
+    flag: String,
+    /// Номер элемента списка, в котором лежит значение.
+    index: usize,
+    /// `--имя=значение`: значение — часть того же элемента после `=`; иначе (`--имя значение`) —
+    /// отдельный следующий элемент.
+    inline: bool,
+}
+
+impl SecretArg {
+    fn value<'a>(&self, args: &'a [String]) -> &'a str {
+        let a = args[self.index].as_str();
+        if self.inline {
+            a.split_once('=').map_or("", |(_, v)| v)
+        } else {
+            a
+        }
+    }
+
+    fn set(&self, args: &mut [String], value: &str) {
+        let a = &mut args[self.index];
+        if self.inline {
+            let keep = a.find('=').map_or(a.len(), |i| i + 1);
+            a.truncate(keep);
+            a.push_str(value);
+        } else {
+            *a = value.to_string();
+        }
+    }
+}
+
+/// Секретные аргументы: `--имя=значение` или пара `--имя значение`, где имя ключа без ведущих
+/// дефисов подходит под `is_secret_name` (`--oidc-client-secret=…` у kubectl oidc-login,
+/// `--client-secret …` у Azure kubelogin). Значением пары считается следующий элемент, каким бы
+/// он ни был; ключ без значения в конце списка ничего не скрывает.
+fn secret_args(args: &[String]) -> Vec<SecretArg> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        i += 1;
+        if !a.starts_with('-') {
+            continue;
+        }
+        let (name, inline) = match a.split_once('=') {
+            Some((name, _)) => (name, true),
+            None => (a.as_str(), false),
+        };
+        let flag = name.trim_start_matches('-');
+        if !is_secret_name(flag) {
+            continue;
+        }
+        if inline {
+            out.push(SecretArg {
+                flag: flag.to_string(),
+                index: i - 1,
+                inline,
+            });
+        } else if i < args.len() {
+            out.push(SecretArg {
+                flag: flag.to_string(),
+                index: i,
+                inline,
+            });
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Аргументы, в которых значения секретных ключей заменены на `mask`.
+pub fn mask_secret_args(args: &[String], mask: &str) -> Vec<String> {
+    let mut out = args.to_vec();
+    for slot in secret_args(args) {
+        slot.set(&mut out, mask);
+    }
+    out
+}
+
+/// Аргументы без значений секретных ключей (для экспорта): `--имя=значение` становится `--имя=`,
+/// в паре `--имя значение` значение становится пустой строкой.
+pub fn blank_secret_args(args: &[String]) -> Vec<String> {
+    mask_secret_args(args, "")
+}
+
+/// Все секретные значения exec-плагина: переменные окружения с секретными именами и значения
+/// секретных аргументов; пустые пропускаются. По ним маскируется вывод плагина.
+pub fn secret_values(e: &ExecAuth) -> Vec<String> {
+    let env = e
+        .env
         .iter()
-        .any(|w| n.contains(w))
+        .filter(|v| is_secret_name(&v.name))
+        .map(|v| v.value.clone());
+    let from_args = secret_args(&e.args)
+        .into_iter()
+        .map(|slot| slot.value(&e.args).to_string());
+    env.chain(from_args).filter(|v| !v.is_empty()).collect()
+}
+
+/// Подставляет локальные секреты туда, где во входящем плагине значение пустое: файл обмена
+/// секретов не несёт, а обновление подключения не должно их стирать. Переменные сопоставляются
+/// по имени, аргументы — по имени ключа; непустое значение из файла остаётся как есть.
+pub fn inherit_secrets(incoming: &mut ExecAuth, local: &ExecAuth) {
+    for v in &mut incoming.env {
+        if v.value.is_empty()
+            && is_secret_name(&v.name)
+            && let Some(l) = local.env.iter().find(|l| l.name == v.name)
+        {
+            v.value.clone_from(&l.value);
+        }
+    }
+    let local_slots = secret_args(&local.args);
+    for slot in secret_args(&incoming.args) {
+        if slot.value(&incoming.args).is_empty()
+            && let Some(l) = local_slots.iter().find(|l| l.flag == slot.flag)
+        {
+            slot.set(&mut incoming.args, l.value(&local.args));
+        }
+    }
 }
 
 /// Отпечаток строки запуска: путь, аргументы, переменные окружения, версия API и
@@ -145,13 +277,15 @@ pub fn standard_dirs(home: Option<&Path>, local_app_data: Option<&Path>) -> Vec<
 }
 
 /// Где искать команду: каталоги PATH (оболочки входа или процесса), затем стандартные; без повторов.
+/// Только абсолютные каталоги: `.` или `bin` в PATH означали бы запуск того, что лежит в рабочем
+/// каталоге, а `resolve_command` обязан вернуть абсолютный путь.
 pub fn search_dirs(path_var: Option<&str>, standard: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     let from_path = path_var
         .map(|p| std::env::split_paths(p).collect::<Vec<_>>())
         .unwrap_or_default();
     for d in from_path.into_iter().chain(standard) {
-        if !d.as_os_str().is_empty() && !out.contains(&d) {
+        if d.is_absolute() && !out.contains(&d) {
             out.push(d);
         }
     }
@@ -174,7 +308,9 @@ pub fn resolve_command(
         return is_file(p).then(|| p.to_path_buf());
     }
     if p.components().count() > 1 {
-        return base.map(|b| b.join(p)).filter(|c| is_file(c));
+        return base
+            .map(|b| b.join(p))
+            .filter(|c| c.is_absolute() && is_file(c));
     }
     dirs.iter().find_map(|d| {
         let mut candidates = vec![d.join(p)];
@@ -298,6 +434,13 @@ mod tests {
             "AWS_SESSION_TOKEN",
             "OIDC_PASSWORD",
             "api_key",
+            "DB_PASSWD",
+            "OIDC_PASSPHRASE",
+            "PASS",
+            "AUTH_BEARER",
+            "SESSION_COOKIE",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "oidc-client-secret",
         ] {
             assert!(is_secret_name(s), "{s}");
         }
@@ -307,9 +450,173 @@ mod tests {
             "HTTPS_PROXY",
             "KUBECONFIG",
             "PATH",
+            "HOME",
+            "oidc-issuer-url",
         ] {
             assert!(!is_secret_name(s), "{s}");
         }
+    }
+
+    /// Exec-плагин с секретами в переменной окружения и в аргументах (обе формы записи).
+    fn exec_with_secrets() -> ExecAuth {
+        let mut e = sample_exec();
+        e.env.push(ExecEnv {
+            name: "AWS_SECRET_ACCESS_KEY".into(),
+            value: "s3cr3t".into(),
+        });
+        e.args.extend(args(&[
+            "--oidc-client-secret=top-secret",
+            "--client-secret",
+            "pair-secret",
+        ]));
+        e
+    }
+
+    #[test]
+    fn secret_argument_values_are_blanked_and_masked() {
+        let a = args(&[
+            "get-token",
+            "--login",
+            "spn",
+            "--client-secret",
+            "pair-secret",
+            "--oidc-client-secret=top-secret",
+            "-token=short",
+            "--server-id=api://x",
+            "--region",
+            "eu-west-1",
+            "--password=",
+            "--token-file",
+        ]);
+        assert_eq!(
+            blank_secret_args(&a),
+            args(&[
+                "get-token",
+                "--login",
+                "spn",
+                "--client-secret",
+                "",
+                "--oidc-client-secret=",
+                "-token=",
+                "--server-id=api://x",
+                "--region",
+                "eu-west-1",
+                "--password=",
+                "--token-file",
+            ]),
+            "значение без пары и не-ключи не трогаются"
+        );
+        assert_eq!(
+            mask_secret_args(&a, "***"),
+            args(&[
+                "get-token",
+                "--login",
+                "spn",
+                "--client-secret",
+                "***",
+                "--oidc-client-secret=***",
+                "-token=***",
+                "--server-id=api://x",
+                "--region",
+                "eu-west-1",
+                "--password=***",
+                "--token-file",
+            ])
+        );
+        // Позиционное `token` у aws-iam-authenticator — не ключ.
+        let b = args(&["token", "-i", "c"]);
+        assert_eq!(blank_secret_args(&b), b);
+        assert_eq!(blank_secret_args(&[]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn secret_values_cover_env_and_arguments() {
+        let e = exec_with_secrets();
+        assert_eq!(secret_values(&e), ["s3cr3t", "top-secret", "pair-secret"]);
+        let blanked = ExecAuth {
+            env: e
+                .env
+                .iter()
+                .map(|v| ExecEnv {
+                    name: v.name.clone(),
+                    value: if is_secret_name(&v.name) {
+                        String::new()
+                    } else {
+                        v.value.clone()
+                    },
+                })
+                .collect(),
+            args: blank_secret_args(&e.args),
+            ..e.clone()
+        };
+        assert!(secret_values(&blanked).is_empty(), "пустые не возвращаются");
+        assert!(secret_values(&sample_exec()).is_empty());
+    }
+
+    #[test]
+    fn local_secrets_fill_empty_incoming_values_only() {
+        let local = exec_with_secrets();
+        let mut incoming = ExecAuth {
+            env: vec![
+                local.env[0].clone(),
+                ExecEnv {
+                    name: "AWS_SECRET_ACCESS_KEY".into(),
+                    value: String::new(),
+                },
+            ],
+            args: blank_secret_args(&local.args),
+            ..local.clone()
+        };
+        inherit_secrets(&mut incoming, &local);
+        assert_eq!(incoming.env, local.env);
+        assert_eq!(incoming.args, local.args);
+
+        // Непустое значение из файла не затирается; секрета без пары среди локальных нет.
+        let mut incoming = ExecAuth {
+            env: vec![
+                ExecEnv {
+                    name: "AWS_SECRET_ACCESS_KEY".into(),
+                    value: "new".into(),
+                },
+                ExecEnv {
+                    name: "OTHER_TOKEN".into(),
+                    value: String::new(),
+                },
+            ],
+            args: args(&["oidc-login", "get-token", "--oidc-client-secret="]),
+            ..local.clone()
+        };
+        inherit_secrets(&mut incoming, &local);
+        assert_eq!(incoming.env[0].value, "new");
+        assert_eq!(incoming.env[1].value, "");
+        assert_eq!(incoming.args[2], "--oidc-client-secret=top-secret");
+    }
+
+    #[test]
+    fn search_dirs_keep_absolute_directories_only() {
+        let path = std::env::join_paths([".", "bin", "../x", "/usr/bin", ""])
+            .unwrap()
+            .into_string()
+            .unwrap();
+        let dirs = search_dirs(Some(&path), standard_dirs(Some(Path::new("home")), None));
+        assert!(dirs.iter().all(|d| d.is_absolute()), "{dirs:?}");
+        if cfg!(unix) {
+            assert_eq!(
+                dirs,
+                ["/usr/bin", "/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from),
+                "относительные каталоги PATH и домашний каталог без корня отброшены"
+            );
+        }
+    }
+
+    #[test]
+    fn relative_command_needs_an_absolute_base() {
+        let any = |_: &Path| true;
+        assert_eq!(
+            resolve_command("bin/plugin", Some(Path::new("kube")), &[], &any),
+            None
+        );
+        assert_eq!(resolve_command("bin/plugin", None, &[], &any), None);
     }
 
     #[test]
@@ -331,6 +638,7 @@ mod tests {
             },
             |e: &mut ExecAuth| e.env[0].value = "http://other:3128".into(),
             |e: &mut ExecAuth| e.provide_cluster_info = true,
+            |e: &mut ExecAuth| e.api_version = crate::storage::profile::EXEC_API_V1BETA1.into(),
         ] {
             let mut changed = e.clone();
             change(&mut changed);
