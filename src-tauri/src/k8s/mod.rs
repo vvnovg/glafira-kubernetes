@@ -2,6 +2,7 @@
 
 pub mod cluster;
 pub mod config;
+pub mod connectivity;
 pub mod errors;
 pub mod pool;
 #[cfg(test)]

@@ -8,7 +8,7 @@ use k8s_openapi::api::authentication::v1::SelfSubjectReview;
 use k8s_openapi::api::authorization::v1::{
     ResourceAttributes, SelfSubjectAccessReview, SelfSubjectAccessReviewSpec,
 };
-use k8s_openapi::api::core::v1::Node;
+use k8s_openapi::api::core::v1::{Namespace, Node};
 use kube::api::{Api, ApiResource, DynamicObject, GroupVersionKind, ListParams, PostParams};
 use serde::Serialize;
 
@@ -225,6 +225,44 @@ pub async fn capabilities(client: &kube::Client, limit: Duration, d: &Discovered
     }
 }
 
+/// Имена проектов (`projects`, если есть группа `project.openshift.io`, иначе `namespaces`):
+/// первые 500 и признак «есть ещё».
+pub async fn list_project_names(
+    client: &kube::Client,
+    limit: Duration,
+    projects_api: bool,
+) -> AppResult<(Vec<String>, bool)> {
+    let params = ListParams::default().limit(500);
+    let list = if projects_api {
+        let ar = ApiResource::from_gvk_with_plural(
+            &GroupVersionKind::gvk("project.openshift.io", "v1", "Project"),
+            "projects",
+        );
+        let api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
+        let l = timed(limit, api.list(&params)).await?;
+        let more = l.metadata.continue_.is_some_and(|c| !c.is_empty());
+        (
+            l.items
+                .into_iter()
+                .filter_map(|p| p.metadata.name)
+                .collect(),
+            more,
+        )
+    } else {
+        let api: Api<Namespace> = Api::all(client.clone());
+        let l = timed(limit, api.list(&params)).await?;
+        let more = l.metadata.continue_.is_some_and(|c| !c.is_empty());
+        (
+            l.items
+                .into_iter()
+                .filter_map(|n| n.metadata.name)
+                .collect(),
+            more,
+        )
+    };
+    Ok(list)
+}
+
 /// Всё, что Glafira узнаёт при подключении. Первая ошибка («кто я», discovery) прерывает
 /// подключение; ошибки проверок прав дают «нет права».
 pub async fn probe(client: &kube::Client, limit: Duration) -> AppResult<ConnectionInfo> {
@@ -275,6 +313,14 @@ pub(crate) mod fixtures {
                 403,
                 "Forbidden",
                 r#"clusterversions.config.openshift.io "version" is forbidden: User "dev1" cannot get resource "clusterversions" in API group "config.openshift.io" at the cluster scope"#,
+            ),
+            "/apis/project.openshift.io/v1/projects" => (
+                200,
+                serde_json::json!({"apiVersion": "project.openshift.io/v1", "kind": "ProjectList",
+                "metadata": {}, "items": [
+                    {"apiVersion": "project.openshift.io/v1", "kind": "Project", "metadata": {"name": "team-a"}},
+                    {"apiVersion": "project.openshift.io/v1", "kind": "Project", "metadata": {"name": "team-b"}}
+                ]}),
             ),
             "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews" => {
                 let attrs = &s.body["spec"]["resourceAttributes"];
@@ -443,6 +489,29 @@ mod tests {
         });
         let info = probe(&client, LIMIT).await.unwrap();
         assert_eq!(info.capabilities, Capabilities::default());
+    }
+
+    #[tokio::test]
+    async fn project_names_of_openshift_and_kubernetes() {
+        let (client, server) = mock_client(|s| match s.path() {
+            "/api/v1/namespaces" => (
+                200,
+                serde_json::json!({"apiVersion": "v1", "kind": "NamespaceList",
+                    "metadata": {"continue": "token"},
+                    "items": [{"metadata": {"name": "default"}}]}),
+            ),
+            _ => fixtures::openshift(s),
+        });
+        let (names, more) = list_project_names(&client, LIMIT, true).await.unwrap();
+        assert_eq!(
+            (names, more),
+            (vec!["team-a".to_string(), "team-b".to_string()], false)
+        );
+        let (names, more) = list_project_names(&client, LIMIT, false).await.unwrap();
+        assert_eq!((names, more), (vec!["default".to_string()], true));
+        drop(client);
+        let seen = server.await.unwrap();
+        assert!(seen.iter().all(|s| s.uri.contains("limit=500")));
     }
 
     #[tokio::test(start_paused = true)]
