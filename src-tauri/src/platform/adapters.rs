@@ -49,8 +49,10 @@ pub enum PlatformOverview {
 #[serde(rename_all = "camelCase")]
 pub struct OpenShiftOverview {
     pub cluster_version: Part<ClusterVersionInfo>,
-    pub infrastructure: Option<String>,
-    pub console_url: Option<String>,
+    /// Тип инфраструктуры; `data: null` — объект есть, а типа в нём нет.
+    pub infrastructure: Part<Option<String>>,
+    /// Адрес веб-консоли; `data: null` — объект есть, а адреса в нём нет.
+    pub console_url: Part<Option<String>>,
     pub operators: Part<OperatorSummary>,
     pub machine_config_pools: Part<Vec<MachineConfigPoolRow>>,
 }
@@ -113,14 +115,14 @@ impl Platform for OpenShift {
             let infrastructure = async {
                 r.get_dynamic(&openshift::infrastructures(), None, "cluster")
                     .await
-                    .ok()
-                    .and_then(|o| openshift::infrastructure_type(&o))
+                    .map(|o| openshift::infrastructure_type(&o))
+                    .into()
             };
             let console = async {
                 r.get_dynamic(&openshift::consoles(), None, "cluster")
                     .await
-                    .ok()
-                    .and_then(|o| openshift::console_url(&o))
+                    .map(|o| openshift::console_url(&o))
+                    .into()
             };
             let operators = async {
                 if !caps.read_cluster_operators {
@@ -179,7 +181,7 @@ impl Platform for OpenShift {
 mod tests {
     use super::*;
     use crate::k8s::openshift::fixtures;
-    use crate::k8s::testing::{mock_client, status};
+    use crate::k8s::testing::{Seen, mock_client, status};
     use std::time::Duration;
 
     fn all_rights() -> Capabilities {
@@ -192,7 +194,22 @@ mod tests {
         }
     }
 
-    fn openshift_cluster(s: &crate::k8s::testing::Seen) -> (u16, serde_json::Value) {
+    /// 403 так, как отвечает API-сервер обычному пользователю без прав на объекты `config.openshift.io`.
+    fn forbidden(s: &Seen) -> (u16, serde_json::Value) {
+        let mut path = s.path().trim_start_matches("/apis/").split('/');
+        let group = path.next().unwrap_or_default();
+        let resource = path.nth(1).unwrap_or_default();
+        let verb = if path.next().is_some() { "get" } else { "list" };
+        status(
+            403,
+            "Forbidden",
+            &format!(
+                r#"{resource}.{group} is forbidden: User "dev1" cannot {verb} resource "{resource}" in API group "{group}" at the cluster scope"#
+            ),
+        )
+    }
+
+    fn openshift_cluster(s: &Seen) -> (u16, serde_json::Value) {
         match s.path() {
             "/apis/config.openshift.io/v1/clusterversions/version" => {
                 (200, fixtures::cluster_version())
@@ -206,7 +223,8 @@ mod tests {
                 serde_json::json!({"apiVersion": "config.openshift.io/v1", "kind": "Infrastructure",
                     "metadata": {"name": "cluster"}, "status": {"platformStatus": {"type": "VSphere"}}}),
             ),
-            other => status(403, "Forbidden", &format!("{other} is forbidden")),
+            // Консоль обычному пользователю не читается — самый частый случай.
+            _ => forbidden(s),
         }
     }
 
@@ -226,8 +244,18 @@ mod tests {
         };
         let cv = o.cluster_version.data.unwrap();
         assert_eq!(cv.available_updates, 2);
-        assert_eq!(o.infrastructure.as_deref(), Some("VSphere"));
-        assert_eq!(o.console_url, None, "консоль не читается — адреса нет");
+        assert_eq!(o.infrastructure.data, Some(Some("VSphere".into())));
+        assert!(o.infrastructure.error.is_none());
+        assert!(
+            o.console_url.data.is_none(),
+            "консоль не читается — адреса нет"
+        );
+        let denied = o.console_url.error.unwrap();
+        assert_eq!(
+            denied.key, "errors.k8s.forbiddenCluster",
+            "причина, а не «—»"
+        );
+        assert_eq!(denied.params["resource"], "consoles");
         let ops = o.operators.data.unwrap();
         assert_eq!(ops.total, 3);
         let names: Vec<_> = ops.problems.iter().map(|p| p.name.as_str()).collect();
@@ -235,8 +263,8 @@ mod tests {
         assert_eq!(o.machine_config_pools.data.unwrap().len(), 2);
         let json = serde_json::to_value(PlatformOverview::Openshift(OpenShiftOverview {
             cluster_version: Part::err(not_allowed("get", "clusterversions", None)),
-            infrastructure: None,
-            console_url: None,
+            infrastructure: Part::ok(None),
+            console_url: Part::err(not_allowed("get", "consoles", None)),
             operators: Part::ok(OperatorSummary {
                 total: 0,
                 problems: vec![],
@@ -246,11 +274,64 @@ mod tests {
         .unwrap();
         assert_eq!(json["kind"], "openshift");
         assert_eq!(json["operators"]["data"]["total"], 0);
+        // Как у остальных `Part`: либо `data` (у пустого значения — `null`), либо `error`.
+        assert_eq!(json["infrastructure"], serde_json::json!({"data": null}));
+        assert!(json["consoleUrl"].get("data").is_none());
+        assert_eq!(
+            json["consoleUrl"]["error"]["key"],
+            "errors.k8s.forbiddenCluster"
+        );
+    }
+
+    #[tokio::test]
+    async fn infrastructure_and_console_are_parts_with_a_value_or_without_one() {
+        let (client, _server) = mock_client(|s| match s.path() {
+            // Объект есть, а типа в нём нет.
+            "/apis/config.openshift.io/v1/infrastructures/cluster" => (
+                200,
+                serde_json::json!({"apiVersion": "config.openshift.io/v1", "kind": "Infrastructure",
+                    "metadata": {"name": "cluster"}, "status": {}}),
+            ),
+            "/apis/config.openshift.io/v1/consoles/cluster" => (
+                200,
+                serde_json::json!({"apiVersion": "config.openshift.io/v1", "kind": "Console",
+                    "metadata": {"name": "cluster"},
+                    "status": {"consoleURL": "https://console-openshift-console.apps.c.example.com"}}),
+            ),
+            _ => forbidden(s),
+        });
+        let r = reader(client);
+        let Some(overview) = adapter(PlatformKind::Openshift)
+            .overview(&r, &all_rights())
+            .await
+        else {
+            panic!("OpenShift");
+        };
+        let PlatformOverview::Openshift(o) = &overview;
+        assert_eq!(
+            o.infrastructure.data,
+            Some(None),
+            "значения нет, ошибки нет"
+        );
+        assert!(o.infrastructure.error.is_none());
+        assert_eq!(
+            o.console_url.data,
+            Some(Some(
+                "https://console-openshift-console.apps.c.example.com".into()
+            ))
+        );
+        let json = serde_json::to_value(&overview).unwrap();
+        assert_eq!(json["infrastructure"], serde_json::json!({"data": null}));
+        assert_eq!(
+            json["consoleUrl"],
+            serde_json::json!({"data": "https://console-openshift-console.apps.c.example.com"})
+        );
     }
 
     #[tokio::test]
     async fn openshift_overview_without_rights_does_not_ask() {
-        let (client, server) = mock_client(openshift_cluster);
+        // Пользователь без прав на объекты OpenShift: что бы ни спросили, ответ — 403.
+        let (client, server) = mock_client(forbidden);
         let r = reader(client);
         let Some(PlatformOverview::Openshift(o)) = adapter(PlatformKind::Openshift)
             .overview(&r, &Capabilities::default())
@@ -266,6 +347,17 @@ mod tests {
             o.operators.error.unwrap().params["resource"],
             "clusteroperators"
         );
+        // Остальные части спрашиваются без проверки прав, и каждая отвечает своей причиной.
+        for (part, resource) in [
+            (o.infrastructure.error, "infrastructures"),
+            (o.console_url.error, "consoles"),
+            (o.machine_config_pools.error, "machineconfigpools"),
+        ] {
+            let e = part.unwrap_or_else(|| panic!("{resource}: причины нет"));
+            assert_eq!(e.key, "errors.k8s.forbiddenCluster");
+            assert_eq!(e.params["resource"], resource);
+        }
+        assert!(o.machine_config_pools.data.is_none());
         drop(r);
         let seen = server.await.unwrap();
         assert!(

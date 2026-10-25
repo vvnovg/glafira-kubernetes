@@ -203,7 +203,7 @@ pub async fn cluster_overview(r: &ReadClient, info: &ConnectionInfo) -> ClusterO
 mod tests {
     use super::*;
     use crate::k8s::cluster::Capabilities;
-    use crate::k8s::testing::{Seen, mock_raw};
+    use crate::k8s::testing::{Seen, mock_raw, status};
     use crate::platform::{ApiGroups, Discovery, detect};
     use std::time::Duration;
 
@@ -313,6 +313,40 @@ mod tests {
                 .iter()
                 .any(|s| s.path() == "/api/v1/nodes" || s.path() == "/api/v1/namespaces")
         );
+    }
+
+    #[tokio::test]
+    async fn overview_shows_the_rest_when_one_part_is_forbidden() {
+        let (client, _server) = mock_raw(|s| match s.path() {
+            "/apis/networking.k8s.io/v1/ingressclasses" => {
+                let (code, body) = status(
+                    403,
+                    "Forbidden",
+                    r#"ingressclasses.networking.k8s.io is forbidden: User "dev1" cannot list resource "ingressclasses" in API group "networking.k8s.io" at the cluster scope"#,
+                );
+                (code, serde_json::to_vec(&body).unwrap())
+            }
+            _ => cluster(s),
+        });
+        let r = ReadClient::new(client, Duration::from_secs(5));
+        let caps = Capabilities {
+            list_projects: true,
+            list_nodes: true,
+            ..Default::default()
+        };
+        let o = cluster_overview(&r, &info(caps, ApiGroups::default())).await;
+        assert!(o.ingress_classes.data.is_none());
+        let denied = o.ingress_classes.error.unwrap();
+        assert_eq!(denied.key, "errors.k8s.forbiddenCluster");
+        assert_eq!(denied.params["resource"], "ingressclasses");
+        assert_eq!(
+            o.nodes.data.as_ref().map(|n| (n.total, n.ready)),
+            Some((4, 3)),
+            "ноды показываются"
+        );
+        assert!(o.nodes.error.is_none());
+        assert_eq!(o.projects.data.map(|p| p.count), Some(2));
+        assert_eq!(o.readyz.failed, ["etcd", "poststarthook/x"]);
     }
 
     #[tokio::test]

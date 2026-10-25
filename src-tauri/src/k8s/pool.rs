@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+use secrecy::ExposeSecret;
 use tokio::sync::oneshot;
 
 use crate::error::{AppError, AppResult};
@@ -163,10 +164,11 @@ pub async fn open(
             .await
             .map_err(|e| AppError::internal_with(e.to_string()))??;
     // Токен нужен адаптеру платформы, чтобы узнать срок (OpenShift: `useroauthaccesstokens`).
-    let token = config.auth_info.token.as_ref().map(|t| {
-        use secrecy::ExposeSecret;
-        t.expose_secret().to_string()
-    });
+    // Он остаётся секретом и открывается только в вызове адаптера, не копируясь в обычную
+    // строку на время ожидания exec-плагина и проверки подключения. Учётные данные exec-плагина
+    // сюда не попадают намеренно: их срок ведёт `Connected::expiring`, а токены плагинов — не
+    // OAuth-токены `sha256~`, поэтому поиск по `useroauthaccesstokens` к ним не применим.
+    let token = config.auth_info.token.clone();
     let mut expires_at = None;
     if matches!(profile.auth, AuthConfig::Exec(_)) {
         let cred =
@@ -179,7 +181,10 @@ pub async fn open(
     let mut info = probe(&client, timeout).await?;
     if let Some(token) = &token {
         info.token_expires_at = adapter(info.platform.kind)
-            .token_expiry(&ReadClient::new(client.clone(), timeout), token)
+            .token_expiry(
+                &ReadClient::new(client.clone(), timeout),
+                token.expose_secret(),
+            )
             .await;
     }
     Ok(Connected {

@@ -72,13 +72,24 @@ pub struct ClusterVersionInfo {
     pub progressing: Option<ConditionView>,
 }
 
+/// Версия кластера, как её показывает `oc get clusterversion`: первая завершённая запись
+/// `status.history` (записи идут от новых к старым). `status.desired.version` во время
+/// обновления — целевая, ещё не достигнутая, поэтому она лишь запасной вариант: у только что
+/// установленного кластера завершённых записей нет.
+fn current_version(status: &serde_json::Value) -> Option<String> {
+    status["history"]
+        .as_array()
+        .and_then(|history| history.iter().find(|h| h["state"] == "Completed"))
+        .and_then(|h| h["version"].as_str())
+        .or_else(|| status["desired"]["version"].as_str())
+        .map(String::from)
+}
+
 pub fn cluster_version_info(o: &DynamicObject) -> ClusterVersionInfo {
     let list = conditions(&o.data["status"]["conditions"]);
     let take = |kind: &str| list.iter().find(|c| c.kind == kind).cloned();
     ClusterVersionInfo {
-        version: o.data["status"]["desired"]["version"]
-            .as_str()
-            .map(String::from),
+        version: current_version(&o.data["status"]),
         channel: o.data["spec"]["channel"]
             .as_str()
             .filter(|c| !c.is_empty())
@@ -193,16 +204,42 @@ pub(crate) mod fixtures {
         serde_json::from_value(v).unwrap()
     }
 
+    /// Кластер в покое: желаемая версия достигнута, обновления не идут.
     pub fn cluster_version() -> serde_json::Value {
         serde_json::json!({"apiVersion": "config.openshift.io/v1", "kind": "ClusterVersion",
         "metadata": {"name": "version"},
         "spec": {"channel": "stable-4.18"},
         "status": {"desired": {"version": "4.18.3"},
+            "history": [
+                {"state": "Completed", "version": "4.18.3"},
+                {"state": "Completed", "version": "4.17.9"}
+            ],
             "availableUpdates": [{"version": "4.18.4"}, {"version": "4.18.5"}],
             "conditions": [
                 {"type": "Available", "status": "True"},
                 {"type": "Failing", "status": "False"},
-                {"type": "Progressing", "status": "True", "message": "Working towards 4.18.4"}
+                {"type": "Progressing", "status": "False", "message": "Cluster version is 4.18.3"}
+            ]}})
+    }
+
+    /// Обновление до 4.18.4 идёт: желаемая версия уже целевая, а завершённая запись истории —
+    /// прежняя (так отвечает CVO, `oc get clusterversion` показывает 4.18.3).
+    pub fn cluster_version_upgrading() -> serde_json::Value {
+        serde_json::json!({"apiVersion": "config.openshift.io/v1", "kind": "ClusterVersion",
+        "metadata": {"name": "version"},
+        "spec": {"channel": "stable-4.18"},
+        "status": {"desired": {"version": "4.18.4"},
+            "history": [
+                {"state": "Partial", "version": "4.18.4"},
+                {"state": "Completed", "version": "4.18.3"},
+                {"state": "Completed", "version": "4.17.9"}
+            ],
+            "availableUpdates": [{"version": "4.18.5"}],
+            "conditions": [
+                {"type": "Available", "status": "True"},
+                {"type": "Failing", "status": "False"},
+                {"type": "Progressing", "status": "True",
+                    "message": "Working towards 4.18.4: 106 of 903 done (11% complete)"}
             ]}})
     }
 
@@ -271,10 +308,7 @@ mod tests {
         assert_eq!(cv.channel.as_deref(), Some("stable-4.18"));
         assert_eq!(cv.available_updates, 2);
         assert_eq!(cv.failing.map(|c| c.status), Some("False".into()));
-        assert_eq!(
-            cv.progressing.and_then(|c| c.message),
-            Some("Working towards 4.18.4".into())
-        );
+        assert_eq!(cv.progressing.map(|c| c.status), Some("False".into()));
         let infra = object(serde_json::json!({"apiVersion": "config.openshift.io/v1",
             "kind": "Infrastructure", "metadata": {"name": "cluster"},
             "status": {"platform": "AWS", "platformStatus": {"type": "AWS"}}}));
@@ -285,6 +319,38 @@ mod tests {
         assert_eq!(
             console_url(&console).as_deref(),
             Some("https://console-openshift-console.apps.c.example.com")
+        );
+    }
+
+    #[test]
+    fn version_during_an_upgrade_is_the_last_completed_one() {
+        let cv = cluster_version_info(&object(cluster_version_upgrading()));
+        assert_eq!(cv.version.as_deref(), Some("4.18.3"), "не целевая 4.18.4");
+        assert_eq!(cv.available_updates, 1);
+        let progressing = cv.progressing.unwrap();
+        assert_eq!(progressing.status, "True");
+        assert_eq!(
+            progressing.message.as_deref(),
+            Some("Working towards 4.18.4: 106 of 903 done (11% complete)")
+        );
+    }
+
+    #[test]
+    fn version_without_a_completed_entry_falls_back_to_desired() {
+        let installing = |history: serde_json::Value| {
+            let mut v = cluster_version();
+            v["status"]["history"] = history;
+            cluster_version_info(&object(v)).version
+        };
+        assert_eq!(
+            installing(serde_json::json!([{"state": "Partial", "version": "4.18.3"}])).as_deref(),
+            Some("4.18.3"),
+            "установка не завершена"
+        );
+        assert_eq!(installing(serde_json::json!([])).as_deref(), Some("4.18.3"));
+        assert_eq!(
+            installing(serde_json::Value::Null).as_deref(),
+            Some("4.18.3")
         );
     }
 
