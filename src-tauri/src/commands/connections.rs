@@ -232,17 +232,14 @@ pub async fn connect(
     connection_info(state.inner(), &connection_id, fresh).await
 }
 
-/// Сведения о подключении для `connect`; политика проверяется и для клиента из пула.
+/// Сведения о подключении для `connect`; политика проверяется и для клиента из пула. Ошибку
+/// самого подключения в `evict_if_broken` не передаём (он — для ошибок уже полученного
+/// клиента): неудачная попытка в пул не попадает, а сброс сменил бы поколение, и ожидавшие
+/// очереди не получили бы её итог — каждый снова запустил бы exec-плагин или вход.
 pub async fn connection_info(st: &AppState, id: &str, fresh: bool) -> AppResult<ConnectionInfo> {
     ensure_allowed(&st.connections.get(id)?, &st.policy.status)?;
-    match st.connected(id, fresh).await {
-        Ok(c) => Ok(c.info.clone()),
-        // Ошибку самого подключения в `evict_if_broken` не передаём (он — для ошибок уже
-        // полученного клиента): неудачная попытка в пул не попадает, а сброс сменил бы
-        // поколение, и ожидавшие очереди не получили бы её итог — каждый снова запустил бы
-        // exec-плагин или вход.
-        Err(e) => Err(e),
-    }
+    let c = st.connected(id, fresh).await?;
+    Ok(c.info.clone())
 }
 
 /// Отключение: клиент сбрасывается, сессии watch и логов подключения останавливаются.

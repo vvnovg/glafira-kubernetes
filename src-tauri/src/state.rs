@@ -84,17 +84,17 @@ impl AppState {
     }
 
     /// Чтение кластера для команды: клиент из пула (или новое подключение) и `f` с ним. Ошибка
-    /// учётных данных или TLS сбрасывает клиент (`evict_if_broken`): следующее чтение подключится
-    /// заново.
+    /// учётных данных или TLS от `f` сбрасывает клиент (`evict_if_broken`): следующее чтение
+    /// подключится заново. Ошибка самого подключения клиент не сбрасывает: неудачная попытка в
+    /// пул не попадает, а сброс сменил бы поколение, и ожидавшие очереди не получили бы её итог —
+    /// каждое чтение снова запустило бы exec-плагин или вход.
     pub async fn read<T, F, Fut>(&self, id: &str, f: F) -> AppResult<T>
     where
         F: FnOnce(Arc<Connected>) -> Fut,
         Fut: Future<Output = AppResult<T>>,
     {
-        let result = match self.connected(id, false).await {
-            Ok(c) => f(c).await,
-            Err(e) => Err(e),
-        };
+        let c = self.connected(id, false).await?;
+        let result = f(c).await;
         if let Err(e) = &result {
             self.evict_if_broken(id, e);
         }
@@ -308,6 +308,16 @@ mod tests {
         cancel_reaches_every_waiter(connect).await;
     }
 
+    /// То же через `read`: одновременные чтения вкладки подключаются один раз и получают один
+    /// итог — и сбой плагина, и отмену.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn concurrent_reads_share_the_failure_and_the_cancel() {
+        let read = |st: AppState| async move { st.read("e", |_| async { Ok(()) }).await };
+        waiters_share_the_failure(read).await;
+        cancel_reaches_every_waiter(read).await;
+    }
+
     #[test]
     fn delete_connection_removes_all_secrets() {
         let dir = tempfile::tempdir().unwrap();
@@ -326,6 +336,45 @@ mod tests {
                 None,
                 "{f}"
             );
+        }
+    }
+
+    /// Ошибка учётных данных или TLS от клиента из пула сбрасывает его, другие ошибки — нет.
+    #[tokio::test]
+    async fn credential_error_of_the_pooled_client_evicts_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = state(dir.path());
+        let (client, _) =
+            crate::k8s::testing::mock_client(crate::k8s::cluster::fixtures::openshift);
+        let timeout = std::time::Duration::from_secs(1);
+        let info = crate::k8s::cluster::probe(&client, timeout).await.unwrap();
+        let pooled = Arc::new(Connected {
+            client,
+            info,
+            timeout,
+            expires_at: None,
+        });
+        for (code, evicts) in [
+            (ErrorCode::Forbidden, false),
+            (ErrorCode::Timeout, false),
+            (ErrorCode::SessionExpired, true),
+            (ErrorCode::AuthFailed, true),
+            (ErrorCode::TlsError, true),
+        ] {
+            assert!(
+                st.pool
+                    .insert_if_current("a", st.pool.generation("a"), pooled.clone())
+            );
+            let expected = pooled.clone();
+            let e = st
+                .read("a", move |c| async move {
+                    assert!(Arc::ptr_eq(&c, &expected), "чтение получило клиент из пула");
+                    Err::<(), _>(AppError::localized(code, LocalizedText::raw("x")))
+                })
+                .await
+                .unwrap_err();
+            assert_eq!(e.code, code);
+            assert_eq!(st.pool.get("a").is_none(), evicts, "{code:?}");
         }
     }
 
