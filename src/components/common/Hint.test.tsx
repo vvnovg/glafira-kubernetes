@@ -146,7 +146,7 @@ describe("Hint", () => {
     const user = setup();
     render(<Hint k="hints.test.a" label="acks" />);
     const btn = screen.getByRole("button", { name: "Подсказка: acks" });
-    btn.focus();
+    act(() => btn.focus());
     await user.keyboard(" ");
     expect(screen.getByRole("tooltip")).toBeInTheDocument();
     await user.keyboard(" ");
@@ -158,7 +158,7 @@ describe("Hint", () => {
   it("автоповтор клавиши не переключает повторно", async () => {
     const user = setup();
     render(<Hint k="hints.test.a" label="acks" />);
-    screen.getByRole("button", { name: "Подсказка: acks" }).focus();
+    act(() => screen.getByRole("button", { name: "Подсказка: acks" }).focus());
     await user.keyboard("{Enter>3/}");
     expect(screen.getByRole("tooltip")).toBeInTheDocument();
   });
@@ -171,7 +171,7 @@ describe("Hint", () => {
         <Hint k="hints.test.a" label="acks" />
       </div>,
     );
-    screen.getByRole("button", { name: "Подсказка: acks" }).focus();
+    act(() => screen.getByRole("button", { name: "Подсказка: acks" }).focus());
     await user.keyboard("{Enter}");
     await user.keyboard(" ");
     expect(spy).not.toHaveBeenCalled();

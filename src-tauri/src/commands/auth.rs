@@ -103,6 +103,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    #[cfg(unix)]
     use crate::auth::exec::write_test_file;
     use crate::policy::Policy;
     use crate::secrets::MemoryStore;

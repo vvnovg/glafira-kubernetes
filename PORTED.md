@@ -75,12 +75,13 @@
 | `src/components/common/ErrorBanner.tsx` | `src/components/common/ErrorBanner.tsx` | `8bbd0bd` | как есть |
 | `src/components/common/ErrorBanner.test.tsx` | `src/components/common/ErrorBanner.test.tsx` | `8bbd0bd` | адаптирован: ключи и коды Kubernetes |
 | `src/components/common/Hint.tsx` | `src/components/common/Hint.tsx` | `8bbd0bd` | как есть |
-| `src/components/common/Hint.test.tsx` | `src/components/common/Hint.test.tsx` | `8bbd0bd` | как есть |
+| `src/components/common/Hint.test.tsx` | `src/components/common/Hint.test.tsx` | `8bbd0bd` | адаптирован: act вокруг focus() |
 | `src/components/common/EnvBadge.tsx` | `src/components/common/EnvBadge.tsx` | `8bbd0bd` | как есть |
 | `src/i18n/languages.ts` | `src/i18n/languages.ts` | `8bbd0bd` | адаптирован: языки en и ru |
 | `src/lib/links.ts` | `src/lib/links.ts` | `8bbd0bd` | адаптирован: адреса репозиториев |
 | `src/test/setup.ts` | `src/test/setup.ts` | `8bbd0bd` | как есть |
 | `src/api/client.ts` | `src/api/client.ts` | `8bbd0bd` | адаптирован: команды Kubernetes |
+| `src/api/client.test.ts` | `src/api/client.test.ts` | `8bbd0bd` | адаптирован: команды Kubernetes |
 | `src/api/types.ts` | `src/api/types.ts` | `8bbd0bd` | адаптирован: типы Kubernetes |
 | `scripts/i18n-check.mjs` | `scripts/i18n-check.mjs` | `8bbd0bd` | адаптирован: главы руководства O1 |
 | `scripts/i18n-check.test.mjs` | `scripts/i18n-check.test.mjs` | `8bbd0bd` | как есть |

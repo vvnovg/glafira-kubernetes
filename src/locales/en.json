@@ -100,7 +100,6 @@
     },
     "oauth": {
       "denied": "Sign-in was not completed: {{error}}",
-      "stateMismatch": "The sign-in response does not match the request — try again",
       "timeout": "Sign-in in the browser was not completed in time",
       "cancelled": "Sign-in was cancelled",
       "notAvailable": "This cluster has no OpenShift OAuth server, so sign-in via browser is not available — use a token, a kubeconfig context or an exec plugin",
