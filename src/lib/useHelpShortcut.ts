@@ -13,7 +13,8 @@ export function useHelpShortcut(): void {
       const active = tabs.find((t) => t.id === activeId) ?? null;
       // На самой справке F1 не сбрасывает открытую главу.
       if (active?.kind === "help") return activate(active.id);
-      // Экран может уточнить главу (форма или вкладка подключения → глава «Подключения»).
+      // Вкладка может сама назвать главу через useHelpChapter (так делают «Настройки» → «Начало работы»);
+      // иначе главу выбирает helpChapterFor (форма и вкладка подключения → «Подключения»).
       const override = active ? useHelpContext.getState().byTab[active.id] : undefined;
       open({ kind: "help", chapter: override ?? helpChapterFor(active) });
     };

@@ -2,8 +2,9 @@
 
 A connection is the API server address, the sign-in method and the TLS settings of one cluster. Passwords, tokens
 and keys are kept in the system secret store (Keychain, Credential Manager, Secret Service), never in files. The one
-exception is the secret values in the arguments and environment of an exec plugin: they stay in the connection file,
-which only you can read, like kubeconfig, and are not exported.
+exception is the secret values in the arguments and environment of an exec plugin: they stay in the connections file
+(`connections.json`) in the data folder, whose path is shown in [[ui:sidebar.about]]. Only you can read that file, like
+kubeconfig, and the values are not exported.
 
 ## API server address {#api-url}
 
@@ -29,18 +30,24 @@ or to paste a new token. If sign-in via browser is not available on the cluster,
 
 ## Exec plugins {#exec}
 
-Glafira runs the plugin by its full path, without a shell. An app started from the Dock does not see the `PATH` of
-your terminal, so enter the command name and click [[ui:connections.form.exec.find]]: Glafira looks in the `PATH` of
-your login shell and in the standard folders (`/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`).
+Glafira runs the plugin by its full path, without a shell. An app started from the Dock or an application menu does
+not see the `PATH` of your terminal, so enter the command name and click [[ui:connections.form.exec.find]]: Glafira
+looks in the `PATH` of your login shell and in the standard folders (`/opt/homebrew/bin`, `/usr/local/bin`,
+`~/.local/bin`). On Linux the search is the same; Windows has no login shell, so Glafira looks in the `PATH` of the
+app, in `%LOCALAPPDATA%\Microsoft\WinGet\Links` and in `%LOCALAPPDATA%`.
 
-The form shows the exact launch line: the path, the arguments and the environment variables; values of variables and
-options that look like secrets are hidden. Glafira runs the line only after you tick
-[[ui:connections.form.exec.confirm]]. Any change to the line, and a connection imported from a file, needs a new
-confirmation.
+The form shows the exact launch line: the path, the arguments and the environment variables. A value is hidden
+(`••••`) when the name of the variable or option contains TOKEN, SECRET, PASS, KEY, CREDENTIAL, BEARER or COOKIE, for
+example `--client-secret x`, `--oidc-client-secret=x` or `AWS_SECRET_ACCESS_KEY`. Glafira runs the line only after you
+tick [[ui:connections.form.exec.confirm]]. The confirmation is bound to the exact line: any change to the command, the
+arguments or the variables, and a switch of the sign-in method, needs a new confirmation. A connection that arrives
+from an export file as a new one is unconfirmed too.
 
-Secret values are kept in the connection file, not in the secret store, and are not written to the exchange file:
-after importing such a connection on another computer, fill them in again. If the plugin supports it, keep the secret
-out of the command line instead, for example in the plugin's own config or credential helper.
+Secret values are kept in the connections file, not in the secret store. They are not written to the export file that
+you create with [[ui:sidebar.exportAll]] or [[ui:sidebar.folder.export]]: after importing such a connection on another
+computer, fill them in again. Importing a file over a connection you already have keeps the secret values you already
+have. If the plugin supports it, keep the secret out of the command line instead, for example in the plugin's own
+config or credential helper.
 
 Plugins that open the browser (`kubectl oidc-login`, `kubelogin`) work: Glafira waits up to 5 minutes, and the
 connection tab can cancel the wait. Plugins that need a terminal (`interactiveMode: Always`, device code sign-in) are
@@ -52,9 +59,11 @@ not supported. The credentials are kept in memory until they expire; then the pl
 [[ui:sidebar.importKubeconfig]] reads `~/.kube/config` (or the first file from `KUBECONFIG`) and lists its contexts.
 Choose the contexts to import: tokens and keys go to the secret store, CA certificates and the project of the
 context are copied into the connection. Glafira does not keep a link to the file. For an exec plugin the dialog shows
-the launch line with the full path to the command; the line is copied into the connection as it is, with its secret
-arguments and variables. Tick the permission under the line to import it confirmed. Commands outside the allowed list
-and `auth-provider` contexts are not supported: the preview explains why.
+the launch line with the full path to the command. The dialog hides the secret values of the line (`••••`), but the
+import copies the real ones into the connection. Tick [[ui:kubeconfig.allowExec]] under the line to import it
+confirmed: the tick confirms the line exactly as shown. If the launch line in the kubeconfig file changes after the
+preview, the changed line is imported unconfirmed, and the connection form asks you to confirm it. Commands outside the
+allowed list and `auth-provider` contexts are not supported: the preview explains why.
 
 ## Platform {#platform}
 
@@ -83,5 +92,7 @@ operators). If the cluster does not let you list projects, enter them in
 ## Folders, export and import {#folders}
 
 Connections can be arranged in nested folders: [[ui:sidebar.newFolder]], drag and drop. [[ui:sidebar.exportAll]]
-saves the tree to a file without tokens and keys; [[ui:sidebar.import]] adds connections from such a file with a
-preview.
+saves the tree to an export file without tokens, keys and the secret values of exec plugins; [[ui:sidebar.import]]
+adds connections from such a file with a preview. A connection that is new on this computer arrives without secrets,
+and an exec plugin in it arrives unconfirmed. When the file updates a connection you already have, your tokens, keys
+and secret values stay.
