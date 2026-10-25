@@ -119,7 +119,9 @@
       "start": "Cannot start the exec plugin {{command}}: {{error}}",
       "timeout": "The exec plugin {{command}} did not finish in {{seconds}} s",
       "failed": "The exec plugin {{command}} failed (exit code {{code}})",
-      "badOutput": "The exec plugin {{command}} returned no credentials"
+      "badOutput": "The exec plugin {{command}} returned no credentials",
+      "argsNotAllowedWithOptions": "The exec plugin “{{command}}” may run only as “{{expected}} …”: before “{{subcommand}}”, write options with a value as --option=value",
+      "envForbidden": "“{{name}}” is not allowed in the exec plugin environment: the variable can make the command load or run other code"
     },
     "kubeconfig": {
       "unreadable": "Cannot read kubeconfig {{path}}: {{error}}",

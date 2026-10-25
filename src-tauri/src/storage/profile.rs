@@ -433,7 +433,7 @@ pub fn validate_profile(p: &ConnectionProfile) -> AppResult<()> {
 }
 
 /// Exec-плагин: абсолютный путь, команда из списка разрешённых, известная версия API,
-/// корректные имена переменных окружения.
+/// корректные имена переменных окружения и ни одной запрещённой (`auth::exec::is_forbidden_env`).
 fn validate_exec(e: &ExecAuth) -> AppResult<()> {
     if e.command.trim().is_empty() {
         return Err(invalid(ltext!(
@@ -464,6 +464,7 @@ fn validate_exec(e: &ExecAuth) -> AppResult<()> {
             name = v.name
         )));
     }
+    crate::auth::exec::check_env(&e.env).map_err(invalid)?;
     Ok(())
 }
 
@@ -662,6 +663,19 @@ mod tests {
                     }]
                 }),
             ),
+            (
+                "errors.exec.argsNotAllowedWithOptions",
+                Box::new(|e| {
+                    e.args = [
+                        "--insecure-skip-tls-verify",
+                        "exec",
+                        "oidc-login",
+                        "get-token",
+                    ]
+                    .map(String::from)
+                    .to_vec()
+                }),
+            ),
         ];
         for (key, change) in cases {
             let mut e = sample_exec();
@@ -669,6 +683,30 @@ mod tests {
             let err = ok(e).unwrap_err();
             assert_eq!((err.code, err.key.as_str()), (ErrorCode::InvalidInput, key));
         }
+        // Переменные загрузчика и интерпретаторов: строку с ними нельзя сохранить.
+        for name in [
+            "PATH",
+            "LD_PRELOAD",
+            "DYLD_INSERT_LIBRARIES",
+            "NODE_OPTIONS",
+        ] {
+            let mut e = sample_exec();
+            e.env.push(ExecEnv {
+                name: name.into(),
+                value: "/tmp/evil".into(),
+            });
+            let err = ok(e).unwrap_err();
+            assert_eq!(
+                (err.code, err.key.as_str(), err.params["name"].as_str()),
+                (ErrorCode::InvalidInput, "errors.exec.envForbidden", name)
+            );
+        }
+        let mut e = sample_exec();
+        e.env.push(ExecEnv {
+            name: "AWS_PROFILE".into(),
+            value: "dev".into(),
+        });
+        assert!(ok(e).is_ok(), "настройка самой утилиты разрешена");
     }
 
     #[test]

@@ -119,7 +119,8 @@ fn user<'a>(kc: &'a Kubeconfig, name: &str) -> Option<&'a AuthInfo> {
         .and_then(|u| u.auth_info.as_ref())
 }
 
-/// Exec-плагин из kubeconfig: команда из списка разрешённых, найденная по абсолютному пути.
+/// Exec-плагин из kubeconfig: команда из списка разрешённых, найденная по абсолютному пути, без
+/// запрещённых переменных окружения.
 fn exec_auth(
     exec: &ExecConfig,
     base: Option<&Path>,
@@ -134,6 +135,18 @@ fn exec_auth(
     let command = exec.command.clone().unwrap_or_default();
     let args = exec.args.clone().unwrap_or_default();
     crate::auth::exec::check_allowed(&command, &args)?;
+    let env: Vec<ExecEnv> = exec
+        .env
+        .iter()
+        .flatten()
+        .filter_map(|m| {
+            Some(ExecEnv {
+                name: m.get("name")?.clone(),
+                value: m.get("value").cloned().unwrap_or_default(),
+            })
+        })
+        .collect();
+    crate::auth::exec::check_env(&env)?;
     let api_version = exec
         .api_version
         .clone()
@@ -153,17 +166,6 @@ fn exec_auth(
             command = command
         )
     })?;
-    let env = exec
-        .env
-        .iter()
-        .flatten()
-        .filter_map(|m| {
-            Some(ExecEnv {
-                name: m.get("name")?.clone(),
-                value: m.get("value").cloned().unwrap_or_default(),
-            })
-        })
-        .collect();
     Ok(ExecAuth {
         command: path.display().to_string(),
         args,
@@ -526,6 +528,26 @@ users:
   user:
     auth-provider:
       name: oidc
+- name: preload
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1
+      command: kubelogin
+      args: [get-token]
+      env:
+      - {{name: LD_PRELOAD, value: /tmp/evil.so}}
+- name: eks-flag
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1
+      command: aws
+      args: [--no-verify-ssl, eks, get-token, --cluster-name, prod]
+- name: kubectl-exec
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1
+      command: kubectl
+      args: [--insecure-skip-tls-verify, exec, oidc-login, get-token]
 contexts:
 - name: dev/api-dev:6443/alice
   context: {{cluster: api-dev:6443, user: alice/api-dev:6443, namespace: team-a}}
@@ -547,6 +569,12 @@ contexts:
   context: {{cluster: api-dev:6443, user: legacy}}
 - name: no-user
   context: {{cluster: api-dev:6443}}
+- name: preload
+  context: {{cluster: api-dev:6443, user: preload}}
+- name: eks-flag
+  context: {{cluster: api-dev:6443, user: eks-flag}}
+- name: flag-hides-subcommand
+  context: {{cluster: api-dev:6443, user: kubectl-exec}}
 - name: broken
   context: {{cluster: gone, user: bob}}
 "#,
@@ -618,9 +646,26 @@ contexts:
             ("gke-dev", "errors.kubeconfig.execNotFound"),
             ("tty", "errors.kubeconfig.execInteractive"),
             ("legacy", "errors.kubeconfig.authProvider"),
+            ("preload", "errors.exec.envForbidden"),
+            (
+                "flag-hides-subcommand",
+                "errors.exec.argsNotAllowedWithOptions",
+            ),
         ] {
-            assert_eq!(by(name).unsupported.unwrap().key, key, "{name}");
+            let c = by(name);
+            assert_eq!(c.unsupported.unwrap().key, key, "{name}");
+            assert_eq!(c.exec, None, "{name}: строки запуска нет");
         }
+        assert_eq!(
+            by("preload").unsupported.unwrap().params["name"],
+            "LD_PRELOAD"
+        );
+        let flag = by("eks-flag");
+        assert_eq!(
+            flag.unsupported, None,
+            "флаг без значения перед подкомандой"
+        );
+        assert_eq!(flag.exec.unwrap().args[0], "--no-verify-ssl");
         assert_eq!(by("no-user").auth, ImportAuth::Browser);
         assert_eq!(
             by("broken").unsupported.unwrap().key,
@@ -703,6 +748,7 @@ contexts:
         assert!(e.command.ends_with("kubelogin"));
         assert!(oidc.token.is_none() && oidc.client_key.is_none());
         assert_eq!(get("evil").unwrap_err().key, "errors.exec.notAllowed");
+        assert_eq!(get("preload").unwrap_err().key, "errors.exec.envForbidden");
     }
 
     #[test]

@@ -36,6 +36,13 @@ looks in the `PATH` of your login shell and in the standard folders (`/opt/homeb
 `~/.local/bin`). On Linux the search is the same; Windows has no login shell, so Glafira looks in the `PATH` of the
 app, in `%LOCALAPPDATA%\Microsoft\WinGet\Links` and in `%LOCALAPPDATA%`.
 
+Before the arguments of the command, such as `eks get-token`, the line may have global options of the tool: an option
+with a value, such as `aws --region eu-west-1 eks get-token`, or a flag without a value, such as
+`aws --no-verify-ssl eks get-token`. If Glafira does not accept an option with a value, write it as `--option=value`.
+The environment variables of the plugin cannot change which code the command runs: `PATH` (Glafira sets it itself),
+`LD_*`, `DYLD_*`, `PYTHON*`, `NODE_OPTIONS`, `BASH_ENV` and similar variables are not accepted. Variables that
+configure the tool itself, such as `AWS_PROFILE`, are fine.
+
 The form shows the exact launch line: the path, the arguments and the environment variables. A value is hidden
 (`••••`) when the name of the variable or option contains TOKEN, SECRET, PASS, KEY, CREDENTIAL, BEARER or COOKIE, for
 example `--client-secret x`, `--oidc-client-secret=x` or `AWS_SECRET_ACCESS_KEY`. Glafira runs the line only after you
@@ -64,7 +71,8 @@ the launch line with the full path to the command. The dialog hides the secret v
 import copies the real ones into the connection. Tick [[ui:kubeconfig.allowExec]] under the line to import it
 confirmed: the tick confirms the line exactly as shown. If the launch line in the kubeconfig file changes after the
 preview, the changed line is imported unconfirmed, and the connection form asks you to confirm it. Commands outside the
-allowed list and `auth-provider` contexts are not supported: the preview explains why.
+allowed list, forbidden environment variables and `auth-provider` contexts are not supported: the preview explains
+why.
 
 ## Platform {#platform}
 

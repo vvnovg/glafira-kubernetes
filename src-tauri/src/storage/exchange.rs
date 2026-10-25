@@ -1333,6 +1333,51 @@ mod tests {
         );
     }
 
+    /// Строка запуска из файла с переменной загрузчика или с ключом-флагом, который прячет
+    /// подкоманду, не импортируется: проверка та же, что при сохранении.
+    #[test]
+    fn exec_with_forbidden_environment_or_arguments_is_skipped_on_import() {
+        let mut preload = crate::storage::profile::sample_exec();
+        preload.env.push(crate::storage::profile::ExecEnv {
+            name: "LD_PRELOAD".into(),
+            value: "/tmp/evil.so".into(),
+        });
+        let mut hidden = crate::storage::profile::sample_exec();
+        hidden.args = [
+            "--insecure-skip-tls-verify",
+            "exec",
+            "oidc-login",
+            "get-token",
+        ]
+        .map(String::from)
+        .to_vec();
+        let mut a = conn_json("a", "Preload", None);
+        a["auth"] = serde_json::to_value(AuthConfig::Exec(preload)).unwrap();
+        let mut b = conn_json("b", "Hidden", None);
+        b["auth"] = serde_json::to_value(AuthConfig::Exec(hidden)).unwrap();
+        let bytes = file(vec![], vec![a, b, conn_json("ok", "OK", None)]);
+        let parsed = parse_exchange(&bytes).unwrap();
+        let ids: Vec<&str> = parsed
+            .connections
+            .iter()
+            .map(|(p, _)| p.id.as_str())
+            .collect();
+        assert_eq!(ids, ["ok"]);
+        let skipped: Vec<(&str, &str)> = parsed
+            .skipped
+            .iter()
+            .map(|s| (s.name.as_str(), s.reason.key.as_str()))
+            .collect();
+        assert_eq!(
+            skipped,
+            [
+                ("Preload", "errors.exec.envForbidden"),
+                ("Hidden", "errors.exec.argsNotAllowedWithOptions"),
+            ]
+        );
+        assert_eq!(parsed.skipped[0].reason.params["name"], "LD_PRELOAD");
+    }
+
     /// Exec-плагин с секретами в переменной окружения и в аргументах (оба вида записи), подтверждённый.
     fn approved_exec_with_secrets() -> crate::storage::profile::ExecAuth {
         let mut exec = crate::storage::profile::sample_exec();

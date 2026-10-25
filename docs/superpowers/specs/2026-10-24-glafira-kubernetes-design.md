@@ -277,20 +277,35 @@ crates/glafira-mcp-kubernetes — инструменты, типы ответо�
 | **Exec-плагин** | команда, аргументы и переменные окружения (обычно из kubeconfig) | только из списка разрешённых (ниже); Glafira запускает команду напрямую, без оболочки, с таймаутом и отменой, и держит учётные данные до `expirationTimestamp` (не через `kube`: там запуск блокирующий, без таймаута, а текст ошибки содержит переменные окружения) |
 | **Импорт kubeconfig** | файл (по умолчанию `~/.kube/config` и `$KUBECONFIG`), выбор контекстов | §5.5 |
 
-**Exec-плагины.** Список разрешённых — константа модуля `auth/exec.rs`; команда сверяется по имени исполняемого файла
-и первым позиционным аргументам (ведущие ключи `--ключ значение` пропускаются: `aws eks update-kubeconfig` пишет
-`--region` перед `eks get-token`):
+**Exec-плагины.** Список разрешённых — константа модуля `auth/exec.rs` (`ALLOWED`); команда сверяется по имени
+исполняемого файла и первым позиционным аргументам. Ведущие ключи перед ними распознаются по таблице каждой команды:
+ключ из таблицы берёт значение следующим элементом (`aws eks update-kubeconfig` пишет `--region eu-west-1` перед
+`eks get-token`), любой другой ведущий ключ — флаг без значения, а `--ключ=значение` — всегда один элемент, так что
+эта запись допустима для любого ключа. На `--` и `-` разбор останавливается, и строка не проходит. В таблице только
+глобальные ключи утилиты, которые точно берут значение: флаг, записанный в неё по ошибке, спрятал бы подкоманду
+(`kubectl --insecure-skip-tls-verify exec …` — это `kubectl exec`). Ключ со значением, которого в таблице нет,
+пишется как `--ключ=значение`, иначе его значение сочтётся подкомандой и строка получит отказ с этой подсказкой.
+У kubectl и oc `_` в имени ключа равен `-`, как у самих утилит.
 
-| Команда | Аргументы | Для чего |
-|---|---|---|
-| `aws` | `eks get-token …` | EKS |
-| `aws-iam-authenticator` | `token …` | EKS, старые kubeconfig |
-| `gke-gcloud-auth-plugin` | любые | GKE |
-| `kubelogin` | `get-token …` | AKS (Azure kubelogin) и OIDC (int128/kubelogin) |
-| `kubectl` | `oidc-login get-token …` | OIDC: Keycloak, Dex (в том числе Deckhouse) |
-| `oc` | `get-token …` | OpenShift с внешним OIDC (ROSA HCP с external auth) |
-| `yc` | `k8s create-token …` | Yandex Managed Kubernetes |
-| `rancher` | `token …` | Rancher без генерации токенов в kubeconfig |
+| Команда | Аргументы | Ключи со значением перед аргументами | Для чего |
+|---|---|---|---|
+| `aws` | `eks get-token …` | `--region`, `--profile`, `--endpoint-url`, `--output`, `--query`, `--color`, `--ca-bundle`, `--cli-read-timeout`, `--cli-connect-timeout`, `--cli-binary-format` | EKS |
+| `aws-iam-authenticator` | `token …` | `-i`/`--cluster-id`, `-c`/`--config`, `-l`/`--log-format` | EKS, старые kubeconfig |
+| `gke-gcloud-auth-plugin` | любые | — | GKE |
+| `kubelogin` | `get-token …` | `-v`/`--v` | AKS (Azure kubelogin) и OIDC (int128/kubelogin) |
+| `kubectl` | `oidc-login get-token …` | глобальные из `kubectl options`: `--kubeconfig`, `--context`, `--cluster`, `--user`, `-n`/`--namespace`, `-s`/`--server`, `--token`, `--as`… | OIDC: Keycloak, Dex (в том числе Deckhouse) |
+| `oc` | `get-token …` | те же, что у kubectl, `--loglevel` и устаревший `--config` | OpenShift с внешним OIDC (ROSA HCP с external auth) |
+| `yc` | `k8s create-token …` | `--profile`, `--folder-id`, `--folder-name`, `--cloud-id`, `--endpoint`, `--token`, `--format`, `--retry` | Yandex Managed Kubernetes |
+| `rancher` | `token …` | `-c`/`--config` | Rancher без генерации токенов в kubeconfig |
+
+**Окружение exec-плагина.** Переменные окружения профиля не могут менять, какой код запустит команда: запрещены
+`PATH` (его задаёт Glafira: каталог команды и каталоги поиска), все `LD_*` и `DYLD_*`, `GCONV_PATH`, все `PYTHON*`
+(как `python -E`), `NODE_OPTIONS`, `NODE_PATH`, `PERL5LIB`, `PERL5OPT`, `PERLLIB`, `RUBYOPT`, `RUBYLIB`, `BASH_ENV`,
+`ENV`, `SHELLOPTS`, `BASH_FUNC_*`, `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS`, `JDK_JAVA_OPTIONS` (`is_forbidden_env`); на
+Windows имена сравниваются без учёта регистра (`Path` — это `PATH`). Переменные настройки самой утилиты (`AWS_PROFILE`,
+`AWS_CONFIG_FILE`) разрешены: они видны в подтверждаемой строке запуска. Окружение проверяется там же, где список
+разрешённых команд: при сохранении и импорте профиля (подключение из файла обмена пропускается с причиной), в
+предпросмотре kubeconfig (контекст не импортируется, причина видна) и перед запуском плагина.
 
 - При импорте и сохранении профиля команда разрешается в абсолютный путь: PATH оболочки входа пользователя и
   стандартные каталоги (`/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`; на Windows — PATH и `%LOCALAPPDATA%`).
@@ -313,7 +328,7 @@ crates/glafira-mcp-kubernetes — инструменты, типы ответо�
   но без метаданных OAuth завершается `AUTH_FAILED` с подсказкой: токен, kubeconfig или exec-плагин. «Войти снова»
   через браузер и срок токена — только у `openshift`; у exec-плагина «Войти снова» запускает плагин повторно.
 - **Не поддерживаются в MVP:** `auth-provider`-плагины kubeconfig (устаревший механизм), exec-плагины вне списка
-  разрешённых, логин и пароль через `openshift-challenging-client`.
+  разрешённых и с запрещёнными переменными окружения, логин и пароль через `openshift-challenging-client`.
 
 ### 5.3 Проверка подключения
 
