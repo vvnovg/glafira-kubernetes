@@ -25,7 +25,8 @@ const EXTRA_PAGES: usize = 5;
 pub const MAX_ITEMS: usize = 10_000;
 
 /// Прочитанный список: объекты и признак, что прочитано не всё (`MAX_ITEMS`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Listed<K> {
     pub items: Vec<K>,
     pub truncated: bool,
@@ -221,6 +222,11 @@ impl ReadClient {
         config: watcher::Config,
     ) -> impl Stream<Item = watcher::Result<watcher::Event<DynamicObject>>> + Send + use<> {
         watcher(self.dynamic(ar, Some(namespace)), config)
+    }
+
+    /// Имена проектов (или namespace): первые 500 и признак «есть ещё».
+    pub async fn project_names(&self, projects_api: bool) -> AppResult<(Vec<String>, bool)> {
+        crate::k8s::cluster::list_project_names(&self.client, self.timeout, projects_api).await
     }
 
     /// Поток строк лога контейнера; таймаут — только на открытие потока.

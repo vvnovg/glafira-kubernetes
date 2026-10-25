@@ -80,6 +80,10 @@ pub fn run() {
             commands::settings::set_language,
             commands::settings::get_policy_status,
             commands::sessions::stop_session,
+            commands::cluster::get_cluster_overview,
+            commands::cluster::list_nodes,
+            commands::cluster::get_node,
+            commands::cluster::list_cluster_operators,
         ])
         .run(tauri::generate_context!())
         .expect("error while building tauri application");

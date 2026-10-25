@@ -11,6 +11,7 @@ use crate::k8s::cluster::{ConnectionInfo, probe};
 use crate::k8s::config::{apply_exec_credential, build_kube_config, process_env, request_timeout};
 use crate::k8s::errors::from_kube;
 use crate::k8s::read::ReadClient;
+use crate::platform::adapters::adapter;
 use crate::secrets::SecretStore;
 use crate::storage::profile::{AuthConfig, ConnectionProfile};
 use crate::sync::MutexExt;
@@ -161,6 +162,11 @@ pub async fn open(
         tokio::task::spawn_blocking(move || build_kube_config(&p, secrets.as_ref(), &process_env))
             .await
             .map_err(|e| AppError::internal_with(e.to_string()))??;
+    // Токен нужен адаптеру платформы, чтобы узнать срок (OpenShift: `useroauthaccesstokens`).
+    let token = config.auth_info.token.as_ref().map(|t| {
+        use secrecy::ExposeSecret;
+        t.expose_secret().to_string()
+    });
     let mut expires_at = None;
     if matches!(profile.auth, AuthConfig::Exec(_)) {
         let cred =
@@ -170,7 +176,12 @@ pub async fn open(
         apply_exec_credential(&mut config, &cred);
     }
     let client = kube::Client::try_from(config).map_err(|e| from_kube(&e))?;
-    let info = probe(&client, timeout).await?;
+    let mut info = probe(&client, timeout).await?;
+    if let Some(token) = &token {
+        info.token_expires_at = adapter(info.platform.kind)
+            .token_expiry(&ReadClient::new(client.clone(), timeout), token)
+            .await;
+    }
     Ok(Connected {
         client,
         info,
@@ -195,6 +206,7 @@ mod tests {
                 platform: crate::platform::detect(&Default::default()),
                 api_groups: Default::default(),
                 capabilities: Capabilities::default(),
+                token_expires_at: None,
             },
             timeout: Duration::from_secs(1),
             expires_at: None,

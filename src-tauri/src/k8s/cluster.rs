@@ -39,6 +39,8 @@ pub struct ConnectionInfo {
     pub platform: PlatformInfo,
     pub api_groups: ApiGroups,
     pub capabilities: Capabilities,
+    /// Когда истекает токен входа (секунды Unix), если платформа это сообщает (спец. §5.2).
+    pub token_expires_at: Option<i64>,
 }
 
 /// Итог discovery: версия API-сервера, платформа и группы API.
@@ -276,6 +278,7 @@ pub async fn probe(client: &kube::Client, limit: Duration) -> AppResult<Connecti
         platform: d.platform,
         api_groups: d.api_groups,
         capabilities,
+        token_expires_at: None,
     })
 }
 
@@ -374,6 +377,7 @@ mod tests {
                     read_cluster_operators: false,
                     read_cluster_version: false,
                 },
+                token_expires_at: None,
             }
         );
         drop(client);

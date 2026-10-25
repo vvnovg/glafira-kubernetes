@@ -1,5 +1,6 @@
 pub mod app;
 pub mod auth;
+pub mod cluster;
 pub mod connections;
 pub mod folders;
 pub mod kubeconfig;

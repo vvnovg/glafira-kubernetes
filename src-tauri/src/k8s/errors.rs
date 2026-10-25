@@ -49,30 +49,32 @@ static FORBIDDEN: LazyLock<Regex> = LazyLock::new(|| {
     .expect("valid regex")
 });
 
+/// Нет права `verb` на `resource` в проекте `namespace` или на уровне кластера (`None`). Так же
+/// выглядит ответ 403, и так же — часть экрана, которую Glafira не читает, зная, что права нет.
+pub fn not_allowed(verb: &str, resource: &str, namespace: Option<&str>) -> AppError {
+    match namespace {
+        Some(ns) => app_err!(
+            ErrorCode::Forbidden,
+            "errors.k8s.forbiddenIn",
+            "Not allowed: {{verb}} {{resource}} in project “{{namespace}}”",
+            verb = verb,
+            resource = resource,
+            namespace = ns
+        ),
+        None => app_err!(
+            ErrorCode::Forbidden,
+            "errors.k8s.forbiddenCluster",
+            "Not allowed: {{verb}} {{resource}} at the cluster level",
+            verb = verb,
+            resource = resource
+        ),
+    }
+}
+
 /// 403: какого права не хватает — из текста ответа API-сервера.
 pub fn forbidden(message: &str) -> AppError {
     let e = match FORBIDDEN.captures(message) {
-        Some(c) => {
-            let verb = &c["verb"];
-            let resource = &c["resource"];
-            match c.name("ns") {
-                Some(ns) => app_err!(
-                    ErrorCode::Forbidden,
-                    "errors.k8s.forbiddenIn",
-                    "Not allowed: {{verb}} {{resource}} in project “{{namespace}}”",
-                    verb = verb,
-                    resource = resource,
-                    namespace = ns.as_str()
-                ),
-                None => app_err!(
-                    ErrorCode::Forbidden,
-                    "errors.k8s.forbiddenCluster",
-                    "Not allowed: {{verb}} {{resource}} at the cluster level",
-                    verb = verb,
-                    resource = resource
-                ),
-            }
-        }
+        Some(c) => not_allowed(&c["verb"], &c["resource"], c.name("ns").map(|m| m.as_str())),
         None => app_err!(
             ErrorCode::Forbidden,
             "errors.k8s.forbidden",
@@ -257,6 +259,15 @@ mod tests {
         );
         assert_eq!(e.params["verb"], "patch");
         assert_eq!(e.params["resource"], "deployments");
+
+        assert_eq!(
+            not_allowed("list", "nodes", None).message,
+            "Not allowed: list nodes at the cluster level"
+        );
+        assert_eq!(
+            not_allowed("get", "pods/log", Some("a")).params["namespace"],
+            "a"
+        );
 
         let e = forbidden("access denied by webhook");
         assert_eq!(e.key, "errors.k8s.forbidden");
