@@ -147,6 +147,11 @@
       "discoveryGroups": "{{platform}} · API server {{version}} · found: {{groups}}",
       "projectsOk": "Available projects: {{count}}",
       "projectsManual": "The cluster does not list projects for you; projects from the profile: {{count}}"
+    },
+    "import": {
+      "addressChanged": "“{{name}}”: the API address changes from {{from}} to {{to}}. The saved credentials (token, key or confirmed exec plugin) will be sent to the new address.",
+      "proxyChanged": "“{{name}}”: the proxy settings change. The saved credentials (token, key or confirmed exec plugin) will go through the new proxy.",
+      "tlsChanged": "“{{name}}”: the certificate verification settings (CA or TLS server name) change. The saved credentials (token, key or confirmed exec plugin) will be used with the new settings."
     }
   },
   "hints": {

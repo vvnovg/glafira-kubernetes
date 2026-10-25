@@ -153,10 +153,16 @@ fn import_from_file(
         allow_exec_auth: st.policy.status.allow_exec_auth,
     };
     if !apply {
-        return Ok(plan_import(&st.connections.snapshot(), &parsed, &opts)?.preview);
+        let plan = plan_import(
+            &st.connections.snapshot(),
+            &parsed,
+            &opts,
+            st.secrets.as_ref(),
+        )?;
+        return Ok(plan.preview);
     }
     let preview = st.connections.update(|data| {
-        let plan = plan_import(data, &parsed, &opts)?;
+        let plan = plan_import(data, &parsed, &opts, st.secrets.as_ref())?;
         *data = plan.next;
         Ok(plan.preview)
     })?;
@@ -253,6 +259,33 @@ mod tests {
         assert!(!st.connections.get("n").unwrap().read_only);
         let reopened = crate::storage::connections::ConnectionStore::open(dir.path()).unwrap();
         assert_eq!(reopened.list().len(), 2);
+    }
+
+    #[test]
+    fn changed_address_of_a_connection_with_a_token_is_warned_about() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(MemoryStore::default());
+        secrets
+            .set(&secret_key("a", crate::secrets::TOKEN), "sha256~t")
+            .unwrap();
+        let st = AppState::new(dir.path(), secrets.clone()).unwrap();
+        st.connections.upsert(sample_profile("a")).unwrap();
+        let path = write_file(dir.path(), "https://api.changed:6443");
+
+        let preview = import_from_file(&st, &path, None, true, false).unwrap();
+        assert_eq!(preview.warnings.len(), 1);
+        assert_eq!(preview.warnings[0].key, "messages.import.addressChanged");
+        assert_eq!(preview.warnings[0].params["name"], "conn-a");
+        // Результат применения содержит то же предупреждение, токен остаётся на месте.
+        let applied = import_from_file(&st, &path, None, true, true).unwrap();
+        assert_eq!(applied, preview);
+        assert_eq!(
+            secrets
+                .get(&secret_key("a", crate::secrets::TOKEN))
+                .unwrap()
+                .as_deref(),
+            Some("sha256~t")
+        );
     }
 
     #[cfg(unix)]

@@ -57,8 +57,9 @@ impl std::fmt::Debug for ConnectionInput {
     }
 }
 
-/// Подтверждение строки запуска: новое — по согласию в форме, иначе — прежнее сохранённое
-/// (изменённая строка с ним уже не совпадёт).
+/// Подтверждение строки запуска: новое — по согласию в форме, иначе прежнее сохранённое, но
+/// только если оно подтверждает именно сохраняемую строку. Устаревшее не оставляется: форма
+/// считала бы строку подтверждённой и не предложила бы подтвердить заново.
 fn set_exec_approval(
     profile: &mut ConnectionProfile,
     previous: Option<&ConnectionProfile>,
@@ -69,7 +70,10 @@ fn set_exec_approval(
             Some(crate::auth::exec::fingerprint(e))
         } else {
             previous.and_then(|p| match &p.auth {
-                AuthConfig::Exec(old) => old.approved.clone(),
+                AuthConfig::Exec(old) => old
+                    .approved
+                    .clone()
+                    .filter(|a| *a == crate::auth::exec::fingerprint(e)),
                 _ => None,
             })
         };
@@ -416,6 +420,40 @@ mod tests {
                 .key,
             "errors.connections.execForbidden"
         );
+    }
+
+    #[test]
+    fn stale_exec_approval_is_dropped_when_the_line_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = state(dir.path());
+        let approval = |p: &ConnectionProfile| match &p.auth {
+            AuthConfig::Exec(e) => e.approved.clone(),
+            _ => panic!("exec-плагин"),
+        };
+        let mut p = sample_profile("e");
+        p.auth = AuthConfig::Exec(crate::storage::profile::sample_exec());
+        let mut confirm = input(p, None, None);
+        confirm.confirm_exec = true;
+        let saved = save_connection_blocking(&st, confirm).unwrap();
+        let fp = approval(&saved).expect("подтверждение поставлено");
+        // Та же строка без галочки: подтверждение остаётся.
+        let again = save_connection_blocking(&st, input(saved.clone(), None, None)).unwrap();
+        assert_eq!(approval(&again), Some(fp.clone()));
+        // Изменённая строка без галочки: в профиле не остаётся отпечатка прежней строки.
+        let mut changed = saved;
+        if let AuthConfig::Exec(e) = &mut changed.auth {
+            e.args.push("--v=8".into());
+        }
+        let saved = save_connection_blocking(&st, input(changed, None, None)).unwrap();
+        assert_eq!(approval(&saved), None);
+        assert_eq!(approval(&st.connections.get("e").unwrap()), None);
+        // Возврат прежней строки старого подтверждения не воскрешает.
+        let mut back = saved;
+        if let AuthConfig::Exec(e) = &mut back.auth {
+            e.args.pop();
+        }
+        let saved = save_connection_blocking(&st, input(back, None, None)).unwrap();
+        assert_eq!(approval(&saved), None);
     }
 
     struct FailingStore;

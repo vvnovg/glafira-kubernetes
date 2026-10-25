@@ -607,4 +607,35 @@ contexts:
         let saved = apply(&st, &path, &["dev-oidc"], None, &[now.as_str()], &dirs).unwrap();
         assert!(approved(&saved[0]));
     }
+
+    #[test]
+    fn reimport_over_a_confirmed_connection_drops_the_stale_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = new_state(dir.path());
+        let path = write_kubeconfig(dir.path());
+        let dirs = kubelogin_dirs(dir.path());
+        let shown = shown_fingerprint(&st, &path, &dirs, "dev-oidc");
+        let saved = apply(&st, &path, &["dev-oidc"], None, &[shown.as_str()], &dirs).unwrap();
+        let AuthConfig::Exec(e) = &saved[0].auth else {
+            panic!("exec-плагин")
+        };
+        assert_eq!(e.approved.as_deref(), Some(shown.as_str()));
+        // Файл не менялся, согласия в диалоге нет: подтверждение прежней строки остаётся.
+        let saved = apply(&st, &path, &["dev-oidc"], None, &[], &dirs).unwrap();
+        assert!(approved(&saved[0]));
+        // Между предпросмотром и применением файл изменился: прежнее подтверждение не
+        // относится к новой строке и в профиле не остаётся.
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, text.replace("sso.corp", "evil.example")).unwrap();
+        let saved = apply(&st, &path, &["dev-oidc"], None, &[shown.as_str()], &dirs).unwrap();
+        let AuthConfig::Exec(e) = &saved[0].auth else {
+            panic!("exec-плагин")
+        };
+        assert!(e.args[1].contains("evil.example"));
+        assert_eq!(e.approved, None);
+        let AuthConfig::Exec(stored) = &st.connections.get(&saved[0].id).unwrap().auth else {
+            panic!("exec-плагин")
+        };
+        assert_eq!(stored.approved, None);
+    }
 }

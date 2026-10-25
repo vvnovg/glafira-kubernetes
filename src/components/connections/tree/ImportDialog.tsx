@@ -78,6 +78,11 @@ export function ImportDialog({ path, initialTargetId, onClose, onImported }: Pro
         queryClient.invalidateQueries({ queryKey: ["folders"] }),
         queryClient.invalidateQueries({ queryKey: ["connections"] }),
       ]);
+      // Бэкенд сбросил клиентов обновлённых подключений, а открытая вкладка показывает прежние адрес
+      // и вход: сброс запросов перезапрашивает данные у смонтированных подписчиков (удаление кэша
+      // им ничего бы не сообщило). Ответ не ждём — диалог не зависит от связи с кластером.
+      const updated = new Set(result.updated.filter((i) => i.kind === "connection").map((i) => i.id));
+      void queryClient.resetQueries({ predicate: (q) => typeof q.queryKey[1] === "string" && updated.has(q.queryKey[1]) });
       onImported(result);
     } catch (err) {
       setApplyError(err);

@@ -1,4 +1,4 @@
-import { QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,6 +10,7 @@ vi.mock("../../../api/client", async (importOriginal) => {
   return {
     ...orig,
     api: {
+      connect: vi.fn(),
       listFolders: vi.fn(),
       previewImport: vi.fn(),
       applyImport: vi.fn(),
@@ -43,6 +44,12 @@ const PREVIEW: ImportPreview = {
 };
 
 const PATH = "/tmp/in.glafira-kubernetes-connections.json";
+
+/** Открытая вкладка подключения «c2» (оно обновляется импортом): её данные подписаны на `["connection", id]`. */
+function OpenTab() {
+  const q = useQuery({ queryKey: ["connection", "c2"], queryFn: () => api.connect("c2", false) });
+  return <output aria-label="Вкладка">{q.data === undefined ? "…" : String(q.data)}</output>;
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -109,6 +116,75 @@ describe("ImportDialog", () => {
     await waitFor(() => expect(onImported).toHaveBeenCalledWith(PREVIEW));
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["connections"] });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["folders"] });
+  });
+
+  it("предупреждает о смене адреса подключения с сохранёнными учётными данными", async () => {
+    vi.mocked(api.previewImport).mockResolvedValue({
+      ...PREVIEW,
+      warnings: [
+        {
+          key: "messages.import.addressChanged",
+          params: { name: "prod", from: "https://api.old:6443", to: "https://api.new:6443" },
+          text: "English fallback",
+        },
+      ],
+    });
+    renderDialog();
+    expect(
+      await screen.findByText(
+        "«prod»: адрес API меняется с https://api.old:6443 на https://api.new:6443. Сохранённые учётные данные (токен, ключ или подтверждённый exec-плагин) будут отправлены на новый адрес.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("после импорта сбрасывает кэш обновлённых подключений", async () => {
+    let cached: unknown[] = [];
+    const onImported = vi.fn(() => {
+      cached = [rendered.client.getQueryData(["connection", "c2"]), rendered.client.getQueryData(["namespaces", "c2"])];
+    });
+    const user = userEvent.setup();
+    const rendered = renderWithClient(<ImportDialog path={PATH} initialTargetId={null} onClose={vi.fn()} onImported={onImported} />);
+    rendered.client.setQueryData(["connection", "c2"], { stale: true });
+    rendered.client.setQueryData(["namespaces", "c2"], ["a"]);
+    // Добавленное и посторонние подключения не затрагиваются.
+    rendered.client.setQueryData(["connection", "c1"], { keep: true });
+    rendered.client.setQueryData(["connection", "other"], { keep: true });
+    await screen.findByText(/^Добавится:/);
+    await user.click(screen.getByRole("button", { name: "Импортировать" }));
+    await waitFor(() => expect(onImported).toHaveBeenCalled());
+    // К моменту onImported открытая вкладка подключения уже не видит прежний адрес и вход.
+    expect(cached).toEqual([undefined, undefined]);
+    expect(rendered.client.getQueryData(["connection", "c1"])).toEqual({ keep: true });
+    expect(rendered.client.getQueryData(["connection", "other"])).toEqual({ keep: true });
+  });
+
+  it("после импорта открытая вкладка обновлённого подключения перезапрашивает данные", async () => {
+    vi.mocked(api.connect).mockResolvedValueOnce("сеанс истёк" as never).mockResolvedValue("подключено" as never);
+    const user = userEvent.setup();
+    renderWithClient(
+      <>
+        <OpenTab />
+        <ImportDialog path={PATH} initialTargetId={null} onClose={vi.fn()} onImported={vi.fn()} />
+      </>,
+    );
+    await waitFor(() => expect(screen.getByLabelText("Вкладка")).toHaveTextContent("сеанс истёк"));
+    await screen.findByText(/^Добавится:/);
+    await user.click(screen.getByRole("button", { name: "Импортировать" }));
+    // Подписчик ключа `["connection", "c2"]` получает свежие данные без повторного открытия вкладки.
+    await waitFor(() => expect(screen.getByLabelText("Вкладка")).toHaveTextContent("подключено"));
+    expect(api.connect).toHaveBeenCalledTimes(2);
+  });
+
+  it("сбой применения не сбрасывает кэш подключений", async () => {
+    vi.mocked(api.applyImport).mockRejectedValue({ code: "INTERNAL", message: "Disk is full", retryable: false });
+    const user = userEvent.setup();
+    const { client } = renderWithClient(<ImportDialog path={PATH} initialTargetId={null} onClose={vi.fn()} onImported={vi.fn()} />);
+    client.setQueryData(["connection", "c2"], { keep: true });
+    await screen.findByText(/^Добавится:/);
+    await user.click(screen.getByRole("button", { name: "Импортировать" }));
+    expect(await screen.findByText("Disk is full")).toBeInTheDocument();
+    // Импорт записывается одной записью: после сбоя ничего не изменилось.
+    expect(client.getQueryData(["connection", "c2"])).toEqual({ keep: true });
   });
 
   it("«Отмена» закрывает диалог без импорта", async () => {

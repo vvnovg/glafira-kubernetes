@@ -33,7 +33,7 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
   const [lastExec, setLastExec] = useState(initialExec);
   const [execArgs, setExecArgs] = useState(formatArgs(initialExec.args));
   const [execEnv, setExecEnv] = useState(formatEnv(initialExec.env));
-  // Подтверждение привязано к строке: хранится ключ подтверждённой строки, любая правка строки или смена способа его обнуляет.
+  // Подтверждение привязано к строке: хранится ключ подтверждённой строки. Правка строки не обнуляет ключ, а делает производный флаг ложным (ключ не совпадает); обнуляет его только смена способа входа.
   const [confirmedExec, setConfirmedExec] = useState<string | null>(null);
   const [report, setReport] = useState<TestReport | null>(null);
   const [error, setError] = useState<AppError | null>(null);
@@ -399,7 +399,13 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
         <Hint k="hints.connections.test" label={t("connections.form.test")} />
         {busy && auth.method === "exec" && (
           // Плагин может ждать входа в браузере до 5 минут.
-          <button type="button" onClick={() => void api.cancelOauthLogin(profile.id)}>
+          <button
+            type="button"
+            onClick={() => {
+              // Сбой отмены не показываем: ожидание закончится само, а кнопка остаётся для повторной отмены.
+              api.cancelOauthLogin(profile.id).catch(() => undefined);
+            }}
+          >
             {t("common.cancel")}
           </button>
         )}

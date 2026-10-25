@@ -421,12 +421,68 @@ fn same_settings(local: &ConnectionProfile, incoming: &ConnectionProfile) -> boo
     strip(local) == strip(&incoming)
 }
 
+/// Уходят ли учётные данные подключения на сервер: токен или ключ в keychain либо подтверждённая
+/// строка запуска exec-плагина. Сбой keychain считается «есть»: лишнее предупреждение лучше пропущенного.
+fn has_credentials(secrets: &dyn SecretStore, p: &ConnectionProfile) -> bool {
+    match &p.auth {
+        AuthConfig::Exec(e) => crate::auth::exec::is_approved(e),
+        _ => match needs_secret(secrets, p) {
+            Ok(n) => n.token || n.client_key,
+            Err(_) => true,
+        },
+    }
+}
+
+/// Предупреждения об обновлении подключения, у которого меняется то, куда уходят сохранённые
+/// учётные данные: адрес, прокси, CA или имя для проверки сертификата. `new` — профиль после
+/// обновления (подтверждение exec-плагина в нём уже сброшено, если изменилась строка запуска).
+fn destination_warnings(
+    secrets: &dyn SecretStore,
+    local: &ConnectionProfile,
+    new: &ConnectionProfile,
+) -> Vec<LocalizedText> {
+    let address = local.api_url != new.api_url;
+    let proxy = local.proxy != new.proxy;
+    let tls = local.ca != new.ca || local.tls_server_name != new.tls_server_name;
+    if !(address || proxy || tls) || !has_credentials(secrets, new) {
+        return Vec::new();
+    }
+    let name = &new.name;
+    let mut out = Vec::new();
+    if address {
+        out.push(ltext!(
+            "messages.import.addressChanged",
+            "“{{name}}”: the API address changes from {{from}} to {{to}}. The saved credentials (token, key or confirmed exec plugin) will be sent to the new address.",
+            name = name,
+            from = local.api_url,
+            to = new.api_url
+        ));
+    }
+    if proxy {
+        out.push(ltext!(
+            "messages.import.proxyChanged",
+            "“{{name}}”: the proxy settings change. The saved credentials (token, key or confirmed exec plugin) will go through the new proxy.",
+            name = name
+        ));
+    }
+    if tls {
+        out.push(ltext!(
+            "messages.import.tlsChanged",
+            "“{{name}}”: the certificate verification settings (CA or TLS server name) change. The saved credentials (token, key or confirmed exec plugin) will be used with the new settings.",
+            name = name
+        ));
+    }
+    out
+}
+
 /// Строит новое состояние хранилища и предпросмотр импорта. Функция чистая: разрешение
-/// политики приходит в `opts`.
+/// политики приходит в `opts`, а `secrets` только читается — для предупреждений об обновлении
+/// подключения с сохранёнными учётными данными.
 pub(crate) fn plan_import(
     data: &StoreData,
     parsed: &ParsedExchange,
     opts: &ImportOptions,
+    secrets: &dyn SecretStore,
 ) -> AppResult<ImportPlan> {
     let target = opts.target.map(str::to_string);
     if let Some(t) = &target
@@ -525,6 +581,11 @@ pub(crate) fn plan_import(
                     .clone()
                     .filter(|a| *a == crate::auth::exec::fingerprint(new));
             }
+            // Адрес, прокси и CA берутся из файла, а токен, ключ и подтверждение остаются: файл
+            // из чужих рук отправил бы их на другой сервер, и человек должен это увидеть.
+            preview
+                .warnings
+                .extend(destination_warnings(secrets, slot, &profile));
             updated.push((TreeItemKind::Connection, profile.id.clone()));
             *slot = profile;
             continue;
@@ -816,7 +877,7 @@ mod tests {
 
     fn plan(data: &StoreData, bytes: &[u8], o: &ImportOptions) -> ImportPlan {
         let parsed = parse_exchange(bytes).unwrap();
-        plan_import(data, &parsed, o).unwrap()
+        plan_import(data, &parsed, o, &MemoryStore::default()).unwrap()
     }
 
     fn conn<'a>(data: &'a StoreData, id: &str) -> &'a ConnectionProfile {
@@ -870,9 +931,14 @@ mod tests {
     #[test]
     fn unknown_target_is_an_error() {
         let parsed = parse_exchange(&file(vec![], vec![])).unwrap();
-        let err = plan_import(&StoreData::default(), &parsed, &opts(Some("nope")))
-            .err()
-            .unwrap();
+        let err = plan_import(
+            &StoreData::default(),
+            &parsed,
+            &opts(Some("nope")),
+            &MemoryStore::default(),
+        )
+        .err()
+        .unwrap();
         assert_eq!(err.key, "errors.folders.notFound");
     }
 
@@ -917,6 +983,193 @@ mod tests {
         let p = plan(&data, &same, &opts(None));
         assert_eq!(preview_ids(&p.preview.unchanged), ["a"]);
         assert_eq!(conn(&p.next, "a"), &local);
+    }
+
+    /// Локальное хранилище с подключением `a` и план импорта файла, где `a` изменено `edit`.
+    fn plan_update(
+        local: ConnectionProfile,
+        secrets: &MemoryStore,
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) -> ImportPreview {
+        let data = StoreData {
+            connections: vec![local],
+            ..Default::default()
+        };
+        let mut changed = conn_json("a", "conn-a", None);
+        edit(&mut changed);
+        let parsed = parse_exchange(&file(vec![], vec![changed])).unwrap();
+        let p = plan_import(&data, &parsed, &opts(None), secrets).unwrap();
+        assert_eq!(preview_ids(&p.preview.updated), ["a"]);
+        p.preview
+    }
+
+    fn with_token() -> MemoryStore {
+        let secrets = MemoryStore::default();
+        secrets.set(&secret_key("a", TOKEN), "sha256~t").unwrap();
+        secrets
+    }
+
+    fn warning_keys(preview: &ImportPreview) -> Vec<&str> {
+        preview.warnings.iter().map(|w| w.key.as_str()).collect()
+    }
+
+    #[test]
+    fn address_change_with_a_stored_token_warns() {
+        let p = plan_update(sample_profile("a"), &with_token(), |c| {
+            c["apiUrl"] = "https://api.other:6443".into();
+        });
+        assert_eq!(warning_keys(&p), ["messages.import.addressChanged"]);
+        let w = &p.warnings[0];
+        assert_eq!(w.params["name"], "conn-a");
+        assert_eq!(w.params["from"], "https://api.dev.example.com:6443");
+        assert_eq!(w.params["to"], "https://api.other:6443");
+        assert!(w.text.contains("conn-a") && w.text.contains("https://api.other:6443"));
+    }
+
+    #[test]
+    fn address_change_without_stored_credentials_does_not_warn() {
+        // Токена в keychain нет: уходить на новый адрес нечему.
+        let p = plan_update(sample_profile("a"), &MemoryStore::default(), |c| {
+            c["apiUrl"] = "https://api.other:6443".into();
+        });
+        assert!(p.warnings.is_empty());
+        // Ключ от другого способа входа не в счёт: профиль использует токен.
+        let secrets = MemoryStore::default();
+        secrets
+            .set(&secret_key("a", CLIENT_KEY), "KEY-s3cr3t")
+            .unwrap();
+        let p = plan_update(sample_profile("a"), &secrets, |c| {
+            c["apiUrl"] = "https://api.other:6443".into();
+        });
+        assert!(p.warnings.is_empty());
+    }
+
+    #[test]
+    fn unchanged_address_does_not_warn() {
+        // Обновляется другое поле, адрес, прокси и CA прежние.
+        let p = plan_update(sample_profile("a"), &with_token(), |c| {
+            c["environment"] = "prod".into();
+            c["readOnly"] = true.into();
+        });
+        assert!(p.warnings.is_empty());
+        // Адрес с «/» на конце тот же адрес.
+        let p = plan_update(sample_profile("a"), &with_token(), |c| {
+            c["apiUrl"] = "https://api.dev.example.com:6443/".into();
+            c["environment"] = "prod".into();
+        });
+        assert!(p.warnings.is_empty());
+    }
+
+    #[test]
+    fn proxy_and_certificate_changes_warn_separately() {
+        let p = plan_update(sample_profile("a"), &with_token(), |c| {
+            c["proxy"] = serde_json::json!({"mode": "url", "url": "http://proxy.other:3128"});
+        });
+        assert_eq!(warning_keys(&p), ["messages.import.proxyChanged"]);
+        assert_eq!(p.warnings[0].params["name"], "conn-a");
+        assert!(
+            !p.warnings[0].text.contains("proxy.other"),
+            "адрес прокси не печатается"
+        );
+        let p = plan_update(sample_profile("a"), &with_token(), |c| {
+            c["tlsServerName"] = "api.internal".into();
+        });
+        assert_eq!(warning_keys(&p), ["messages.import.tlsChanged"]);
+        let p = plan_update(sample_profile("a"), &with_token(), |c| {
+            c["ca"] = serde_json::json!({"mode": "pem", "pem": TEST_CERT_PEM});
+        });
+        assert_eq!(warning_keys(&p), ["messages.import.tlsChanged"]);
+        // Всё сразу: по предупреждению на каждое.
+        let p = plan_update(sample_profile("a"), &with_token(), |c| {
+            c["apiUrl"] = "https://api.other:6443".into();
+            c["proxy"] = serde_json::json!({"mode": "none"});
+            c["ca"] = serde_json::json!({"mode": "insecure"});
+        });
+        assert_eq!(
+            warning_keys(&p),
+            [
+                "messages.import.addressChanged",
+                "messages.import.proxyChanged",
+                "messages.import.tlsChanged"
+            ]
+        );
+    }
+
+    #[test]
+    fn client_key_counts_as_stored_credentials() {
+        let mut local = sample_profile("a");
+        local.auth = AuthConfig::ClientCert {
+            certificate_pem: TEST_CERT_PEM.into(),
+        };
+        let edit = |c: &mut serde_json::Value| {
+            c["auth"] =
+                serde_json::json!({"method": "clientCert", "certificatePem": TEST_CERT_PEM});
+            c["apiUrl"] = "https://api.other:6443".into();
+        };
+        let secrets = MemoryStore::default();
+        secrets
+            .set(&secret_key("a", CLIENT_KEY), "KEY-s3cr3t")
+            .unwrap();
+        let p = plan_update(local.clone(), &secrets, edit);
+        assert_eq!(warning_keys(&p), ["messages.import.addressChanged"]);
+        let p = plan_update(local, &MemoryStore::default(), edit);
+        assert!(p.warnings.is_empty());
+    }
+
+    #[test]
+    fn confirmed_exec_plugin_counts_as_stored_credentials() {
+        // Подтверждённая строка запуска остаётся при смене адреса: плагин получит новый адрес.
+        let (data, mut v) = exec_store_and_export();
+        v["connections"][0]["apiUrl"] = "https://api.other:6443".into();
+        let bytes = serde_json::to_vec(&v).unwrap();
+        let p = plan(&data, &bytes, &opts(None));
+        assert_eq!(warning_keys(&p.preview), ["messages.import.addressChanged"]);
+        assert_eq!(p.preview.warnings[0].params["name"], "conn-e");
+        // Строка запуска изменилась вместе с адресом: подтверждение сброшено, плагин не запустится.
+        v["connections"][0]["auth"]["args"]
+            .as_array_mut()
+            .unwrap()
+            .push("--v=1".into());
+        let bytes = serde_json::to_vec(&v).unwrap();
+        let p = plan(&data, &bytes, &opts(None));
+        assert_eq!(preview_ids(&p.preview.updated), ["e"]);
+        assert!(p.preview.warnings.is_empty());
+        // Неподтверждённый плагин ничего не запускает.
+        let (mut data, mut v) = exec_store_and_export();
+        let AuthConfig::Exec(e) = &mut data.connections[0].auth else {
+            panic!("exec")
+        };
+        e.approved = None;
+        v["connections"][0]["apiUrl"] = "https://api.other:6443".into();
+        let bytes = serde_json::to_vec(&v).unwrap();
+        let p = plan(&data, &bytes, &opts(None));
+        assert_eq!(preview_ids(&p.preview.updated), ["e"]);
+        assert!(p.preview.warnings.is_empty());
+    }
+
+    #[test]
+    fn added_connections_and_disabled_updates_do_not_warn() {
+        // Новое подключение: сохранённых учётных данных у него нет.
+        let data = StoreData::default();
+        let mut c = conn_json("a", "conn-a", None);
+        c["apiUrl"] = "https://api.other:6443".into();
+        let bytes = file(vec![], vec![c.clone()]);
+        let parsed = parse_exchange(&bytes).unwrap();
+        let p = plan_import(&data, &parsed, &opts(None), &with_token()).unwrap();
+        assert_eq!(preview_ids(&p.preview.added), ["a"]);
+        assert!(p.preview.warnings.is_empty());
+        // Без «Обновлять существующие» подключение остаётся как было.
+        let data = StoreData {
+            connections: vec![sample_profile("a")],
+            ..Default::default()
+        };
+        let off = ImportOptions {
+            update_existing: false,
+            ..opts(None)
+        };
+        let p = plan_import(&data, &parsed, &off, &with_token()).unwrap();
+        assert_eq!(preview_ids(&p.preview.unchanged), ["a"]);
+        assert!(p.preview.warnings.is_empty());
     }
 
     #[test]
@@ -1054,13 +1307,25 @@ mod tests {
             imported.approved, None,
             "подтверждение из файла не принимается"
         );
-        let p = plan_import(&StoreData::default(), &parsed, &opts(None)).unwrap();
+        let p = plan_import(
+            &StoreData::default(),
+            &parsed,
+            &opts(None),
+            &MemoryStore::default(),
+        )
+        .unwrap();
         assert_eq!(preview_ids(&p.preview.added), ["e", "ok"]);
         let forbid = ImportOptions {
             allow_exec_auth: false,
             ..opts(None)
         };
-        let p = plan_import(&StoreData::default(), &parsed, &forbid).unwrap();
+        let p = plan_import(
+            &StoreData::default(),
+            &parsed,
+            &forbid,
+            &MemoryStore::default(),
+        )
+        .unwrap();
         assert_eq!(preview_ids(&p.preview.added), ["ok"]);
         assert_eq!(
             p.preview.skipped[0].reason.key,
@@ -1201,13 +1466,25 @@ mod tests {
         insecure["ca"] = serde_json::json!({"mode": "insecure"});
         let bytes = file(vec![], vec![insecure, conn_json("ok", "OK", None)]);
         let parsed = parse_exchange(&bytes).unwrap();
-        let p = plan_import(&StoreData::default(), &parsed, &opts(None)).unwrap();
+        let p = plan_import(
+            &StoreData::default(),
+            &parsed,
+            &opts(None),
+            &MemoryStore::default(),
+        )
+        .unwrap();
         assert_eq!(preview_ids(&p.preview.added), ["i", "ok"]);
         let forbid = ImportOptions {
             allow_insecure_tls: false,
             ..opts(None)
         };
-        let p = plan_import(&StoreData::default(), &parsed, &forbid).unwrap();
+        let p = plan_import(
+            &StoreData::default(),
+            &parsed,
+            &forbid,
+            &MemoryStore::default(),
+        )
+        .unwrap();
         assert_eq!(preview_ids(&p.preview.added), ["ok"]);
         assert_eq!(p.preview.skipped.len(), 1);
         assert_eq!(p.preview.skipped[0].name, "Insecure");
@@ -1261,7 +1538,13 @@ mod tests {
             "errors.connections.httpsRequired"
         );
 
-        let p = plan_import(&StoreData::default(), &parsed, &opts(None)).unwrap();
+        let p = plan_import(
+            &StoreData::default(),
+            &parsed,
+            &opts(None),
+            &MemoryStore::default(),
+        )
+        .unwrap();
         assert_eq!(preview_ids(&p.preview.added), ["ok"]);
         assert_eq!(p.preview.skipped.len(), 2);
 
@@ -1296,7 +1579,13 @@ mod tests {
         assert_eq!(p.api_url, "https://api.c:6443");
         assert_eq!(p.favorite_namespaces, ["team-a", "b"]);
         assert_eq!(p.manual_namespaces, ["team-c"]);
-        let plan = plan_import(&StoreData::default(), &parsed, &opts(None)).unwrap();
+        let plan = plan_import(
+            &StoreData::default(),
+            &parsed,
+            &opts(None),
+            &MemoryStore::default(),
+        )
+        .unwrap();
         let stored = conn(&plan.next, "n");
         assert_eq!(stored.api_url, "https://api.c:6443");
         assert_eq!(stored.favorite_namespaces, ["team-a", "b"]);
@@ -1327,7 +1616,13 @@ mod tests {
 
         let parsed = parse_exchange(&bytes).unwrap();
         assert!(parsed.skipped.is_empty());
-        let p = plan_import(&StoreData::default(), &parsed, &opts(None)).unwrap();
+        let p = plan_import(
+            &StoreData::default(),
+            &parsed,
+            &opts(None),
+            &MemoryStore::default(),
+        )
+        .unwrap();
         assert_eq!(p.preview.needs_secrets, 1);
         let sort_f = |mut v: Vec<ConnectionFolder>| {
             v.sort_by(|a, b| a.id.cmp(&b.id));
