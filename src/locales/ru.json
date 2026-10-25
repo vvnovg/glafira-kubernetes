@@ -1,0 +1,156 @@
+{
+  "common": {
+    "retry": "Повторить",
+    "cancel": "Отмена",
+    "save": "Сохранить",
+    "delete": "Удалить",
+    "close": "Закрыть",
+    "loading": "Загрузка…",
+    "details": "Подробности",
+    "readOnly": "Только чтение"
+  },
+  "errors": {
+    "generic": "{{message}}",
+    "internal": "Внутренняя ошибка",
+    "io": "Ошибка ввода-вывода: {{error}}",
+    "json": "Ошибка JSON: {{error}}",
+    "app": {
+      "taskPanicked": "Фоновая задача завершилась аварийно: {{error}}"
+    },
+    "storage": {
+      "writeFailed": "Не удалось записать {{path}}: {{error}}",
+      "newerSchema": "{{file}} создан более новой версией приложения (schemaVersion {{version}})",
+      "quarantineFailed": "Файл {{path}} повреждён ({{parseError}}), не удалось сохранить копию: {{renameError}}"
+    },
+    "secrets": {
+      "keychain": "Ошибка доступа к системному хранилищу секретов",
+      "readOnly": "OverlayStore только для чтения"
+    },
+    "settings": {
+      "unknownLanguage": "Неизвестный язык «{{code}}»",
+      "languageByPolicy": "Язык задан вашей организацией"
+    },
+    "policy": {
+      "invalidBool": "{{key}}: недопустимое логическое {{value}}",
+      "invalidNumber": "{{key}}: недопустимое число {{value}}",
+      "invalidString": "{{key}}: недопустимая строка «{{value}}»",
+      "invalidType": "{{key}}: недопустимое значение типа {{kind}}",
+      "unreadable": "Политика не читается: {{reason}}",
+      "httpsRequired": "{{key}}: нужен адрес https:// — обновления по http не загружаются",
+      "badLanguage": "{{key}}: неизвестный язык «{{value}}»"
+    },
+    "connections": {
+      "noId": "У подключения нет идентификатора",
+      "emptyName": "Имя подключения не может быть пустым",
+      "notFound": "Подключение {{id}} не найдено",
+      "badApiUrl": "Неверный адрес API-сервера «{{url}}»",
+      "httpsRequired": "Адрес API-сервера должен начинаться с https:// и содержать хост",
+      "certificatePemInvalid": "Клиентский сертификат должен быть в формате PEM (-----BEGIN CERTIFICATE-----)",
+      "caPemInvalid": "Сертификат CA должен быть в формате PEM (-----BEGIN CERTIFICATE-----)",
+      "badProxyUrl": "Неверный адрес прокси «{{url}}»: укажите http://хост:порт",
+      "badNamespace": "«{{name}}» — недопустимое имя проекта: строчные латинские буквы, цифры и «-»",
+      "timeoutTooSmall": "Таймауты должны быть не меньше 1000 мс",
+      "loginRequired": "Войдите в кластер: кнопка «Войти через браузер»",
+      "tokenMissing": "Для подключения не сохранён токен — вставьте токен",
+      "clientKeyMissing": "Для подключения не сохранён ключ клиентского сертификата — добавьте ключ (PEM)",
+      "insecureForbidden": "Подключения без проверки TLS-сертификата запрещены вашей организацией",
+      "execForbidden": "Подключения с exec-плагином запрещены вашей организацией",
+      "tokenNotUsed": "Это подключение входит не по токену",
+      "pemContainsKey": "Поле сертификата содержит приватный ключ — перенесите ключ в поле ключа",
+      "credentialsInUrl": "Уберите имя пользователя и пароль из «{{url}}»: учётным данным не место в адресе (прокси с паролем задаётся системным HTTPS_PROXY)"
+    },
+    "folders": {
+      "notFound": "Папка {{id}} не найдена",
+      "nameEmpty": "Укажите имя папки",
+      "nameTooLong": "Имя папки длиннее 100 символов",
+      "nameTaken": "Папка «{{name}}» здесь уже есть",
+      "cycle": "Папку нельзя переместить в неё саму или во вложенную папку",
+      "notEmpty": "Папка не пуста: сначала перенесите или удалите её подключения и папки"
+    },
+    "import": {
+      "notGlafiraFile": "Это не файл подключений Glafira",
+      "invalidJson": "Файл повреждён или это не JSON: {{error}}",
+      "incompatibleVersion": "Файл создан в несовместимой версии Glafira — обновите приложение",
+      "unsupportedConnection": "Не поддерживается этой версией Glafira (обновите приложение): {{error}}",
+      "duplicateId": "Повторяющийся id подключения в файле",
+      "insecureForbidden": "Подключения без проверки TLS-сертификата запрещены вашей организацией",
+      "execForbidden": "Подключения с exec-плагином запрещены вашей организацией"
+    },
+    "k8s": {
+      "credentials": "Учётные данные подключения не подходят: {{message}}",
+      "unexpectedResponse": "Неожиданный ответ — это точно адрес API-сервера Kubernetes?",
+      "forbiddenIn": "Нет прав: {{verb}} {{resource}} в проекте «{{namespace}}»",
+      "forbiddenCluster": "Нет прав: {{verb}} {{resource}} на уровне кластера",
+      "forbidden": "Нет прав: {{message}}",
+      "unauthorized": "Кластер отклонил учётные данные: токен истёк или неверен",
+      "notFound": "Не найдено: {{message}}",
+      "conflict": "Объект уже изменил кто-то другой: {{message}}",
+      "invalid": "Кластер отклонил запрос: {{message}}",
+      "tooManyRequests": "API-сервер перегружен — повторите позже",
+      "serverError": "API-сервер вернул ошибку {{code}}: {{message}}",
+      "apiError": "Ошибка API-сервера {{code}}: {{message}}",
+      "hostnameMismatch": "Сертификат сервера не соответствует его адресу — проверьте адрес или «Имя для проверки TLS»",
+      "certExpired": "Срок действия сертификата сервера истёк или ещё не начался",
+      "caUntrusted": "Сертификат сервера подписан недоверенным CA — укажите CA кластера",
+      "tlsError": "Ошибка TLS-соединения",
+      "dns": "Не удаётся разрешить имя хоста сервера",
+      "timeout": "Сервер не ответил вовремя",
+      "connect": "Не удаётся подключиться к серверу",
+      "transport": "Сетевая ошибка: {{message}}"
+    },
+    "oauth": {
+      "denied": "Вход не выполнен: {{error}}",
+      "stateMismatch": "Ответ входа не соответствует запросу — попробуйте ещё раз",
+      "timeout": "Вход в браузере не завершён вовремя",
+      "cancelled": "Вход отменён",
+      "notAvailable": "На кластере нет OAuth-сервера OpenShift, поэтому вход через браузер недоступен — используйте токен, контекст kubeconfig или exec-плагин",
+      "rejected": "OAuth-сервер отклонил вход: {{reason}}",
+      "badTokenResponse": "OAuth-сервер вернул неожиданный ответ",
+      "browser": "Не удалось открыть браузер: {{error}}"
+    },
+    "exec": {
+      "commandMissing": "Укажите команду exec-плагина",
+      "commandNotAbsolute": "Укажите полный путь к «{{command}}» — кнопка «Найти»",
+      "commandNotFound": "Команда «{{command}}» не найдена в PATH и стандартных каталогах — укажите полный путь",
+      "notAllowed": "«{{command}}» нет в списке разрешённых exec-плагинов",
+      "argsNotAllowed": "Exec-плагин «{{command}}» можно запускать только как «{{expected}} …»",
+      "badApiVersion": "Неподдерживаемая версия API exec-плагина «{{version}}»: нужна {{expected}}",
+      "badEnvName": "Недопустимое имя переменной окружения «{{name}}»",
+      "notApproved": "Подтвердите строку запуска exec-плагина в настройках подключения",
+      "start": "Не удалось запустить exec-плагин {{command}}: {{error}}",
+      "timeout": "Exec-плагин {{command}} не завершился за {{seconds}} с",
+      "failed": "Exec-плагин {{command}} завершился с ошибкой (код выхода {{code}})",
+      "badOutput": "Exec-плагин {{command}} не выдал учётных данных"
+    },
+    "kubeconfig": {
+      "unreadable": "Не удалось прочитать kubeconfig {{path}}: {{error}}",
+      "execInteractive": "Exec-плагину нужен терминал (interactiveMode: Always) — не поддерживается",
+      "execNotFound": "Команда «{{command}}» не найдена в PATH и стандартных каталогах — установите её или укажите полный путь в kubeconfig",
+      "authProvider": "Провайдер аутентификации «{{name}}» устарел и не поддерживается — используйте exec-плагин",
+      "noCluster": "Контекст ссылается на отсутствующий кластер «{{name}}»",
+      "fileUnreadable": "Не удалось прочитать {{path}} из kubeconfig: {{error}}",
+      "badBase64": "Данные сертификата или ключа в kubeconfig — не base64",
+      "noContext": "Контекст «{{name}}» не найден в kubeconfig",
+      "noDefault": "Kubeconfig по умолчанию не найден — выберите файл"
+    }
+  },
+  "messages": {
+    "connectionTest": {
+      "configOk": "Конфигурация корректна",
+      "tcpOk": "TCP-соединение с {{address}} установлено",
+      "tcpProxyOk": "TCP-соединение с прокси {{address}} установлено",
+      "execOk": "Exec-плагин {{command}} выдал учётные данные",
+      "execOkUntil": "Exec-плагин {{command}} выдал учётные данные до {{expires}}",
+      "tlsOk": "Сертификат сервера доверенный",
+      "tlsInsecure": "Сертификат сервера НЕ проверяется (небезопасный режим)",
+      "authOk": "Вход выполнен: {{user}}",
+      "discovery": "{{platform}} · API-сервер {{version}}",
+      "discoveryGroups": "{{platform}} · API-сервер {{version}} · найдены: {{groups}}",
+      "projectsOk": "Доступных проектов: {{count}}",
+      "projectsManual": "Кластер не отдаёт вам список проектов; проектов в профиле: {{count}}"
+    }
+  },
+  "hints": {
+    "label": "Подсказка: {{name}}"
+  }
+}

@@ -1,0 +1,156 @@
+{
+  "common": {
+    "retry": "Retry",
+    "cancel": "Cancel",
+    "save": "Save",
+    "delete": "Delete",
+    "close": "Close",
+    "loading": "Loading…",
+    "details": "Details",
+    "readOnly": "Read-only"
+  },
+  "errors": {
+    "generic": "{{message}}",
+    "internal": "Internal error",
+    "io": "I/O error: {{error}}",
+    "json": "JSON error: {{error}}",
+    "app": {
+      "taskPanicked": "Background task failed: {{error}}"
+    },
+    "storage": {
+      "writeFailed": "Failed to write {{path}}: {{error}}",
+      "newerSchema": "{{file}} was created by a newer version of the app (schemaVersion {{version}})",
+      "quarantineFailed": "File {{path}} is corrupted ({{parseError}}) and a backup copy could not be saved: {{renameError}}"
+    },
+    "secrets": {
+      "keychain": "Cannot access the system secret store",
+      "readOnly": "OverlayStore is read-only"
+    },
+    "settings": {
+      "unknownLanguage": "Unknown language “{{code}}”",
+      "languageByPolicy": "The language is set by your organization"
+    },
+    "policy": {
+      "invalidBool": "{{key}}: invalid boolean {{value}}",
+      "invalidNumber": "{{key}}: invalid number {{value}}",
+      "invalidString": "{{key}}: invalid string “{{value}}”",
+      "invalidType": "{{key}}: invalid value of type {{kind}}",
+      "unreadable": "Policy cannot be read: {{reason}}",
+      "httpsRequired": "{{key}}: an https:// address is required — updates are not downloaded over http",
+      "badLanguage": "{{key}}: unknown language “{{value}}”"
+    },
+    "connections": {
+      "noId": "The connection has no ID",
+      "emptyName": "Connection name cannot be empty",
+      "notFound": "Connection {{id}} not found",
+      "badApiUrl": "Invalid API server address “{{url}}”",
+      "httpsRequired": "The API server address must start with https:// and contain a host",
+      "certificatePemInvalid": "The client certificate must be in PEM format (-----BEGIN CERTIFICATE-----)",
+      "caPemInvalid": "The CA certificate must be in PEM format (-----BEGIN CERTIFICATE-----)",
+      "badProxyUrl": "Invalid proxy address “{{url}}”: use http://host:port",
+      "badNamespace": "“{{name}}” is not a valid project name: use lowercase letters, digits and “-”",
+      "timeoutTooSmall": "Timeouts must be at least 1000 ms",
+      "loginRequired": "Sign in to the cluster: use “Sign in via browser”",
+      "tokenMissing": "No token is saved for this connection — paste a token",
+      "clientKeyMissing": "No client key is saved for this connection — add the key (PEM)",
+      "insecureForbidden": "Connections without TLS certificate verification are forbidden by your organization",
+      "execForbidden": "Connections with exec plugins are forbidden by your organization",
+      "tokenNotUsed": "This connection does not sign in with a token",
+      "pemContainsKey": "A certificate field contains a private key — put the key into the key field",
+      "credentialsInUrl": "Remove the user name and password from “{{url}}”: credentials do not belong in the address (a proxy with a password is set via the system HTTPS_PROXY)"
+    },
+    "folders": {
+      "notFound": "Folder {{id}} not found",
+      "nameEmpty": "Enter a folder name",
+      "nameTooLong": "The folder name is longer than 100 characters",
+      "nameTaken": "A folder named “{{name}}” already exists here",
+      "cycle": "A folder cannot be moved into itself or its subfolder",
+      "notEmpty": "The folder is not empty: move or delete its connections and folders first"
+    },
+    "import": {
+      "notGlafiraFile": "This is not a Glafira connections file",
+      "invalidJson": "The file is damaged or is not JSON: {{error}}",
+      "incompatibleVersion": "The file was created by an incompatible version of Glafira — update the app",
+      "unsupportedConnection": "Not supported by this version of Glafira (update the app): {{error}}",
+      "duplicateId": "Duplicate connection id in the file",
+      "insecureForbidden": "Connections without TLS certificate verification are forbidden by your organization",
+      "execForbidden": "Connections with exec plugins are forbidden by your organization"
+    },
+    "k8s": {
+      "credentials": "The credentials of this connection cannot be used: {{message}}",
+      "unexpectedResponse": "Unexpected response — is this the address of a Kubernetes API server?",
+      "forbiddenIn": "Not allowed: {{verb}} {{resource}} in project “{{namespace}}”",
+      "forbiddenCluster": "Not allowed: {{verb}} {{resource}} at the cluster level",
+      "forbidden": "Not allowed: {{message}}",
+      "unauthorized": "The cluster rejected the credentials: the token has expired or is invalid",
+      "notFound": "Not found: {{message}}",
+      "conflict": "The object has been changed by someone else: {{message}}",
+      "invalid": "The cluster rejected the request: {{message}}",
+      "tooManyRequests": "The API server is overloaded — try again later",
+      "serverError": "The API server returned error {{code}}: {{message}}",
+      "apiError": "API server error {{code}}: {{message}}",
+      "hostnameMismatch": "The server certificate does not match its address — check the address or “TLS server name”",
+      "certExpired": "The server certificate has expired or is not valid yet",
+      "caUntrusted": "The server certificate is not signed by a trusted CA — specify the cluster CA",
+      "tlsError": "TLS connection error",
+      "dns": "Cannot resolve the server host name",
+      "timeout": "The server did not respond in time",
+      "connect": "Cannot connect to the server",
+      "transport": "Network error: {{message}}"
+    },
+    "oauth": {
+      "denied": "Sign-in was not completed: {{error}}",
+      "stateMismatch": "The sign-in response does not match the request — try again",
+      "timeout": "Sign-in in the browser was not completed in time",
+      "cancelled": "Sign-in was cancelled",
+      "notAvailable": "This cluster has no OpenShift OAuth server, so sign-in via browser is not available — use a token, a kubeconfig context or an exec plugin",
+      "rejected": "The OAuth server rejected the sign-in: {{reason}}",
+      "badTokenResponse": "The OAuth server returned an unexpected response",
+      "browser": "Cannot open the browser: {{error}}"
+    },
+    "exec": {
+      "commandMissing": "Specify the exec plugin command",
+      "commandNotAbsolute": "Specify the full path to “{{command}}” — use “Find”",
+      "commandNotFound": "Command “{{command}}” is not found in PATH or the standard folders — specify the full path",
+      "notAllowed": "“{{command}}” is not in the list of allowed exec plugins",
+      "argsNotAllowed": "The exec plugin “{{command}}” may run only as “{{expected}} …”",
+      "badApiVersion": "Unsupported exec plugin API version “{{version}}”: use {{expected}}",
+      "badEnvName": "Invalid environment variable name “{{name}}”",
+      "notApproved": "Confirm the exec plugin launch line in the connection settings",
+      "start": "Cannot start the exec plugin {{command}}: {{error}}",
+      "timeout": "The exec plugin {{command}} did not finish in {{seconds}} s",
+      "failed": "The exec plugin {{command}} failed (exit code {{code}})",
+      "badOutput": "The exec plugin {{command}} returned no credentials"
+    },
+    "kubeconfig": {
+      "unreadable": "Cannot read kubeconfig {{path}}: {{error}}",
+      "execInteractive": "The exec plugin needs a terminal (interactiveMode: Always) — not supported",
+      "execNotFound": "Command “{{command}}” is not found in PATH or the standard folders — install it or specify the full path in kubeconfig",
+      "authProvider": "Authentication provider “{{name}}” is outdated and not supported — use an exec plugin",
+      "noCluster": "The context refers to a missing cluster “{{name}}”",
+      "fileUnreadable": "Cannot read {{path}} referenced by kubeconfig: {{error}}",
+      "badBase64": "Certificate or key data in kubeconfig is not valid base64",
+      "noContext": "Context “{{name}}” not found in kubeconfig",
+      "noDefault": "Cannot find the default kubeconfig — choose a file"
+    }
+  },
+  "messages": {
+    "connectionTest": {
+      "configOk": "Configuration is valid",
+      "tcpOk": "TCP connection to {{address}} established",
+      "tcpProxyOk": "TCP connection to the proxy {{address}} established",
+      "execOk": "The exec plugin {{command}} returned credentials",
+      "execOkUntil": "The exec plugin {{command}} returned credentials valid until {{expires}}",
+      "tlsOk": "The server certificate is trusted",
+      "tlsInsecure": "The server certificate is NOT verified (insecure mode)",
+      "authOk": "Signed in as {{user}}",
+      "discovery": "{{platform}} · API server {{version}}",
+      "discoveryGroups": "{{platform}} · API server {{version}} · found: {{groups}}",
+      "projectsOk": "Available projects: {{count}}",
+      "projectsManual": "The cluster does not list projects for you; projects from the profile: {{count}}"
+    }
+  },
+  "hints": {
+    "label": "Hint: {{name}}"
+  }
+}
