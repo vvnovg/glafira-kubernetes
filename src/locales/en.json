@@ -173,6 +173,10 @@
     },
     "kubeconfig": {
       "target": "New connections go to this folder; connections that already exist keep their place, name, environment and color."
+    },
+    "import": {
+      "target": "Where new folders and connections go. Existing ones stay where they are.",
+      "updateExisting": "Connections that already exist get the settings from the file; your tokens, keys and their place in the tree are kept."
     }
   },
   "connections": {
@@ -286,7 +290,25 @@
     "importKubeconfig": "Import from kubeconfig…",
     "newFolder": "New folder",
     "exportAll": "Export all…",
-    "import": "Import…"
+    "import": "Import…",
+    "connections": "Connections",
+    "editConnection": "Edit connection",
+    "emptyHint": "Add your first connection or import contexts from kubeconfig in the <code>⋯</code> menu.",
+    "cluster": "Overview",
+    "filter": "Filter connections",
+    "folderToggle": "Expand or collapse {{name}}",
+    "noMatches": "Nothing found",
+    "menu": "More actions",
+    "folder": {
+      "newConnection": "New connection here",
+      "rename": "Rename",
+      "delete": "Delete",
+      "deleteConfirm": "Delete folder “{{name}}”?",
+      "namePlaceholder": "Folder name",
+      "export": "Export folder…",
+      "importHere": "Import here…",
+      "importKubeconfigHere": "Import from kubeconfig here…"
+    }
   },
   "settings": {
     "title": "Settings",
@@ -342,5 +364,41 @@
     "apply_other": "Import {{count}} contexts",
     "imported_one": "Imported {{count}} connection",
     "imported_other": "Imported {{count}} connections"
+  },
+  "tabs": {
+    "settings": "Settings",
+    "about": "About",
+    "help": "Help",
+    "connection": "Connection: {{name}}",
+    "newConnection": "New connection",
+    "cluster": "{{conn}} · Overview"
+  },
+  "layout": {
+    "closeTab": "Close tab",
+    "empty": "Select a connection on the left or add a new one."
+  },
+  "menu": {
+    "help": "Help",
+    "guide": "Glafira Guide",
+    "about": "About Glafira"
+  },
+  "exchange": {
+    "exported": "Saved: connections {{connections}}, folders {{folders}}",
+    "imported": "Imported: added {{added}}, updated {{updated}}",
+    "secretsNeeded_one": "Enter a token or key for {{count}} connection",
+    "secretsNeeded_other": "Enter tokens or keys for {{count}} connections",
+    "import": {
+      "title": "Import connections",
+      "target": "Import into",
+      "updateExisting": "Update existing connections",
+      "summary": "Added: {{added}} · Updated: {{updated}} · Unchanged: {{unchanged}} · Skipped: {{skipped}}",
+      "groupAdded": "New",
+      "groupUpdated": "Will be updated",
+      "groupUnchanged": "Unchanged",
+      "groupSkipped": "Skipped",
+      "secrets_one": "Enter a token or key for {{count}} connection after import",
+      "secrets_other": "Enter tokens or keys for {{count}} connections after import",
+      "apply": "Import"
+    }
   }
 }

@@ -1,13 +1,22 @@
 import { render, screen } from "@testing-library/react";
 import { vi } from "vitest";
 
-vi.mock("./api/client", () => ({
-  api: { getLanguageSettings: vi.fn(() => new Promise(() => {})) },
-}));
+vi.mock("./api/client", async (importOriginal) => {
+  const orig = await importOriginal<typeof import("./api/client")>();
+  return {
+    ...orig,
+    api: {
+      getLanguageSettings: vi.fn(() => new Promise(() => {})),
+      listConnections: vi.fn().mockResolvedValue([]),
+      listFolders: vi.fn().mockResolvedValue([]),
+    },
+  };
+});
 
 import App from "./App";
 
-test("показывает имя продукта", () => {
+test("пустое окно предлагает добавить подключение", async () => {
   render(<App />);
-  expect(screen.getByText("Glafira for Kubernetes")).toBeInTheDocument();
+  expect(await screen.findByText(/Добавьте первое подключение/)).toBeInTheDocument();
+  expect(screen.getByText("Выберите подключение слева или добавьте новое.")).toBeInTheDocument();
 });

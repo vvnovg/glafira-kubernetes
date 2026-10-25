@@ -108,3 +108,19 @@
 | `scripts/guide-publish.mjs` | `scripts/guide-publish.mjs` | `8bbd0bd` | адаптирован: заголовок |
 | `scripts/guide-publish.test.mjs` | `scripts/guide-publish.test.mjs` | `8bbd0bd` | адаптирован: языки en и ru |
 | `scripts/guide-publish.d.mts` | `scripts/guide-publish.d.mts` | `8bbd0bd` | как есть |
+| `src/components/connections/tree/FolderMenu.tsx` | `src/components/connections/tree/FolderMenu.tsx` | `8bbd0bd` | как есть |
+| `src/components/connections/tree/ConnectionTree.tsx` | `src/components/connections/tree/ConnectionTree.tsx` | `8bbd0bd` | адаптирован: файл обмена Kubernetes, секреты, импорт kubeconfig |
+| `src/components/connections/tree/ConnectionTree.test.tsx` | `src/components/connections/tree/ConnectionTree.test.tsx` | `8bbd0bd` | адаптирован: пункты подключения, секреты, kubeconfig |
+| `src/components/connections/tree/ImportDialog.tsx` | `src/components/connections/tree/ImportDialog.tsx` | `8bbd0bd` | адаптирован: флаги секретов |
+| `src/components/connections/tree/ImportDialog.test.tsx` | `src/components/connections/tree/ImportDialog.test.tsx` | `8bbd0bd` | адаптирован: флаги секретов |
+| `src/components/connections/tree/ConnectionNode.tsx` | `src/components/connections/tree/ConnectionNode.tsx` | `8bbd0bd` | адаптирован: пункты Kubernetes O1 |
+| `src/lib/useHelpShortcut.ts` | `src/lib/useHelpShortcut.ts` | `8bbd0bd` | как есть |
+| `src/guide/noLookbehind.test.ts` | `src/guide/noLookbehind.test.ts` | `8bbd0bd` | адаптирован: порог числа файлов |
+| `src/components/TabContent.help.test.tsx` | `src/components/TabContent.help.test.tsx` | `8bbd0bd` | как есть |
+| `src/lib/useAppMenu.ts` | `src/lib/useAppMenu.ts` | `8bbd0bd` | адаптирован: без пунктов решения проблем и диагностики (O6) |
+| `src/lib/useAppMenu.test.ts` | `src/lib/useAppMenu.test.ts` | `8bbd0bd` | адаптирован: пункты меню O1 |
+| `src/components/Layout.tsx` | `src/components/Layout.tsx` | `8bbd0bd` | адаптирован: вкладки O1, без MCP и обновлений |
+| `src/components/Layout.test.tsx` | `src/components/Layout.test.tsx` | `8bbd0bd` | адаптирован: профиль Kubernetes, вкладки O1 |
+| `src/components/Sidebar.tsx` | `src/components/Sidebar.tsx` | `8bbd0bd` | адаптирован: без индикатора MCP |
+| `src/components/Sidebar.test.tsx` | `src/components/Sidebar.test.tsx` | `8bbd0bd` | адаптирован: пункты подключения O1 |
+| `src/components/TabContent.tsx` | `src/components/TabContent.tsx` | `8bbd0bd` | адаптирован: вкладки O1 |
