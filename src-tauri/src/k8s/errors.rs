@@ -210,6 +210,28 @@ pub fn timeout() -> AppError {
     )
 }
 
+/// С такой ошибкой клиент подключения дальше не работает: учётные данные (401, exec-плагин,
+/// OAuth) или TLS. Следующее чтение должно подключиться заново.
+pub fn breaks_client(code: ErrorCode) -> bool {
+    matches!(
+        code,
+        ErrorCode::SessionExpired | ErrorCode::AuthFailed | ErrorCode::TlsError
+    )
+}
+
+/// Объект `kind` с именем `name` пришёл в виде, который Glafira не разбирает (вид без типа
+/// в `k8s-openapi`, например DeploymentConfig). Текст ошибки разбора — в `details`.
+pub fn malformed(kind: &str, name: &str, details: impl std::fmt::Display) -> AppError {
+    app_err!(
+        ErrorCode::Internal,
+        "errors.k8s.malformedObject",
+        "Cannot read {{kind}} “{{name}}”: unexpected object format",
+        kind = kind,
+        name = name
+    )
+    .with_details(details.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

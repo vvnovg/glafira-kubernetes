@@ -2,9 +2,12 @@
 //! и проверки прав.
 //! Внутренний `kube::Client` наружу не отдаётся — через `ReadClient` кластер не изменить. Им же
 //! будет пользоваться MCP-шлюз (этап O2). Каждый запрос ограничен таймаутом профиля; списки
-//! читаются страницами (спец. §6.7).
+//! читаются страницами (спец. §6.7). Ошибки запросов собирает `observe`: так чтение команды
+//! (`AppState::read`) узнаёт и о тех, что легли в часть экрана, а не в её итог.
 
+use std::cell::RefCell;
 use std::fmt::Debug;
+use std::future::Future;
 use std::time::Duration;
 
 use futures::{AsyncBufRead, Stream};
@@ -17,8 +20,9 @@ use kube::core::Resource;
 use kube::runtime::watcher;
 use serde::de::DeserializeOwned;
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult, ErrorCode};
 use crate::k8s::cluster::timed;
+use crate::k8s::errors::breaks_client;
 
 /// Сколько объектов на странице списка.
 pub const PAGE_SIZE: u32 = 500;
@@ -45,6 +49,51 @@ impl<K> Listed<K> {
     }
 }
 
+/// Ошибки запросов `ReadClient` за время `observe`: те, по которым чтение команды что-то
+/// делает. Части экрана (`Part`) и виды списка, которые не прочитались, приходят данными,
+/// а не ошибкой команды; без этого их 403 не сбросил бы кэш прав проекта, а 401 — клиент.
+#[derive(Debug, Default)]
+pub struct Observed {
+    /// Был ответ 403.
+    pub forbidden: bool,
+    /// Первая ошибка, с которой клиент дальше не работает (`breaks_client`).
+    pub broken: Option<AppError>,
+}
+
+impl Observed {
+    fn note(&mut self, e: &AppError) {
+        self.forbidden |= e.code == ErrorCode::Forbidden;
+        if self.broken.is_none() && breaks_client(e.code) {
+            self.broken = Some(e.clone());
+        }
+    }
+}
+
+tokio::task_local! {
+    static OBSERVED: RefCell<Observed>;
+}
+
+/// `fut` и ошибки запросов `ReadClient`, которые в нём были. Видны запросы той же задачи tokio
+/// (`join_all`, `tokio::join!`), а не запущенных из неё через `tokio::spawn`. Вложенный
+/// `observe` собирает свои ошибки сам, внешний их не видит.
+pub async fn observe<F: Future>(fut: F) -> (F::Output, Observed) {
+    OBSERVED
+        .scope(RefCell::new(Observed::default()), async {
+            let out = fut.await;
+            (out, OBSERVED.with(RefCell::take))
+        })
+        .await
+}
+
+/// Отмечает ошибку запроса для `observe`; вне его ничего не делает. Ответ 404 у `get_opt` —
+/// не ошибка, а 404 и остальные коды, кроме 403 и `breaks_client`, не отмечаются.
+fn noted<T>(r: AppResult<T>) -> AppResult<T> {
+    if let Err(e) = &r {
+        let _ = OBSERVED.try_with(|o| o.borrow_mut().note(e));
+    }
+    r
+}
+
 /// Клиент только для чтения поверх `kube::Client` подключения.
 #[derive(Clone)]
 pub struct ReadClient {
@@ -60,6 +109,12 @@ impl ReadClient {
     /// Таймаут одного запроса (из профиля).
     pub fn timeout(&self) -> Duration {
         self.timeout
+    }
+
+    /// Запрос с таймаутом профиля; его ошибка отмечается для `observe`. Через него идут все
+    /// запросы клиента, кроме watch: сессии watch идут в своих задачах, вне `observe`.
+    async fn call<T>(&self, fut: impl Future<Output = kube::Result<T>>) -> AppResult<T> {
+        noted(timed(self.timeout, fut).await)
     }
 
     /// Объекты в namespace (`Some`) или во всех namespace (`None`).
@@ -126,7 +181,7 @@ impl ReadClient {
             if let Some(t) = &token {
                 page = page.continue_token(t);
             }
-            let list: ObjectList<K> = timed(self.timeout, api.list(&page)).await?;
+            let list: ObjectList<K> = self.call(api.list(&page)).await?;
             items.extend(list.items);
             token = list.metadata.continue_.filter(|t| !t.is_empty());
             if items.len() >= max {
@@ -156,7 +211,7 @@ impl ReadClient {
             + Debug,
     {
         let api: Api<K> = Api::namespaced(self.client.clone(), namespace);
-        timed(self.timeout, api.get(name)).await
+        self.call(api.get(name)).await
     }
 
     /// Объект или `None`, если его нет (404).
@@ -168,7 +223,7 @@ impl ReadClient {
             + Debug,
     {
         let api: Api<K> = Api::namespaced(self.client.clone(), namespace);
-        timed(self.timeout, api.get_opt(name)).await
+        self.call(api.get_opt(name)).await
     }
 
     pub async fn get_cluster<K>(&self, name: &str) -> AppResult<K>
@@ -179,7 +234,7 @@ impl ReadClient {
             + Debug,
     {
         let api: Api<K> = Api::all(self.client.clone());
-        timed(self.timeout, api.get(name)).await
+        self.call(api.get(name)).await
     }
 
     pub async fn get_dynamic(
@@ -188,7 +243,7 @@ impl ReadClient {
         namespace: Option<&str>,
         name: &str,
     ) -> AppResult<DynamicObject> {
-        timed(self.timeout, self.dynamic(ar, namespace).get(name)).await
+        self.call(self.dynamic(ar, namespace).get(name)).await
     }
 
     /// Тело ответа на GET к пути API-сервера, например `/readyz?verbose`. Ответ с ошибкой
@@ -197,7 +252,7 @@ impl ReadClient {
         let request = http::Request::get(path_and_query)
             .body(Vec::new())
             .map_err(|e| crate::error::AppError::internal_with(e.to_string()))?;
-        timed(self.timeout, self.client.request_text(request)).await
+        self.call(self.client.request_text(request)).await
     }
 
     /// Изменения объектов namespace (`kube::runtime::watcher`): список, затем watch; после
@@ -238,7 +293,9 @@ impl ReadClient {
             },
             ..Default::default()
         };
-        let r = timed(self.timeout, api.create(&PostParams::default(), &review)).await?;
+        let r = self
+            .call(api.create(&PostParams::default(), &review))
+            .await?;
         // Без статуса о правах ничего не известно: `incomplete`, и интерфейс ничего не скрывает.
         Ok(r.status.unwrap_or_else(|| SubjectRulesReviewStatus {
             incomplete: true,
@@ -248,7 +305,9 @@ impl ReadClient {
 
     /// Имена проектов (или namespace): первые 500 и признак «есть ещё».
     pub async fn project_names(&self, projects_api: bool) -> AppResult<(Vec<String>, bool)> {
-        crate::k8s::cluster::list_project_names(&self.client, self.timeout, projects_api).await
+        noted(
+            crate::k8s::cluster::list_project_names(&self.client, self.timeout, projects_api).await,
+        )
     }
 
     /// Поток строк лога контейнера; таймаут — только на открытие потока.
@@ -260,7 +319,7 @@ impl ReadClient {
     ) -> AppResult<impl AsyncBufRead + use<>> {
         let api: Api<k8s_openapi::api::core::v1::Pod> =
             Api::namespaced(self.client.clone(), namespace);
-        timed(self.timeout, api.log_stream(pod, params)).await
+        self.call(api.log_stream(pod, params)).await
     }
 }
 
@@ -428,6 +487,44 @@ mod tests {
             "/apis/route.openshift.io/v1/namespaces/team-a/routes"
         );
         assert_eq!(seen[1].path(), "/apis/route.openshift.io/v1/routes");
+    }
+
+    /// Ошибки запросов собирает `observe`, и параллельных (`tokio::join!`) тоже; 404 и `None`
+    /// у `get_opt` не отмечаются, а вне `observe` отметка ничего не делает.
+    #[tokio::test]
+    async fn errors_of_requests_are_observed_only_inside_observe() {
+        let (client, _server) = mock_client(|s| match s.path() {
+            "/api/v1/namespaces/team-a/pods" => status(
+                403,
+                "Forbidden",
+                r#"pods is forbidden: User "u" cannot list resource "pods" in API group "" in the namespace "team-a""#,
+            ),
+            "/api/v1/namespaces/team-a/configmaps" => status(401, "Unauthorized", "Unauthorized"),
+            _ => status(404, "NotFound", "configmaps \"x\" not found"),
+        });
+        let (r, lp) = (reader(client), ListParams::default());
+        let e = r.list::<Pod>(Some("team-a"), &lp).await.unwrap_err();
+        assert_eq!(e.code, ErrorCode::Forbidden, "вне observe — просто ошибка");
+
+        let ((pods, maps, missing), seen) = observe(async {
+            tokio::join!(
+                r.list::<Pod>(Some("team-a"), &lp),
+                r.list::<ConfigMap>(Some("team-a"), &lp),
+                r.get_opt::<ConfigMap>("team-a", "x"),
+            )
+        })
+        .await;
+        assert!(pods.is_err() && maps.is_err());
+        assert!(missing.unwrap().is_none());
+        assert!(seen.forbidden);
+        assert_eq!(seen.broken.unwrap().code, ErrorCode::SessionExpired);
+
+        let (missing, seen) = observe(r.get::<ConfigMap>("team-a", "x")).await;
+        assert_eq!(missing.unwrap_err().code, ErrorCode::NotFound);
+        assert!(
+            !seen.forbidden && seen.broken.is_none(),
+            "404 не отмечается"
+        );
     }
 
     #[tokio::test]

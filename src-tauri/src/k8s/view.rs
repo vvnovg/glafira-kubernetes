@@ -2,6 +2,7 @@
 //! фронтенд секундами Unix.
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, Time};
+use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use serde::Serialize;
 
 use crate::error::{AppError, AppResult};
@@ -126,6 +127,14 @@ pub fn rfc3339(s: &str) -> Option<i64> {
 /// Имя объекта (пустое, если его нет).
 pub fn name(meta: &ObjectMeta) -> String {
     meta.name.clone().unwrap_or_default()
+}
+
+/// Число или строка (`8080`, `http`, `25%`) — текстом.
+pub fn int_or_string(v: &IntOrString) -> String {
+    match v {
+        IntOrString::Int(i) => i.to_string(),
+        IntOrString::String(s) => s.clone(),
+    }
 }
 
 #[cfg(test)]

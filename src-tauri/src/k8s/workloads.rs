@@ -18,9 +18,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
 use crate::k8s::containers::{ContainerSpecView, containers_of, images_of};
-use crate::k8s::read::{ReadClient, by_labels};
+use crate::k8s::errors::malformed;
+use crate::k8s::read::{Listed, ReadClient, by_labels};
 use crate::k8s::selectors::{map_selector_string, selector_matches, selector_string};
-use crate::k8s::view::{ConditionView, Part, conditions, conditions_of, created, name, seconds};
+use crate::k8s::view::{
+    ConditionView, Part, conditions, conditions_of, created, int_or_string, name, seconds,
+};
 use crate::platform::ApiGroups;
 
 /// Аннотация, которую интерфейс не показывает: в ней полная копия объекта.
@@ -113,6 +116,8 @@ struct Parsed {
     active_jobs: Vec<String>,
     /// DeploymentConfig: номер текущей версии.
     latest_version: Option<i64>,
+    /// StatefulSet: ControllerRevision, на которой работают поды (`status.currentRevision`).
+    current_revision: Option<String>,
 }
 
 fn row(kind: WorkloadKind, meta: &ObjectMeta, template: Option<&PodTemplateSpec>) -> WorkloadRow {
@@ -141,12 +146,27 @@ fn unavailable(desired: Option<i32>, available: Option<i32>) -> Option<WorkloadP
     (desired > 0 && available.unwrap_or(0) < desired).then_some(WorkloadProblem::Unavailable)
 }
 
+/// Проблема Deployment и DeploymentConfig: выкладка не уложилась в `progressDeadlineSeconds`
+/// (`Progressing` = `False`, `ProgressDeadlineExceeded`), иначе — доступно меньше желаемого.
+fn rollout_problem(
+    conds: &[ConditionView],
+    desired: Option<i32>,
+    available: Option<i32>,
+) -> Option<WorkloadProblem> {
+    let stuck = conds.iter().any(|c| {
+        c.kind == "Progressing"
+            && c.status == "False"
+            && c.reason.as_deref() == Some("ProgressDeadlineExceeded")
+    });
+    if stuck {
+        Some(WorkloadProblem::RolloutStuck)
+    } else {
+        unavailable(desired, available)
+    }
+}
+
 fn rolling(max_surge: Option<&IntOrString>, max_unavailable: Option<&IntOrString>) -> String {
-    let v = |x: Option<&IntOrString>| match x {
-        Some(IntOrString::Int(i)) => i.to_string(),
-        Some(IntOrString::String(s)) => s.clone(),
-        None => "25%".into(),
-    };
+    let v = |x: Option<&IntOrString>| x.map_or_else(|| "25%".into(), int_or_string);
     format!(
         "RollingUpdate (maxSurge {}, maxUnavailable {})",
         v(max_surge),
@@ -164,16 +184,7 @@ fn parse_deployment(d: &Deployment) -> Parsed {
     r.available = Some(status.and_then(|s| s.available_replicas).unwrap_or(0));
     r.updated = Some(status.and_then(|s| s.updated_replicas).unwrap_or(0));
     let conds = conditions_of(&status.and_then(|s| s.conditions.clone()));
-    let stuck = conds.iter().any(|c| {
-        c.kind == "Progressing"
-            && c.status == "False"
-            && c.reason.as_deref() == Some("ProgressDeadlineExceeded")
-    });
-    r.problem = if stuck {
-        Some(WorkloadProblem::RolloutStuck)
-    } else {
-        unavailable(r.desired, r.available)
-    };
+    r.problem = rollout_problem(&conds, r.desired, r.available);
     let strategy = spec.and_then(|s| s.strategy.as_ref()).map(|st| {
         match st.type_.as_deref().unwrap_or("RollingUpdate") {
             "RollingUpdate" => {
@@ -196,6 +207,7 @@ fn parse_deployment(d: &Deployment) -> Parsed {
         strategy,
         active_jobs: vec![],
         latest_version: None,
+        current_revision: None,
     }
 }
 
@@ -208,7 +220,7 @@ fn parse_stateful_set(s: &StatefulSet) -> Parsed {
     r.ready = Some(status.and_then(|s| s.ready_replicas).unwrap_or(0));
     r.available = Some(status.and_then(|s| s.available_replicas).unwrap_or(0));
     r.updated = Some(status.and_then(|s| s.updated_replicas).unwrap_or(0));
-    r.problem = unavailable(r.desired, r.ready);
+    r.problem = unavailable(r.desired, r.available);
     let selector = spec.map(|s| selector_string(&s.selector));
     Parsed {
         row: r,
@@ -221,6 +233,7 @@ fn parse_stateful_set(s: &StatefulSet) -> Parsed {
             .and_then(|u| u.type_.clone()),
         active_jobs: vec![],
         latest_version: None,
+        current_revision: status.and_then(|s| s.current_revision.clone()),
     }
 }
 
@@ -246,6 +259,7 @@ fn parse_daemon_set(d: &DaemonSet) -> Parsed {
             .and_then(|u| u.type_.clone()),
         active_jobs: vec![],
         latest_version: None,
+        current_revision: None,
     }
 }
 
@@ -270,6 +284,7 @@ fn parse_job(j: &Job) -> Parsed {
         strategy: None,
         active_jobs: vec![],
         latest_version: None,
+        current_revision: None,
     }
 }
 
@@ -297,15 +312,15 @@ fn parse_cron_job(c: &CronJob) -> Parsed {
         strategy: spec.and_then(|s| s.concurrency_policy.clone()),
         active_jobs: active,
         latest_version: None,
+        current_revision: None,
     }
 }
 
-/// Поля DeploymentConfig, которые нужны Glafira (своего типа в `k8s-openapi` нет).
+/// Поля DeploymentConfig, которые нужны Glafira (своего типа в `k8s-openapi` нет), — из
+/// `DynamicObject::data`; метаданные уже разобраны в `DynamicObject::metadata`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct DeploymentConfigObject {
-    #[serde(default)]
-    metadata: ObjectMeta,
+struct DeploymentConfigData {
     #[serde(default)]
     spec: DcSpec,
     #[serde(default)]
@@ -338,13 +353,14 @@ struct DcStatus {
     conditions: serde_json::Value,
 }
 
-fn parse_deployment_config(o: &DynamicObject) -> Parsed {
-    let dc: DeploymentConfigObject = serde_json::to_value(o)
-        .and_then(serde_json::from_value)
-        .unwrap_or_default();
+/// DeploymentConfig из `DynamicObject`. Поля не того вида (`"spec": null`, не тот тип
+/// в шаблоне) — ошибка, а не строка из пустого объекта с ложной проблемой.
+fn parse_deployment_config(o: &DynamicObject) -> AppResult<Parsed> {
+    let dc = DeploymentConfigData::deserialize(&o.data)
+        .map_err(|e| malformed("DeploymentConfig", &name(&o.metadata), e))?;
     let mut r = row(
         WorkloadKind::DeploymentConfig,
-        &dc.metadata,
+        &o.metadata,
         dc.spec.template.as_ref(),
     );
     r.desired = Some(dc.spec.replicas.unwrap_or(1));
@@ -352,26 +368,18 @@ fn parse_deployment_config(o: &DynamicObject) -> Parsed {
     r.available = Some(dc.status.available_replicas.unwrap_or(0));
     r.updated = Some(dc.status.updated_replicas.unwrap_or(0));
     let conds = conditions(&dc.status.conditions);
-    let stuck = conds.iter().any(|c| {
-        c.kind == "Progressing"
-            && c.status == "False"
-            && c.reason.as_deref() == Some("ProgressDeadlineExceeded")
-    });
-    r.problem = if stuck {
-        Some(WorkloadProblem::RolloutStuck)
-    } else {
-        unavailable(r.desired, r.available)
-    };
-    Parsed {
+    r.problem = rollout_problem(&conds, r.desired, r.available);
+    Ok(Parsed {
         row: r,
+        meta: o.metadata.clone(),
         conditions: conds,
         selector: dc.spec.selector.as_ref().map(map_selector_string),
         template: dc.spec.template,
         strategy: dc.spec.strategy.and_then(|s| s.kind),
         active_jobs: vec![],
         latest_version: dc.status.latest_version,
-        meta: dc.metadata,
-    }
+        current_revision: None,
+    })
 }
 
 pub fn deployment_row(d: &Deployment) -> WorkloadRow {
@@ -389,8 +397,14 @@ pub fn job_row(j: &Job) -> WorkloadRow {
 pub fn cron_job_row(c: &CronJob) -> WorkloadRow {
     parse_cron_job(c).row
 }
+/// Строка DeploymentConfig. Объект, который не разбирается, — строка с именем и возрастом,
+/// без чисел и без проблемы: так его показывает watch; список (`list_kind`) его пропускает
+/// и называет в ошибке вида.
 pub fn deployment_config_row(o: &DynamicObject) -> WorkloadRow {
-    parse_deployment_config(o).row
+    parse_deployment_config(o).map_or_else(
+        |_| row(WorkloadKind::DeploymentConfig, &o.metadata, None),
+        |p| p.row,
+    )
 }
 
 /// Вид, который не прочитался (например, нет прав на `cronjobs`).
@@ -409,19 +423,20 @@ pub struct WorkloadList {
     pub truncated: bool,
 }
 
-/// Строки одного вида.
+/// Строки одного вида и ошибка объекта, который не разобрался (только DeploymentConfig: его
+/// поля читаются без типа из `k8s-openapi`). Такой объект пропускается, остальные — в списке;
+/// если их несколько, ошибка — первого.
 pub async fn list_kind(
     r: &ReadClient,
     namespace: &str,
     kind: WorkloadKind,
-) -> AppResult<(Vec<WorkloadRow>, bool)> {
+) -> AppResult<(Listed<WorkloadRow>, Option<AppError>)> {
     let lp = ListParams::default();
     let ns = Some(namespace);
     macro_rules! typed {
-        ($t:ty, $f:ident) => {{
-            let l = r.list::<$t>(ns, &lp).await?;
-            (l.items.iter().map($f).collect(), l.truncated)
-        }};
+        ($t:ty, $f:ident) => {
+            (r.list::<$t>(ns, &lp).await?.map(|o| $f(&o)), None)
+        };
     }
     Ok(match kind {
         WorkloadKind::Deployment => typed!(Deployment, deployment_row),
@@ -431,15 +446,26 @@ pub async fn list_kind(
         WorkloadKind::CronJob => typed!(CronJob, cron_job_row),
         WorkloadKind::DeploymentConfig => {
             let l = r.list_dynamic(&deployment_configs(), ns, &lp).await?;
-            (
-                l.items.iter().map(deployment_config_row).collect(),
-                l.truncated,
-            )
+            let (mut items, mut skipped) = (Vec::new(), None);
+            for o in &l.items {
+                match parse_deployment_config(o) {
+                    Ok(p) => items.push(p.row),
+                    Err(e) => {
+                        skipped.get_or_insert(e);
+                    }
+                }
+            }
+            let rows = Listed {
+                items,
+                truncated: l.truncated,
+            };
+            (rows, skipped)
         }
     })
 }
 
 /// Все workloads проекта; виды читаются параллельно, ошибка одного вида не скрывает остальные.
+/// Вид с объектом, который не разобрался, приходит и строками, и ошибкой (`list_kind`).
 pub async fn list_workloads(r: &ReadClient, namespace: &str, groups: &ApiGroups) -> WorkloadList {
     let kinds: Vec<WorkloadKind> = WorkloadKind::ALL
         .into_iter()
@@ -454,9 +480,12 @@ pub async fn list_workloads(r: &ReadClient, namespace: &str, groups: &ApiGroups)
     };
     for (kind, result) in kinds.into_iter().zip(results) {
         match result {
-            Ok((rows, truncated)) => {
-                list.items.extend(rows);
-                list.truncated |= truncated;
+            Ok((rows, skipped)) => {
+                list.items.extend(rows.items);
+                list.truncated |= rows.truncated;
+                if let Some(error) = skipped {
+                    list.errors.push(KindError { kind, error });
+                }
             }
             Err(error) => list.errors.push(KindError { kind, error }),
         }
@@ -540,13 +569,6 @@ pub struct PdbView {
     pub expected_pods: i32,
 }
 
-fn int_or_string(v: &IntOrString) -> String {
-    match v {
-        IntOrString::Int(i) => i.to_string(),
-        IntOrString::String(s) => s.clone(),
-    }
-}
-
 fn pdb_view(p: &PodDisruptionBudget) -> PdbView {
     let spec = p.spec.as_ref();
     let status = p.status.as_ref();
@@ -573,7 +595,13 @@ pub struct Revision {
     pub name: String,
     pub images: Vec<String>,
     pub created: Option<i64>,
+    /// Подов у ревизии (ReplicaSet, ReplicationController); у ControllerRevision — `None`.
     pub replicas: Option<i32>,
+    /// Ревизия, на которой работают поды, — там, где это известно. StatefulSet —
+    /// `status.currentRevision` (при `OnDelete`, `partition` и во время выкладки это не самая
+    /// новая ревизия), без него — самая новая. Deployment и DeploymentConfig — ревизия самого
+    /// объекта, то есть последняя выкладка; на какой ревизии сколько подов, видно по `replicas`.
+    /// DaemonSet — самая новая: на какой ревизии его поды, статус DaemonSet не говорит.
     pub current: bool,
 }
 
@@ -675,8 +703,14 @@ async fn history(r: &ReadClient, namespace: &str, p: &Parsed) -> Option<Part<Vec
                         })
                         .collect(),
                 );
-                if let Some(first) = v.first_mut() {
-                    first.current = true;
+                match &p.current_revision {
+                    Some(current) => v.iter_mut().for_each(|r| r.current = r.name == *current),
+                    // DaemonSet (такого поля в статусе нет) и StatefulSet без него: самая новая.
+                    None => {
+                        if let Some(first) = v.first_mut() {
+                            first.current = true;
+                        }
+                    }
                 }
                 v
             })
@@ -735,7 +769,7 @@ async fn parsed(
         WorkloadKind::DeploymentConfig => parse_deployment_config(
             &r.get_dynamic(&deployment_configs(), Some(namespace), workload)
                 .await?,
-        ),
+        )?,
     })
 }
 
@@ -915,7 +949,7 @@ mod tests {
             "spec": {"replicas": 2, "selector": {"app": "legacy"}, "strategy": {"type": "Rolling"},
                 "template": template("legacy", "legacy:7")},
             "status": {"readyReplicas": 2, "availableReplicas": 2, "updatedReplicas": 2, "latestVersion": 7}}));
-        let p = parse_deployment_config(&dc);
+        let p = parse_deployment_config(&dc).unwrap();
         assert_eq!(p.row.kind, WorkloadKind::DeploymentConfig);
         assert_eq!((p.row.desired, p.row.available), (Some(2), Some(2)));
         assert_eq!(p.selector.as_deref(), Some("app=legacy"));
@@ -1116,6 +1150,215 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(e.code, crate::error::ErrorCode::NotFound);
+    }
+
+    /// Строка StatefulSet: проблема — доступно меньше желаемого, как у остальных видов (готовый
+    /// под до `minReadySeconds` ещё не доступен).
+    #[test]
+    fn stateful_set_row_counts_available_replicas() {
+        let sts = |ready: i32, available: i32| -> StatefulSet {
+            from(serde_json::json!({"metadata": {"name": "db",
+                    "creationTimestamp": "2026-10-25T10:00:00Z"},
+                "spec": {"replicas": 3, "serviceName": "db",
+                    "selector": {"matchLabels": {"app": "db"}}, "template": template("db", "postgres:16")},
+                "status": {"replicas": 3, "readyReplicas": ready, "availableReplicas": available,
+                    "updatedReplicas": 2}}))
+        };
+        let row = stateful_set_row(&sts(3, 2));
+        assert_eq!(
+            (row.desired, row.ready, row.available, row.updated),
+            (Some(3), Some(3), Some(2), Some(2))
+        );
+        assert_eq!(row.images, ["postgres:16"]);
+        assert_eq!(row.created, Some(1_792_922_400));
+        assert_eq!(row.key(), "StatefulSet/db");
+        assert_eq!(row.problem, Some(WorkloadProblem::Unavailable));
+        assert_eq!(stateful_set_row(&sts(3, 3)).problem, None);
+        assert_eq!(
+            stateful_set_row(&sts(2, 2)).problem,
+            Some(WorkloadProblem::Unavailable)
+        );
+    }
+
+    fn controller_revision(
+        name: &str,
+        revision: i64,
+        owner: &str,
+        image: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({"apiVersion": "apps/v1", "kind": "ControllerRevision",
+            "metadata": {"name": name, "creationTimestamp": "2026-10-25T10:00:00Z",
+                "ownerReferences": [{"apiVersion": "apps/v1", "kind": "StatefulSet", "name": "db",
+                    "uid": owner, "controller": true}]},
+            "revision": revision,
+            "data": {"spec": {"template": {"spec": {"containers": [
+                {"name": "db", "image": image}, {"name": "exporter", "image": "exporter:1"}]}}}}})
+    }
+
+    /// История workload'а `db` вида `kind` со статусом `status` из ControllerRevisions: своих
+    /// `db-1` и `db-2` и чужой `other-9` вперемешку.
+    async fn controller_history(kind: WorkloadKind, status: serde_json::Value) -> Vec<Revision> {
+        let (path, api_kind) = match kind {
+            WorkloadKind::StatefulSet => ("statefulsets", "StatefulSet"),
+            _ => ("daemonsets", "DaemonSet"),
+        };
+        let object = serde_json::json!({"apiVersion": "apps/v1", "kind": api_kind,
+            "metadata": {"name": "db", "namespace": "team-a", "uid": "uid-db"},
+            "spec": {"serviceName": "db", "selector": {"matchLabels": {"app": "db"}},
+                "template": template("db", "postgres:17")},
+            "status": status});
+        let own = format!("/apis/apps/v1/namespaces/team-a/{path}/db");
+        let (client, server) = mock_client(move |s| match s.path() {
+            p if p == own => (200, object.clone()),
+            "/apis/apps/v1/namespaces/team-a/controllerrevisions" => (
+                200,
+                list(
+                    "ControllerRevision",
+                    vec![
+                        controller_revision("db-1", 1, "uid-db", "postgres:16"),
+                        controller_revision("other-9", 9, "uid-other", "other:1"),
+                        controller_revision("db-2", 2, "uid-db", "postgres:17"),
+                    ],
+                ),
+            ),
+            _ => (200, list("X", vec![])),
+        });
+        let d = get_workload(&reader(client), "team-a", kind, "db")
+            .await
+            .unwrap();
+        let seen = server.await.unwrap();
+        assert!(
+            seen.iter()
+                .any(|s| s.path().ends_with("/controllerrevisions")
+                    && s.uri.contains("labelSelector=app%3Ddb"))
+        );
+        d.history
+            .expect("история есть")
+            .data
+            .expect("история прочитана")
+    }
+
+    /// Ревизии StatefulSet и DaemonSet: только свои, новые первыми, образы из шаблона ревизии.
+    /// Текущая у StatefulSet — `status.currentRevision` (при `OnDelete` поды остались на старой),
+    /// без него и у DaemonSet — самая новая.
+    #[tokio::test]
+    async fn controller_revisions_are_the_history_of_stateful_and_daemon_sets() {
+        let marks = |h: &[Revision]| -> Vec<(i64, String, bool)> {
+            h.iter()
+                .map(|r| (r.revision, r.name.clone(), r.current))
+                .collect()
+        };
+        let newest = [
+            (2, "db-2".to_string(), true),
+            (1, "db-1".to_string(), false),
+        ];
+
+        let h = controller_history(
+            WorkloadKind::StatefulSet,
+            serde_json::json!({"replicas": 3, "currentRevision": "db-1", "updateRevision": "db-2"}),
+        )
+        .await;
+        assert_eq!(
+            marks(&h),
+            [
+                (2, "db-2".to_string(), false),
+                (1, "db-1".to_string(), true)
+            ],
+            "чужой ревизии нет, поды — на db-1"
+        );
+        assert_eq!(h[0].images, ["postgres:17", "exporter:1"]);
+        assert_eq!(h[1].images, ["postgres:16", "exporter:1"]);
+        assert!(
+            h.iter()
+                .all(|r| r.replicas.is_none() && r.created == Some(1_792_922_400))
+        );
+
+        let h = controller_history(
+            WorkloadKind::StatefulSet,
+            serde_json::json!({"replicas": 3}),
+        )
+        .await;
+        assert_eq!(marks(&h), newest, "без currentRevision — самая новая");
+
+        let h = controller_history(
+            WorkloadKind::DaemonSet,
+            serde_json::json!({"currentNumberScheduled": 1, "desiredNumberScheduled": 1,
+                "numberMisscheduled": 0, "numberReady": 1}),
+        )
+        .await;
+        assert_eq!(marks(&h), newest);
+    }
+
+    /// DeploymentConfig, поля которого не того вида, — не строка из пустого объекта: список
+    /// его пропускает и называет в ошибке вида (остальные строки на месте), подробности —
+    /// ошибка, строка для watch — только имя и возраст, без чисел и проблемы.
+    #[tokio::test]
+    async fn malformed_deployment_config_is_an_error_not_an_empty_row() {
+        let dc = |name: &str, spec: serde_json::Value| {
+            serde_json::json!({"apiVersion": "apps.openshift.io/v1", "kind": "DeploymentConfig",
+                "metadata": {"name": name, "creationTimestamp": "2026-10-25T10:00:00Z"},
+                "spec": spec, "status": {"availableReplicas": 1}})
+        };
+        let good = dc(
+            "legacy",
+            serde_json::json!({"replicas": 1, "selector": {"app": "legacy"},
+                "template": template("legacy", "legacy:7")}),
+        );
+        let null_spec = dc("broken", serde_json::Value::Null);
+        let bad_template = dc(
+            "odd",
+            serde_json::json!({"template": {"spec": {"containers": "web"}}}),
+        );
+        let items = vec![good, null_spec.clone(), bad_template.clone()];
+        let single = null_spec.clone();
+        let (client, _server) = mock_client(move |s| match s.path() {
+            "/apis/apps.openshift.io/v1/namespaces/team-a/deploymentconfigs" => {
+                (200, list("DeploymentConfig", items.clone()))
+            }
+            "/apis/apps.openshift.io/v1/namespaces/team-a/deploymentconfigs/broken" => {
+                (200, single.clone())
+            }
+            _ => (200, list("X", vec![])),
+        });
+        let r = reader(client);
+        let groups = ApiGroups {
+            deployment_configs: true,
+            ..Default::default()
+        };
+        let l = list_workloads(&r, "team-a", &groups).await;
+        let names: Vec<_> = l.items.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(names, ["legacy"], "пустых строк нет");
+        assert_eq!(l.errors.len(), 1, "одна ошибка на вид");
+        let e = &l.errors[0];
+        assert_eq!(e.kind, WorkloadKind::DeploymentConfig);
+        assert_eq!(e.error.key, "errors.k8s.malformedObject");
+        assert_eq!(
+            (
+                e.error.params["kind"].as_str(),
+                e.error.params["name"].as_str()
+            ),
+            ("DeploymentConfig", "broken"),
+            "ошибка первого из пропущенных"
+        );
+        assert!(e.error.details.as_deref().unwrap().contains("null"));
+
+        let e = get_workload(&r, "team-a", WorkloadKind::DeploymentConfig, "broken")
+            .await
+            .unwrap_err();
+        assert_eq!(e.key, "errors.k8s.malformedObject");
+
+        for (o, name) in [(null_spec, "broken"), (bad_template, "odd")] {
+            let o: DynamicObject = from(o);
+            assert!(parse_deployment_config(&o).is_err(), "{name}");
+            let row = deployment_config_row(&o);
+            assert_eq!(row.name, name);
+            assert_eq!(row.created, Some(1_792_922_400));
+            assert_eq!(
+                (row.desired, row.available, row.problem),
+                (None, None, None),
+                "{name}: без чисел и ложной проблемы"
+            );
+        }
     }
 
     #[test]

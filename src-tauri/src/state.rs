@@ -5,7 +5,9 @@ use std::time::SystemTime;
 
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::k8s::connectivity::ensure_allowed;
+use crate::k8s::errors::breaks_client;
 use crate::k8s::pool::{ClientPool, Connected, open};
+use crate::k8s::read::{Observed, observe};
 use crate::secrets::SecretStore;
 use crate::storage::connections::ConnectionStore;
 use crate::storage::profile::AuthConfig;
@@ -77,7 +79,9 @@ impl AppState {
             // Не exec-плагин: `open` сигнал отмены не ждёт.
             None => (None, tokio::sync::oneshot::channel().1),
         };
-        let result = open(profile, self.secrets.clone(), cancel).await;
+        // Чтения при подключении (срок токена: у обычного пользователя 403 — ожидаемый ответ) —
+        // не ошибки чтения, внутри которого подключаются.
+        let (result, _) = observe(open(profile, self.secrets.clone(), cancel)).await;
         if let Some(n) = n {
             self.logins.finish(id, n);
         }
@@ -89,39 +93,60 @@ impl AppState {
     }
 
     /// Чтение кластера для команды: клиент из пула (или новое подключение) и `f` с ним. Ошибка
-    /// учётных данных или TLS от `f` сбрасывает этот клиент (`evict_if_broken_client`), если
-    /// он всё ещё в пуле: следующее чтение подключится заново. Ошибка самого подключения клиент
-    /// не сбрасывает: неудачная попытка в пул не попадает, а сброс сменил бы поколение, и
-    /// ожидавшие очереди не получили бы её итог — каждое чтение снова запустило бы exec-плагин
-    /// или вход.
+    /// учётных данных или TLS сбрасывает этот клиент (`evict_if_broken_client`), если он всё
+    /// ещё в пуле: следующее чтение подключится заново. Считается и ошибка, которую `f` вернул,
+    /// и ошибка любого запроса `ReadClient` внутри `f` (`k8s::read::observe`), даже если `f`
+    /// уложил её в часть экрана (`Part`) или в ошибку вида списка и вернул `Ok`. Ошибка самого
+    /// подключения клиент не сбрасывает: неудачная попытка в пул не попадает, а сброс сменил бы
+    /// поколение, и ожидавшие очереди не получили бы её итог — каждое чтение снова запустило бы
+    /// exec-плагин или вход.
     pub async fn read<T, F, Fut>(&self, id: &str, f: F) -> AppResult<T>
     where
         F: FnOnce(Arc<Connected>) -> Fut,
         Fut: Future<Output = AppResult<T>>,
     {
-        let c = self.connected(id, false).await?;
-        let result = f(c.clone()).await;
-        if let Err(e) = &result {
-            self.evict_if_broken_client(id, &c, e);
-        }
-        result
+        self.read_observed(id, f).await.0
     }
 
     /// Чтение в проекте: как `read`, а ответ 403 ещё и сбрасывает кэш прав этого проекта —
-    /// права могли измениться (спец. §5.4).
+    /// права могли измениться (спец. §5.4). Как и в `read`, считается и 403 части экрана или
+    /// вида списка, при котором `f` вернул `Ok`.
     pub async fn read_in<T, F, Fut>(&self, id: &str, namespace: &str, f: F) -> AppResult<T>
     where
         F: FnOnce(Arc<Connected>) -> Fut,
         Fut: Future<Output = AppResult<T>>,
     {
-        let result = self.read(id, f).await;
-        if result
-            .as_ref()
-            .is_err_and(|e| e.code == ErrorCode::Forbidden)
+        let (result, seen) = self.read_observed(id, f).await;
+        if seen.forbidden
+            || result
+                .as_ref()
+                .is_err_and(|e| e.code == ErrorCode::Forbidden)
         {
             self.access.forget(id, namespace);
         }
         result
+    }
+
+    /// `read` и ошибки запросов `ReadClient`, которые были внутри `f`.
+    async fn read_observed<T, F, Fut>(&self, id: &str, f: F) -> (AppResult<T>, Observed)
+    where
+        F: FnOnce(Arc<Connected>) -> Fut,
+        Fut: Future<Output = AppResult<T>>,
+    {
+        let c = match self.connected(id, false).await {
+            Ok(c) => c,
+            Err(e) => return (Err(e), Observed::default()),
+        };
+        let (result, seen) = observe(f(c.clone())).await;
+        // Ошибка команды, а если она не о клиенте — ошибка части экрана или вида списка.
+        let broken = match &result {
+            Err(e) if breaks_client(e.code) => Some(e),
+            _ => seen.broken.as_ref(),
+        };
+        if let Some(e) = broken {
+            self.evict_if_broken_client(id, &c, e);
+        }
+        (result, seen)
     }
 
     /// Сбрасывает клиент `used` после ошибки запроса им, если с этими учётными данными или TLS
@@ -131,11 +156,7 @@ impl AppState {
     /// с клиентом забывается кэш прав подключения — с новым токеном права могут быть другими.
     /// `true` — клиент сброшен.
     pub fn evict_if_broken_client(&self, id: &str, used: &Arc<Connected>, e: &AppError) -> bool {
-        let broken = matches!(
-            e.code,
-            ErrorCode::SessionExpired | ErrorCode::AuthFailed | ErrorCode::TlsError
-        );
-        let evicted = broken && self.pool.evict_if_same(id, used);
+        let evicted = breaks_client(e.code) && self.pool.evict_if_same(id, used);
         if evicted {
             self.access.forget_connection(id);
         }
@@ -499,6 +520,144 @@ mod tests {
         );
         assert!(st.access.get("a", "team-b").is_some());
         assert!(st.pool.get("a").is_some(), "403 клиент не сбрасывает");
+    }
+
+    /// Подключение `a` в пуле: мок API-сервера с ответами `handler`.
+    fn pool_mock(
+        st: &AppState,
+        handler: impl Fn(&crate::k8s::testing::Seen) -> (u16, serde_json::Value) + Send + 'static,
+    ) {
+        let connected = crate::k8s::pool::test_connected(handler);
+        assert!(
+            st.pool
+                .insert_if_current("a", st.pool.generation("a"), connected)
+        );
+    }
+
+    fn empty_list() -> (u16, serde_json::Value) {
+        (200, crate::k8s::workloads::fixtures::list("X", vec![]))
+    }
+
+    /// 403 одного вида списка: `list_workloads` вернул `Ok`, ошибка — в `errors`, а права
+    /// проекта всё равно перечитаются; права другого проекта и клиент не тронуты.
+    #[tokio::test]
+    async fn forbidden_kind_of_a_list_forgets_the_rights_of_its_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = state(dir.path());
+        pool_mock(&st, |s| match s.path() {
+            "/apis/batch/v1/namespaces/team-a/cronjobs" => crate::k8s::testing::status(
+                403,
+                "Forbidden",
+                r#"cronjobs.batch is forbidden: User "u" cannot list resource "cronjobs" in API group "batch" in the namespace "team-a""#,
+            ),
+            _ => empty_list(),
+        });
+        cache_rights(&st, "a", "team-a");
+        cache_rights(&st, "a", "team-b");
+        let l = st
+            .read_in("a", "team-a", |c| async move {
+                Ok(
+                    crate::k8s::workloads::list_workloads(
+                        &c.reader(),
+                        "team-a",
+                        &c.info.api_groups,
+                    )
+                    .await,
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(l.errors.len(), 1);
+        assert_eq!(l.errors[0].error.code, ErrorCode::Forbidden);
+        assert!(
+            st.access.get("a", "team-a").is_none(),
+            "права проекта перечитаются"
+        );
+        assert!(st.access.get("a", "team-b").is_some());
+        assert!(st.pool.get("a").is_some(), "403 клиент не сбрасывает");
+    }
+
+    /// 401 части экрана (HPA): подробности пришли (`Ok`), а клиент, которым читали, сброшен
+    /// вместе с кэшем прав подключения.
+    #[tokio::test]
+    async fn expired_session_in_a_part_evicts_the_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = state(dir.path());
+        pool_mock(&st, |s| match s.path() {
+            "/apis/apps/v1/namespaces/team-a/deployments/web" => (
+                200,
+                crate::k8s::workloads::fixtures::deployment("web", 1, 1),
+            ),
+            "/apis/autoscaling/v2/namespaces/team-a/horizontalpodautoscalers" => {
+                crate::k8s::testing::status(401, "Unauthorized", "Unauthorized")
+            }
+            _ => empty_list(),
+        });
+        cache_rights(&st, "a", "team-a");
+        cache_rights(&st, "a", "team-b");
+        let d = st
+            .read_in("a", "team-a", |c| async move {
+                crate::k8s::workloads::get_workload(
+                    &c.reader(),
+                    "team-a",
+                    crate::k8s::workloads::WorkloadKind::Deployment,
+                    "web",
+                )
+                .await
+            })
+            .await
+            .unwrap();
+        assert_eq!(d.hpa.error.unwrap().code, ErrorCode::SessionExpired);
+        assert!(d.pdb.error.is_none());
+        assert!(
+            st.pool.get("a").is_none(),
+            "следующее чтение подключится заново"
+        );
+        assert!(
+            st.access.get("a", "team-b").is_none(),
+            "кэш прав подключения забыт"
+        );
+    }
+
+    /// Чтение без проекта (`read`, обзор кластера): 403 части экрана не трогает ни права
+    /// проектов, ни клиент, а 401 части сбрасывает клиент.
+    #[tokio::test]
+    async fn parts_of_a_cluster_read_count_only_for_the_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = state(dir.path());
+        let overview = |st: AppState| async move {
+            st.read("a", |c| async move {
+                Ok(crate::k8s::overview::cluster_overview(&c.reader(), &c.info).await)
+            })
+            .await
+            .unwrap()
+        };
+        pool_mock(&st, |s| match s.path() {
+            "/apis/networking.k8s.io/v1/ingressclasses" => crate::k8s::testing::status(
+                403,
+                "Forbidden",
+                r#"ingressclasses.networking.k8s.io is forbidden: User "u" cannot list resource "ingressclasses" in API group "networking.k8s.io" at the cluster scope"#,
+            ),
+            _ => empty_list(),
+        });
+        cache_rights(&st, "a", "team-a");
+        let o = overview(st.clone()).await;
+        assert_eq!(o.ingress_classes.error.unwrap().code, ErrorCode::Forbidden);
+        assert!(st.access.get("a", "team-a").is_some());
+        assert!(st.pool.get("a").is_some());
+
+        pool_mock(&st, |s| match s.path() {
+            "/apis/networking.k8s.io/v1/ingressclasses" => {
+                crate::k8s::testing::status(401, "Unauthorized", "Unauthorized")
+            }
+            _ => empty_list(),
+        });
+        let o = overview(st.clone()).await;
+        assert_eq!(
+            o.ingress_classes.error.unwrap().code,
+            ErrorCode::SessionExpired
+        );
+        assert!(st.pool.get("a").is_none());
     }
 
     #[test]

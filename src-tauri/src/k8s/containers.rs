@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 use k8s_openapi::api::core::v1::{Container, PodSpec, Probe};
 use serde::Serialize;
 
+use crate::k8s::view::int_or_string;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContainerSpecView {
@@ -50,23 +52,19 @@ pub enum EnvSource {
 /// Проба как в `kubectl describe`: `http-get :8080/healthz delay=5s timeout=1s period=10s
 /// #success=1 #failure=3`.
 pub fn probe_text(p: &Probe) -> String {
-    let port = |p: &k8s_openapi::apimachinery::pkg::util::intstr::IntOrString| match p {
-        k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(i) => i.to_string(),
-        k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::String(s) => s.clone(),
-    };
     let action = if let Some(h) = &p.http_get {
         let scheme = h.scheme.as_deref().unwrap_or("HTTP").to_lowercase();
         format!(
             "http-get {scheme}://{}:{}{}",
             h.host.as_deref().unwrap_or(""),
-            port(&h.port),
+            int_or_string(&h.port),
             h.path.as_deref().unwrap_or("/")
         )
     } else if let Some(t) = &p.tcp_socket {
         format!(
             "tcp-socket {}:{}",
             t.host.as_deref().unwrap_or(""),
-            port(&t.port)
+            int_or_string(&t.port)
         )
     } else if let Some(g) = &p.grpc {
         format!("grpc :{}", g.port)
