@@ -43,6 +43,19 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::connections::list_connections,
+            commands::connections::save_connection,
+            commands::connections::delete_connection,
+            commands::connections::test_connection,
+            commands::connections::connect,
+            commands::connections::disconnect,
+            commands::connections::set_connection_token,
+            commands::auth::start_oauth_login,
+            commands::auth::cancel_oauth_login,
+            commands::auth::oauth_token_page,
+            commands::auth::resolve_exec_command,
+            commands::kubeconfig::preview_kubeconfig_import,
+            commands::kubeconfig::apply_kubeconfig_import,
             commands::folders::list_folders,
             commands::folders::create_folder,
             commands::folders::rename_folder,

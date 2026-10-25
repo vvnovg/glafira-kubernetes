@@ -1,4 +1,7 @@
+pub mod auth;
+pub mod connections;
 pub mod folders;
+pub mod kubeconfig;
 pub mod settings;
 
 use crate::error::{AppResult, ErrorCode};
