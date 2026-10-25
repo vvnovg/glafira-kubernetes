@@ -274,5 +274,49 @@
       "tokenPage": "Get a token on the cluster page",
       "editConnection": "Edit connection"
     }
+  },
+  "sidebar": {
+    "settings": "Settings",
+    "help": "Help",
+    "about": "About",
+    "newConnection": "New connection",
+    "importKubeconfig": "Import from kubeconfig…",
+    "newFolder": "New folder",
+    "exportAll": "Export all…",
+    "import": "Import…"
+  },
+  "settings": {
+    "title": "Settings",
+    "language": {
+      "section": "Language",
+      "label": "Interface language",
+      "system": "System default ({{name}})",
+      "systemUnknown": "System default",
+      "policy": "The language is set by your organization"
+    }
+  },
+  "help": {
+    "search": "Search the guide",
+    "noResults": "Nothing found",
+    "contents": "Contents",
+    "loadFailed": "Could not load the guide"
+  },
+  "about": {
+    "summary": "Glafira is a desktop app for working with Kubernetes clusters and diagnosing them, with OpenShift and Platform V DropApp in focus: connections with a token, a certificate, browser sign-in or an exec plugin, import from kubeconfig, folders and step-by-step connection checks.",
+    "version": "Version",
+    "build": "Build",
+    "system": "System",
+    "license": "License",
+    "policy": "Organization policy",
+    "policySet": "set",
+    "policyNone": "none",
+    "policyError": "Organization policy: {{error}}",
+    "dataDir": "Data:",
+    "logDir": "Logs:",
+    "trademarks": "Kubernetes is a registered trademark of The Linux Foundation. OpenShift is a trademark of Red Hat, Inc. Platform V and DropApp are trademarks of their respective owners. This project is not affiliated with The Linux Foundation, Red Hat or SberTech."
+  },
+  "support": {
+    "title": "Support the project",
+    "hint": "Glafira is free and open source; donations keep it going."
   }
 }

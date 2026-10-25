@@ -12,7 +12,8 @@
     "tauri": "tauri",
     "test": "vitest run",
     "test:scripts": "node --test \"scripts/*.test.mjs\"",
-    "i18n:check": "node scripts/i18n-check.mjs --rust-cyrillic src-tauri/src"
+    "i18n:check": "node scripts/i18n-check.mjs --rust-cyrillic src-tauri/src",
+    "guide:publish": "node scripts/guide-publish.mjs dist/guide"
   },
   "dependencies": {
     "@floating-ui/react": "^0.27.20",

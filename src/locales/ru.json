@@ -276,5 +276,49 @@
       "tokenPage": "Получить токен на странице кластера",
       "editConnection": "Изменить подключение"
     }
+  },
+  "sidebar": {
+    "settings": "Настройки",
+    "help": "Справка",
+    "about": "О программе",
+    "newConnection": "Новое подключение",
+    "importKubeconfig": "Импорт из kubeconfig…",
+    "newFolder": "Новая папка",
+    "exportAll": "Экспортировать всё…",
+    "import": "Импортировать…"
+  },
+  "settings": {
+    "title": "Настройки",
+    "language": {
+      "section": "Язык",
+      "label": "Язык интерфейса",
+      "system": "Как в системе ({{name}})",
+      "systemUnknown": "Как в системе",
+      "policy": "Язык задан вашей организацией"
+    }
+  },
+  "help": {
+    "search": "Поиск по руководству",
+    "noResults": "Ничего не найдено",
+    "contents": "Содержание",
+    "loadFailed": "Не удалось загрузить руководство"
+  },
+  "about": {
+    "summary": "Glafira — настольное приложение для работы с кластерами Kubernetes и их диагностики, в фокусе — OpenShift и Platform V DropApp: подключения по токену, сертификату, через браузер или exec-плагин, импорт из kubeconfig, папки и пошаговая проверка подключения.",
+    "version": "Версия",
+    "build": "Сборка",
+    "system": "Система",
+    "license": "Лицензия",
+    "policy": "Политика организации",
+    "policySet": "задана",
+    "policyNone": "нет",
+    "policyError": "Политика организации: {{error}}",
+    "dataDir": "Данные:",
+    "logDir": "Логи:",
+    "trademarks": "Kubernetes — зарегистрированный товарный знак The Linux Foundation. OpenShift — товарный знак Red Hat, Inc. Platform V и DropApp — товарные знаки их правообладателей. Проект не связан с The Linux Foundation, Red Hat и СберТех."
+  },
+  "support": {
+    "title": "Поддержать проект",
+    "hint": "Glafira бесплатна, её исходный код открыт; пожертвования помогают её развивать."
   }
 }

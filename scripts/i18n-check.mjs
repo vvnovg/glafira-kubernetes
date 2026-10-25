@@ -560,8 +560,8 @@ export function findRustCyrillic(files) {
   return hits;
 }
 
-/** Главы руководства (этап O1 пишет первые; список растёт вместе с `src/guide/chapters.ts`). */
-export const GUIDE_CHAPTERS = [];
+/** Главы руководства: тот же список, что `GUIDE_CHAPTERS` в `src/guide/chapters.ts`. */
+export const GUIDE_CHAPTERS = ["getting-started", "connections"];
 
 const KEBAB = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 

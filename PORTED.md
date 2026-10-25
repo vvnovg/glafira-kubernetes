@@ -91,3 +91,20 @@
 | `src/state/workspace.ts` | `src/state/workspace.ts` | `8bbd0bd` | адаптирован: вкладки O1 |
 | `src/components/connections/profile.ts` | `src/components/connections/profile.ts` | `8bbd0bd` | адаптирован: профиль Kubernetes |
 | `src/components/connections/ConnectionForm.tsx` | `src/components/connections/ConnectionForm.tsx` | `8bbd0bd` | адаптирован: поля Kubernetes, секреты, проверка по шагам |
+| `src/guide/parse.ts` | `src/guide/parse.ts` | `8bbd0bd` | как есть |
+| `src/guide/chapters.test.ts` | `src/guide/chapters.test.ts` | `8bbd0bd` | как есть |
+| `src/components/help/HelpPanel.tsx` | `src/components/help/HelpPanel.tsx` | `8bbd0bd` | как есть |
+| `src/components/help/HelpPanel.test.tsx` | `src/components/help/HelpPanel.test.tsx` | `8bbd0bd` | как есть |
+| `src/state/helpContext.ts` | `src/state/helpContext.ts` | `8bbd0bd` | как есть |
+| `src/guide/parse.test.ts` | `src/guide/parse.test.ts` | `8bbd0bd` | адаптирован: главы O1 |
+| `src/guide/chapters.ts` | `src/guide/chapters.ts` | `8bbd0bd` | адаптирован: главы O1 |
+| `src/components/help/helpChapterFor.ts` | `src/components/help/helpChapterFor.ts` | `8bbd0bd` | адаптирован: вкладки O1 |
+| `src/components/help/helpChapterFor.test.ts` | `src/components/help/helpChapterFor.test.ts` | `8bbd0bd` | адаптирован: вкладки O1 |
+| `src/components/settings/SettingsPanel.tsx` | `src/components/settings/SettingsPanel.tsx` | `8bbd0bd` | адаптирован: без раздела MCP |
+| `src/components/settings/SettingsPanel.test.tsx` | `src/components/settings/SettingsPanel.test.tsx` | `8bbd0bd` | адаптирован: без MCP |
+| `src/components/about/AboutPanel.tsx` | `src/components/about/AboutPanel.tsx` | `8bbd0bd` | адаптирован: без обновлений и диагностики (O6), товарные знаки |
+| `src/components/about/AboutPanel.test.tsx` | `src/components/about/AboutPanel.test.tsx` | `8bbd0bd` | адаптирован: без обновлений и диагностики |
+| `src-tauri/src/commands/app.rs` | `src-tauri/src/commands/app.rs` | `8bbd0bd` | адаптирован: только get_app_info |
+| `scripts/guide-publish.mjs` | `scripts/guide-publish.mjs` | `8bbd0bd` | адаптирован: заголовок |
+| `scripts/guide-publish.test.mjs` | `scripts/guide-publish.test.mjs` | `8bbd0bd` | адаптирован: языки en и ru |
+| `scripts/guide-publish.d.mts` | `scripts/guide-publish.d.mts` | `8bbd0bd` | как есть |
