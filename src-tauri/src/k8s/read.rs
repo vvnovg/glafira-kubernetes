@@ -1,4 +1,5 @@
-//! Чтение кластера (спец. §4.1): только get, list, watch, логи и GET отдельных путей API-сервера.
+//! Чтение кластера (спец. §4.1): только get, list, watch, логи, GET отдельных путей API-сервера
+//! и проверки прав.
 //! Внутренний `kube::Client` наружу не отдаётся — через `ReadClient` кластер не изменить. Им же
 //! будет пользоваться MCP-шлюз (этап O2). Каждый запрос ограничен таймаутом профиля; списки
 //! читаются страницами (спец. §6.7).
@@ -7,8 +8,11 @@ use std::fmt::Debug;
 use std::time::Duration;
 
 use futures::{AsyncBufRead, Stream};
+use k8s_openapi::api::authorization::v1::{
+    SelfSubjectRulesReview, SelfSubjectRulesReviewSpec, SubjectRulesReviewStatus,
+};
 use k8s_openapi::{ClusterResourceScope, NamespaceResourceScope};
-use kube::api::{Api, ApiResource, DynamicObject, ListParams, LogParams, ObjectList};
+use kube::api::{Api, ApiResource, DynamicObject, ListParams, LogParams, ObjectList, PostParams};
 use kube::core::Resource;
 use kube::runtime::watcher;
 use serde::de::DeserializeOwned;
@@ -222,6 +226,20 @@ impl ReadClient {
         config: watcher::Config,
     ) -> impl Stream<Item = watcher::Result<watcher::Event<DynamicObject>>> + Send + use<> {
         watcher(self.dynamic(ar, Some(namespace)), config)
+    }
+
+    /// Права пользователя в namespace (`SelfSubjectRulesReview`). Проверка создаётся запросом
+    /// POST, но в кластере ничего не меняет.
+    pub async fn rules_review(&self, namespace: &str) -> AppResult<SubjectRulesReviewStatus> {
+        let api: Api<SelfSubjectRulesReview> = Api::all(self.client.clone());
+        let review = SelfSubjectRulesReview {
+            spec: SelfSubjectRulesReviewSpec {
+                namespace: Some(namespace.to_string()),
+            },
+            ..Default::default()
+        };
+        let r = timed(self.timeout, api.create(&PostParams::default(), &review)).await?;
+        Ok(r.status.unwrap_or_default())
     }
 
     /// Имена проектов (или namespace): первые 500 и признак «есть ещё».

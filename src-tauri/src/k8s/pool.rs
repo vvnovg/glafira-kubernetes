@@ -195,27 +195,35 @@ pub async fn open(
     })
 }
 
+/// Подключение для тестов: клиент — мок API-сервера с ответами `handler`, платформа — Kubernetes
+/// без прав уровня кластера.
+#[cfg(test)]
+pub(crate) fn test_connected(
+    handler: impl Fn(&crate::k8s::testing::Seen) -> (u16, serde_json::Value) + Send + 'static,
+) -> Arc<Connected> {
+    let (client, _) = crate::k8s::testing::mock_client(handler);
+    Arc::new(Connected {
+        client,
+        info: ConnectionInfo {
+            user: "u".into(),
+            groups: vec![],
+            server_version: "v1.32.0".into(),
+            platform: crate::platform::detect(&Default::default()),
+            api_groups: Default::default(),
+            capabilities: Default::default(),
+            token_expires_at: None,
+        },
+        timeout: Duration::from_secs(1),
+        expires_at: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::k8s::cluster::Capabilities;
 
     fn connected() -> Arc<Connected> {
-        let (client, _) = crate::k8s::testing::mock_client(|_| (200, serde_json::json!({})));
-        Arc::new(Connected {
-            client,
-            info: ConnectionInfo {
-                user: "u".into(),
-                groups: vec![],
-                server_version: "v1.32.0".into(),
-                platform: crate::platform::detect(&Default::default()),
-                api_groups: Default::default(),
-                capabilities: Capabilities::default(),
-                token_expires_at: None,
-            },
-            timeout: Duration::from_secs(1),
-            expires_at: None,
-        })
+        test_connected(|_| (200, serde_json::json!({})))
     }
 
     #[tokio::test]

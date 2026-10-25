@@ -23,6 +23,8 @@ pub struct AppState {
     pub logins: Arc<crate::auth::Logins>,
     /// Сессии watch и логов.
     pub sessions: Arc<crate::sessions::Sessions>,
+    /// Права пользователя в проектах (кэш на 5 минут).
+    pub access: Arc<crate::k8s::access::AccessCache>,
 }
 
 impl AppState {
@@ -35,6 +37,7 @@ impl AppState {
             pool: Arc::new(ClientPool::default()),
             logins: Arc::new(crate::auth::Logins::default()),
             sessions: Arc::new(crate::sessions::Sessions::default()),
+            access: Arc::new(crate::k8s::access::AccessCache::default()),
         })
     }
 
@@ -102,6 +105,23 @@ impl AppState {
         result
     }
 
+    /// Чтение в проекте: как `read`, а ответ 403 ещё и сбрасывает кэш прав этого проекта —
+    /// права могли измениться (спец. §5.4).
+    pub async fn read_in<T, F, Fut>(&self, id: &str, namespace: &str, f: F) -> AppResult<T>
+    where
+        F: FnOnce(Arc<Connected>) -> Fut,
+        Fut: Future<Output = AppResult<T>>,
+    {
+        let result = self.read(id, f).await;
+        if result
+            .as_ref()
+            .is_err_and(|e| e.code == ErrorCode::Forbidden)
+        {
+            self.access.forget(id, namespace);
+        }
+        result
+    }
+
     /// Сбрасывает клиент, если ошибка значит, что с этими учётными данными или TLS он работать
     /// не будет: следующий вызов подключится заново и подхватит новый токен.
     pub fn evict_if_broken(&self, id: &str, e: &AppError) -> bool {
@@ -110,13 +130,16 @@ impl AppState {
             ErrorCode::SessionExpired | ErrorCode::AuthFailed | ErrorCode::TlsError
         );
         if broken {
-            self.pool.evict(id);
+            self.evict_connection(id);
         }
         broken
     }
 
+    /// Сбрасывает клиент подключения и кэш его прав в проектах: со следующим подключением
+    /// (новый токен, другой профиль) права могут быть другими.
     pub fn evict_connection(&self, id: &str) {
         self.pool.evict(id);
+        self.access.forget_connection(id);
     }
 
     /// Удаляет подключение целиком: профиль, секреты, клиент и сессии. Блокирующий вызов
@@ -433,6 +456,53 @@ mod tests {
         let st = state(dir.path());
         let e = st.read("nope", |_| async { Ok(()) }).await.unwrap_err();
         assert_eq!(e.code, ErrorCode::NotFound);
+    }
+
+    #[tokio::test]
+    async fn forbidden_read_in_a_project_forgets_its_rights() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = state(dir.path());
+        let connected = crate::k8s::pool::test_connected(|_| (200, serde_json::json!({})));
+        assert!(
+            st.pool
+                .insert_if_current("a", st.pool.generation("a"), connected)
+        );
+        let a = crate::k8s::access::NamespaceAccess::default();
+        st.access.put("a", "team-a", a.clone());
+        st.access.put("a", "team-b", a.clone());
+        let ok = st.read_in("a", "team-a", |_| async { Ok(1) }).await;
+        assert_eq!(ok.unwrap(), 1);
+        assert!(st.access.get("a", "team-a").is_some());
+        let e = st
+            .read_in("a", "team-a", |_| async {
+                Err::<(), _>(crate::k8s::errors::not_allowed(
+                    "list",
+                    "pods",
+                    Some("team-a"),
+                ))
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::Forbidden);
+        assert!(
+            st.access.get("a", "team-a").is_none(),
+            "права проекта перечитаются"
+        );
+        assert!(st.access.get("a", "team-b").is_some());
+        assert!(st.pool.get("a").is_some(), "403 клиент не сбрасывает");
+    }
+
+    #[test]
+    fn evicting_a_client_forgets_the_rights_of_the_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = state(dir.path());
+        st.access.put(
+            "a",
+            "team-a",
+            crate::k8s::access::NamespaceAccess::default(),
+        );
+        st.evict_connection("a");
+        assert!(st.access.get("a", "team-a").is_none());
     }
 
     #[test]
