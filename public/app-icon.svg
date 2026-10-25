@@ -1,23 +1,24 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
-  <!-- Исходник иконки Glafira for Apache Kafka: лог из трёх партиций и линия пульса на графите. Набор для платформ: pnpm tauri icon public/app-icon.svg -->
+  <!-- Исходник иконки Glafira for Kubernetes: штурвал (kubernetes — «рулевой») и линия пульса на графите. Набор для платформ: pnpm tauri icon public/app-icon.svg -->
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#55606f"/>
       <stop offset="1" stop-color="#1c222c"/>
     </linearGradient>
-    <linearGradient id="body" x1="0" y1="0" x2="1" y2="0">
+    <linearGradient id="body" gradientUnits="userSpaceOnUse" x1="150" y1="0" x2="874" y2="0">
       <stop offset="0" stop-color="#e3e8ef"/>
       <stop offset="0.5" stop-color="#ffffff"/>
       <stop offset="1" stop-color="#d3dae4"/>
     </linearGradient>
   </defs>
   <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
-  <!-- Партиции: начало у всех общее, концы разной длины -->
-  <rect x="232" y="272" width="480" height="120" rx="28" fill="url(#body)"/>
-  <rect x="232" y="452" width="576" height="120" rx="28" fill="url(#body)"/>
-  <rect x="232" y="632" width="384" height="120" rx="28" fill="url(#body)"/>
-  <!-- Границы записей (смещений) -->
-  <path d="M328 272 V392 M424 272 V392 M520 272 V392 M616 272 V392 M328 452 V572 M424 452 V572 M520 452 V572 M616 452 V572 M712 452 V572 M328 632 V752 M424 632 V752 M520 632 V752" stroke="#3b4554" stroke-width="16"/>
+  <!-- Штурвал: восемь спиц с рукоятями, обод и ступица под пульсом; повёрнут, чтобы ни одна спица не легла на линию пульса -->
+  <g transform="rotate(22.5 512 512)">
+    <path d="M512 512 V262 M512 512 V762 M512 512 H262 M512 512 H762 M512 512 L335 335 M512 512 L689 335 M512 512 L335 689 M512 512 L689 689" stroke="url(#body)" stroke-width="50" stroke-linecap="round"/>
+    <path d="M512 252 V184 M512 772 V840 M252 512 H184 M772 512 H840 M328 328 L280 280 M696 328 L744 280 M328 696 L280 744 M696 696 L744 744" stroke="url(#body)" stroke-width="70" stroke-linecap="round"/>
+    <circle cx="512" cy="512" r="230" fill="none" stroke="url(#body)" stroke-width="66"/>
+    <circle cx="512" cy="512" r="96" fill="url(#body)"/>
+  </g>
   <!-- Пульс: тёмная подложка, чтобы линия читалась и на белом, и на графите -->
   <path d="M180 512 H372 L424 404 L488 632 L552 352 L612 568 L652 512 H844" fill="none" stroke="#12161d" stroke-width="64" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M180 512 H372 L424 404 L488 632 L552 352 L612 568 L652 512 H844" fill="none" stroke="#ffb020" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
