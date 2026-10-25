@@ -3,6 +3,7 @@ pub mod i18n;
 pub mod commands;
 mod dock_name;
 pub mod error;
+pub mod k8s;
 pub mod logging;
 pub mod policy;
 pub mod product;

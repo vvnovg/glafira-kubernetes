@@ -30,6 +30,13 @@ pem = "3"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 time = { version = "0.3", features = ["formatting"] }
+kube = { version = "4.2", default-features = false, features = ["client", "rustls-tls", "ring", "http-proxy"] }
+k8s-openapi = { version = "0.28", features = ["v1_32"] }
+http = "1"
+secrecy = "0.10"
+base64 = "0.22"
+regex = "1"
+tokio = { version = "1", features = ["rt", "macros", "time", "net", "io-util", "sync"] }
 sys-locale = "0.3"
 
 [target.'cfg(windows)'.dependencies]
@@ -37,6 +44,9 @@ winreg = "0.55"
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "test-util"] }
+tower-test = "0.4"
+http-body-util = "0.1"
 
 [profile.release]
 codegen-units = 1
