@@ -57,7 +57,10 @@ export const api = {
   oauthTokenPage: (connectionId: string) => call<string>("oauth_token_page", { connectionId }),
   resolveExecCommand: (command: string) => call<string>("resolve_exec_command", { command }),
   previewKubeconfigImport: (path: string | null) => call<KubeconfigPreview>("preview_kubeconfig_import", { path }),
-  /** `approveExec` — контексты, строку запуска exec-плагина которых подтвердил человек. */
+  /**
+   * `approveExec` — отпечатки строк запуска exec-плагина, которые подтвердил человек
+   * (`launchFingerprint` контекстов из предпросмотра). Имя контекста ничего не подтверждает.
+   */
   applyKubeconfigImport: (path: string, contexts: string[], folderId: string | null, approveExec: string[] = []) =>
     call<ConnectionProfile[]>("apply_kubeconfig_import", { path, contexts, folderId, approveExec }),
 

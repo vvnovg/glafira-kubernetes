@@ -46,6 +46,11 @@ pub struct KubeContext {
     /// Строка запуска exec-плагина с абсолютным путём к команде — человек подтверждает её
     /// при импорте.
     pub exec: Option<ExecAuth>,
+    /// Отпечаток строки запуска (`auth::exec::fingerprint`), как её сохранит импорт, — до того,
+    /// как webview скроет секреты. Человек подтверждает именно эту строку: применение
+    /// принимает отпечаток, а не имя контекста.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_fingerprint: Option<String>,
     /// Почему контекст нельзя импортировать; `None` — можно.
     pub unsupported: Option<LocalizedText>,
     /// Подключение с тем же адресом и именем: импорт обновит его.
@@ -257,6 +262,7 @@ pub fn preview(
                 auth,
                 insecure,
                 current: kc.current_context.as_deref() == Some(nc.name.as_str()),
+                launch_fingerprint: exec.as_ref().map(crate::auth::exec::fingerprint),
                 exec,
                 unsupported,
             }
@@ -600,6 +606,11 @@ contexts:
         assert_eq!(exec.args[0], "get-token");
         assert_eq!(exec.env[0].name, "HTTPS_PROXY");
         assert_eq!(exec.approved, None, "подтверждает человек в диалоге");
+        assert_eq!(
+            oidc.launch_fingerprint.as_deref(),
+            Some(crate::auth::exec::fingerprint(&exec).as_str())
+        );
+        assert_eq!(dev.launch_fingerprint, None);
         let eks = by("eks-prod").exec.unwrap();
         assert_eq!(eks.api_version, "client.authentication.k8s.io/v1beta1");
         for (name, key) in [

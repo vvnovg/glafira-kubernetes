@@ -21,7 +21,9 @@ interface Props {
 /**
  * Импорт контекстов kubeconfig: файл по умолчанию (`KUBECONFIG` или `~/.kube/config`) или выбранный,
  * список контекстов с причинами, почему контекст нельзя импортировать, папка и применение.
- * Строку запуска exec-плагина человек разрешает отдельной галочкой (спец. §5.2).
+ * Строку запуска exec-плагина человек разрешает отдельной галочкой (спец. §5.2); подтверждением
+ * служит отпечаток показанной строки, а не имя контекста: если файл изменился после предпросмотра,
+ * изменённая строка останется неподтверждённой.
  */
 export function KubeconfigImportDialog({ initialTargetId, onClose, onImported }: Props) {
   const { t } = useTranslation();
@@ -31,6 +33,8 @@ export function KubeconfigImportDialog({ initialTargetId, onClose, onImported }:
   const [path, setPath] = useState<string | null>(null);
   const [targetId, setTargetId] = useState<string | null>(initialTargetId);
   const [selected, setSelected] = useState<Set<string> | null>(null);
+  // Разрешённые строки запуска — по отпечатку, а не по имени контекста: если после перечитывания
+  // файла строка изменилась, прежняя галочка к ней не относится.
   const [allowed, setAllowed] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [applyError, setApplyError] = useState<unknown>(null);
@@ -47,7 +51,8 @@ export function KubeconfigImportDialog({ initialTargetId, onClose, onImported }:
   // Пока пользователь не менял выбор, отмечен текущий контекст файла (если его можно импортировать).
   const chosen = selected ?? new Set(preview?.contexts.filter((c) => c.current && !c.unsupported).map((c) => c.name) ?? []);
   // Выбранные exec-плагины, строку запуска которых ещё не разрешили.
-  const unconfirmed = (preview?.contexts ?? []).filter((c) => c.exec && chosen.has(c.name) && !allowed.has(c.name));
+  const isAllowed = (c: KubeContext) => !!c.launchFingerprint && allowed.has(c.launchFingerprint);
+  const unconfirmed = (preview?.contexts ?? []).filter((c) => c.exec && chosen.has(c.name) && !isAllowed(c));
 
   useEffect(() => {
     const returnTo = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -65,18 +70,24 @@ export function KubeconfigImportDialog({ initialTargetId, onClose, onImported }:
   };
 
   const toggleAllowed = (c: KubeContext) => {
+    if (!c.launchFingerprint) return;
     const next = new Set(allowed);
-    if (next.has(c.name)) next.delete(c.name);
-    else next.add(c.name);
+    if (next.has(c.launchFingerprint)) next.delete(c.launchFingerprint);
+    else next.add(c.launchFingerprint);
     setAllowed(next);
   };
 
   const pickFile = async () => {
-    const file = await openDialog({ multiple: false, directory: false });
-    if (typeof file === "string") {
-      setSelected(null);
-      setAllowed(new Set());
-      setPath(file);
+    try {
+      const file = await openDialog({ multiple: false, directory: false });
+      if (typeof file === "string") {
+        setSelected(null);
+        setAllowed(new Set());
+        setApplyError(null);
+        setPath(file);
+      }
+    } catch (err) {
+      setApplyError(err);
     }
   };
 
@@ -84,16 +95,29 @@ export function KubeconfigImportDialog({ initialTargetId, onClose, onImported }:
     if (!preview) return;
     setBusy(true);
     setApplyError(null);
+    const picked = preview.contexts.filter((c) => chosen.has(c.name));
+    const names = picked.map((c) => c.name);
+    // Подтверждение — отпечаток показанной строки запуска выбранного и разрешённого контекста.
+    const approveExec = picked.flatMap((c) => (c.exec && c.launchFingerprint && isAllowed(c) ? [c.launchFingerprint] : []));
+    // Подключения, которые импорт мог обновить: их кэш (адрес, вход) после импорта устарел.
+    const touched = new Set(picked.flatMap((c) => (c.existingId ? [c.existingId] : [])));
+    let saved: ConnectionProfile[] | null = null;
     try {
-      const names = preview.contexts.filter((c) => chosen.has(c.name)).map((c) => c.name);
-      const approveExec = names.filter((n) => allowed.has(n));
-      const saved = await api.applyKubeconfigImport(preview.path, names, targetId, approveExec);
-      await queryClient.invalidateQueries({ queryKey: ["connections"] });
-      onImported(saved);
+      saved = await api.applyKubeconfigImport(preview.path, names, targetId, approveExec);
+      for (const p of saved) touched.add(p.id);
     } catch (err) {
       setApplyError(err);
+    } finally {
+      // Контексты сохраняются по одному: после сбоя часть уже записана. Список подключений и
+      // пометки «обновит существующее подключение» нужно обновить в любом случае.
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["connections"] }),
+        queryClient.invalidateQueries({ queryKey: ["kubeconfig-preview", path] }),
+      ]);
+      queryClient.removeQueries({ predicate: (q) => typeof q.queryKey[1] === "string" && touched.has(q.queryKey[1]) });
       setBusy(false);
     }
+    if (saved) onImported(saved);
   };
 
   const onKeyDown = (e: KeyboardEvent) => {
@@ -114,7 +138,7 @@ export function KubeconfigImportDialog({ initialTargetId, onClose, onImported }:
             {t("kubeconfig.chooseFile")}
           </button>
         </div>
-        {previewQ.error != null && <ErrorBanner error={previewQ.error} />}
+        {previewQ.error != null && <ErrorBanner error={previewQ.error} onRetry={() => void previewQ.refetch()} />}
         {preview && preview.contexts.length === 0 && <p className="empty">{t("kubeconfig.noContexts")}</p>}
         {preview && preview.contexts.length > 0 && (
           <ul className="steps">
@@ -138,8 +162,8 @@ export function KubeconfigImportDialog({ initialTargetId, onClose, onImported }:
                     <label className="inline">
                       <input
                         type="checkbox"
-                        checked={allowed.has(c.name)}
-                        disabled={!chosen.has(c.name) || busy}
+                        checked={isAllowed(c)}
+                        disabled={!chosen.has(c.name) || !c.launchFingerprint || busy}
                         onChange={() => toggleAllowed(c)}
                       />
                       {t("kubeconfig.allowExec")}

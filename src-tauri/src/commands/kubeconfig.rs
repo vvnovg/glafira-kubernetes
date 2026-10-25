@@ -5,7 +5,9 @@ use tauri::State;
 
 use super::blocking;
 use super::connections::{ConnectionInput, SecretsInput, save_connection_blocking};
-use crate::auth::exec::{is_executable_file, is_secret_name, mask_secret_args, resolve_command};
+use crate::auth::exec::{
+    fingerprint, is_executable_file, is_secret_name, mask_secret_args, resolve_command,
+};
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::k8s::config::process_env;
 use crate::k8s::kubeconfig::{self, KubeContext, KubeconfigPreview};
@@ -38,7 +40,9 @@ pub async fn preview_kubeconfig_import(
 
 /// Предпросмотр для webview: секретные значения exec-плагина (переменные окружения и аргументы
 /// вроде `--oidc-client-secret`) заменены на `***`, как в `Debug` профиля. Применение импорта
-/// берёт настоящие значения из файла заново и предпросмотра не использует.
+/// берёт настоящие значения из файла заново и предпросмотра не использует. Отпечаток строки
+/// запуска (`launch_fingerprint`) посчитан по настоящим значениям до замены: человек
+/// подтверждает показанную строку, а применение сверяет с ним строку из файла.
 fn preview_for_ui(st: &AppState, path: &Path, dirs: &[PathBuf]) -> AppResult<KubeconfigPreview> {
     let mut preview = preview_blocking(st, path, dirs)?;
     for exec in preview.contexts.iter_mut().filter_map(|c| c.exec.as_mut()) {
@@ -76,7 +80,11 @@ fn preview_from(
 }
 
 /// Импортирует выбранные контексты: новые — в папку `folder_id`, совпавшие обновляются.
-/// Строка запуска exec-плагина подтверждена, только если контекст есть в `approve_exec`.
+/// `approve_exec` — отпечатки строк запуска, которые человек подтвердил в диалоге
+/// (`launchFingerprint` предпросмотра). Строка запуска сохраняется подтверждённой, только если
+/// отпечаток именно той строки, что читается из файла сейчас, есть в `approve_exec`: имя
+/// контекста ничего не подтверждает, а изменившийся после предпросмотра файл даёт
+/// неподтверждённую строку, которую форма подключения потом спросит заново.
 #[tauri::command]
 pub async fn apply_kubeconfig_import(
     state: State<'_, AppState>,
@@ -100,7 +108,7 @@ pub async fn apply_kubeconfig_import(
     .await
 }
 
-/// Что импортировать: файл, контексты, папка для новых, подтверждённые exec-плагины.
+/// Что импортировать: файл, контексты, папка для новых, отпечатки подтверждённых строк запуска.
 struct ApplyRequest<'a> {
     path: &'a Path,
     names: &'a [String],
@@ -142,8 +150,10 @@ fn prepare(
     r: &ApplyRequest,
 ) -> AppResult<ConnectionInput> {
     let imported = kubeconfig::import_context(kc, &ctx.name, ctx)?;
-    let confirm_exec =
-        matches!(imported.profile.auth, AuthConfig::Exec(_)) && r.approve_exec.contains(&ctx.name);
+    let confirm_exec = match &imported.profile.auth {
+        AuthConfig::Exec(e) => r.approve_exec.contains(&fingerprint(e)),
+        _ => false,
+    };
     let profile = match st.connections.get(&imported.profile.id) {
         Ok(existing) => merge(existing, imported.profile),
         Err(_) => ConnectionProfile {
@@ -206,7 +216,9 @@ mod tests {
     use super::*;
     use crate::auth::exec::write_test_file;
     use crate::secrets::{MemoryStore, TOKEN, secret_key};
-    use crate::storage::profile::{AuthConfig, Environment, TEST_CERT_PEM, sample_profile};
+    use crate::storage::profile::{
+        AuthConfig, Environment, ExecAuth, TEST_CERT_PEM, sample_profile,
+    };
     use crate::storage::tree::{TreeItemKind, TreeItemRef};
 
     fn new_state(dir: &Path) -> AppState {
@@ -235,6 +247,29 @@ mod tests {
             dirs,
         };
         apply_blocking(st, request)
+    }
+
+    /// Каталог с исполняемым `kubelogin`: команда exec-плагина «установлена на этой машине».
+    fn kubelogin_dirs(dir: &Path) -> Vec<PathBuf> {
+        let bin = dir.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        write_test_file(&bin.join("kubelogin"), 0o755);
+        vec![bin]
+    }
+
+    /// Строка запуска сохранённого подключения подтверждена человеком.
+    fn approved(p: &ConnectionProfile) -> bool {
+        match &p.auth {
+            AuthConfig::Exec(e) => crate::auth::exec::is_approved(e),
+            _ => false,
+        }
+    }
+
+    /// Отпечаток строки запуска контекста, как его показал предпросмотр для webview.
+    fn shown_fingerprint(st: &AppState, path: &Path, dirs: &[PathBuf], name: &str) -> String {
+        let preview = preview_for_ui(st, path, dirs).unwrap();
+        let ctx = preview.contexts.iter().find(|c| c.name == name).unwrap();
+        ctx.launch_fingerprint.clone().unwrap()
     }
 
     fn write_kubeconfig(dir: &Path) -> PathBuf {
@@ -387,7 +422,7 @@ contexts:
         // Хорошие контексты идут до плохого: до исправления они уже были бы сохранены.
         // `dev-oidc` не импортируется — команды `kubelogin` на этой машине нет.
         let names = ["dev-alice", "dev-browser", "dev-oidc"];
-        let e = apply(&st, &path, &names, None, &["dev-oidc"], &[]).unwrap_err();
+        let e = apply(&st, &path, &names, None, &[], &[]).unwrap_err();
         assert_eq!(e.key, "errors.kubeconfig.execNotFound");
         assert!(e.details.as_deref().unwrap_or("").contains("dev-oidc"));
         assert!(st.connections.list().is_empty(), "ничего не сохранено");
@@ -424,10 +459,7 @@ contexts:
 "#,
         )
         .unwrap();
-        let bin = dir.path().join("bin");
-        std::fs::create_dir(&bin).unwrap();
-        write_test_file(&bin.join("kubelogin"), 0o755);
-        let dirs = [bin];
+        let dirs = kubelogin_dirs(dir.path());
 
         let preview = preview_for_ui(&st, &path, &dirs).unwrap();
         let exec = preview.contexts[0].exec.as_ref().unwrap();
@@ -443,14 +475,25 @@ contexts:
         assert_eq!(env, [("OIDC_CLIENT_SECRET", "***"), ("TEAM", "ops")]);
         let json = serde_json::to_string(&preview).unwrap();
         assert!(!json.contains("s3cr3t"), "{json}");
+        assert!(json.contains("launchFingerprint"), "{json}");
 
-        // Применение берёт настоящие значения из файла, а не из предпросмотра.
-        let saved = apply(&st, &path, &["dev-oidc"], None, &["dev-oidc"], &dirs).unwrap();
+        // Отпечаток посчитан по настоящей строке, а не по скрытой в предпросмотре.
+        let shown = preview.contexts[0].launch_fingerprint.clone().unwrap();
+        assert_ne!(shown, fingerprint(exec), "по скрытым значениям");
+
+        // Применение берёт настоящие значения из файла, а не из предпросмотра, и принимает
+        // отпечаток из предпросмотра.
+        let saved = apply(&st, &path, &["dev-oidc"], None, &[shown.as_str()], &dirs).unwrap();
         let AuthConfig::Exec(e) = &saved[0].auth else {
             panic!("exec-плагин")
         };
         assert_eq!(e.args[1], "--oidc-client-secret=arg-s3cr3t");
         assert_eq!(e.env[0].value, "env-s3cr3t");
+        assert_eq!(fingerprint(e), shown);
+        assert!(
+            approved(&saved[0]),
+            "отпечаток предпросмотра подтверждает строку"
+        );
     }
 
     #[cfg(unix)]
@@ -486,26 +529,82 @@ contexts:
         let dir = tempfile::tempdir().unwrap();
         let st = AppState::new(&dir.path().join("data"), Arc::new(MemoryStore::default())).unwrap();
         let path = write_kubeconfig(dir.path());
-        let bin = dir.path().join("bin");
-        std::fs::create_dir(&bin).unwrap();
-        write_test_file(&bin.join("kubelogin"), 0o755);
-        let dirs = [bin.clone()];
-        let p = preview_blocking(&st, &path, &dirs).unwrap();
+        let dirs = kubelogin_dirs(dir.path());
+        let p = preview_for_ui(&st, &path, &dirs).unwrap();
         let oidc = p.contexts.iter().find(|c| c.name == "dev-oidc").unwrap();
         assert_eq!(
             oidc.exec.as_ref().unwrap().command,
-            bin.join("kubelogin").display().to_string()
+            dirs[0].join("kubelogin").display().to_string()
         );
-        let approved = |p: &ConnectionProfile| match &p.auth {
-            AuthConfig::Exec(e) => crate::auth::exec::is_approved(e),
-            _ => false,
-        };
+        let fp = oidc.launch_fingerprint.clone().unwrap();
+        let alice = p.contexts.iter().find(|c| c.name == "dev-alice").unwrap();
+        assert_eq!(
+            alice.launch_fingerprint, None,
+            "без exec-плагина отпечатка нет"
+        );
+        assert!(
+            !serde_json::to_string(alice)
+                .unwrap()
+                .contains("launchFingerprint")
+        );
+
         let saved = apply(&st, &path, &["dev-oidc"], None, &[], &dirs).unwrap();
         assert!(!approved(&saved[0]), "без согласия в диалоге");
-        let saved = apply(&st, &path, &["dev-oidc"], None, &["dev-oidc"], &dirs).unwrap();
+        let saved = apply(&st, &path, &["dev-oidc"], None, &[fp.as_str()], &dirs).unwrap();
         assert!(approved(&saved[0]));
         // Без команды на машине контекст не импортируется.
-        let e = apply(&st, &path, &["dev-oidc"], None, &["dev-oidc"], &[]).unwrap_err();
+        let e = apply(&st, &path, &["dev-oidc"], None, &[fp.as_str()], &[]).unwrap_err();
         assert_eq!(e.key, "errors.kubeconfig.execNotFound");
+    }
+
+    #[test]
+    fn context_name_approves_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = new_state(dir.path());
+        let path = write_kubeconfig(dir.path());
+        let dirs = kubelogin_dirs(dir.path());
+        let saved = apply(&st, &path, &["dev-oidc"], None, &["dev-oidc"], &dirs).unwrap();
+        assert!(!approved(&saved[0]), "имя контекста — не подтверждение");
+        // Отпечаток чужой строки запуска тоже ничего не подтверждает.
+        let other = fingerprint(&ExecAuth {
+            command: "/bin/kubelogin".into(),
+            args: Vec::new(),
+            env: Vec::new(),
+            api_version: crate::storage::profile::EXEC_API_V1.into(),
+            provide_cluster_info: false,
+            approved: None,
+        });
+        let saved = apply(&st, &path, &["dev-oidc"], None, &[other.as_str()], &dirs).unwrap();
+        assert!(!approved(&saved[0]));
+    }
+
+    #[test]
+    fn file_changed_after_preview_saves_exec_unconfirmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = new_state(dir.path());
+        let path = write_kubeconfig(dir.path());
+        let dirs = kubelogin_dirs(dir.path());
+        let shown = shown_fingerprint(&st, &path, &dirs, "dev-oidc");
+
+        // Между предпросмотром и применением файл изменился: другие аргументы.
+        let text = std::fs::read_to_string(&path).unwrap();
+        let changed = text.replace("sso.corp", "evil.example");
+        assert_ne!(text, changed);
+        std::fs::write(&path, changed).unwrap();
+
+        let saved = apply(&st, &path, &["dev-oidc"], None, &[shown.as_str()], &dirs).unwrap();
+        let AuthConfig::Exec(e) = &saved[0].auth else {
+            panic!("exec-плагин")
+        };
+        assert!(e.args[1].contains("evil.example"), "строка взята из файла");
+        assert!(
+            !approved(&saved[0]),
+            "показанную строку подтвердили, а не эту"
+        );
+        // Новая строка подтверждается её собственным отпечатком.
+        let now = shown_fingerprint(&st, &path, &dirs, "dev-oidc");
+        assert_ne!(now, shown);
+        let saved = apply(&st, &path, &["dev-oidc"], None, &[now.as_str()], &dirs).unwrap();
+        assert!(approved(&saved[0]));
     }
 }
