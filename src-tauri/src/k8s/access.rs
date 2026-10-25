@@ -127,43 +127,76 @@ pub async fn namespace_access(r: &ReadClient, namespace: &str) -> AppResult<Name
 }
 
 /// Права проектов по подключениям: живут `ACCESS_TTL`, сбрасываются при 403 в проекте и при
-/// сбросе клиента подключения.
+/// сбросе клиента подключения. Сброс подключения меняет его эпоху: права, проверка которых
+/// началась до сброса, в кэш не попадают (`put`).
 #[derive(Default)]
 pub struct AccessCache {
-    inner: Mutex<HashMap<(String, String), (Instant, NamespaceAccess)>>,
+    inner: Mutex<CacheInner>,
+}
+
+#[derive(Default)]
+struct CacheInner {
+    rights: HashMap<(String, String), (Instant, NamespaceAccess)>,
+    /// Растёт при каждом `forget_connection`.
+    epochs: HashMap<String, u64>,
+}
+
+impl CacheInner {
+    fn epoch(&self, connection_id: &str) -> u64 {
+        self.epochs.get(connection_id).copied().unwrap_or(0)
+    }
 }
 
 impl AccessCache {
     pub fn get(&self, connection_id: &str, namespace: &str) -> Option<NamespaceAccess> {
         let key = (connection_id.to_string(), namespace.to_string());
         let mut inner = self.inner.lock_safe();
-        match inner.get(&key) {
+        match inner.rights.get(&key) {
             Some((at, a)) if at.elapsed() < ACCESS_TTL => Some(a.clone()),
             Some(_) => {
-                inner.remove(&key);
+                inner.rights.remove(&key);
                 None
             }
             None => None,
         }
     }
 
-    pub fn put(&self, connection_id: &str, namespace: &str, access: NamespaceAccess) {
-        self.inner.lock_safe().insert(
+    /// Эпоха подключения: читается до проверки прав и передаётся в `put`.
+    pub fn epoch(&self, connection_id: &str) -> u64 {
+        self.inner.lock_safe().epoch(connection_id)
+    }
+
+    /// Кладёт права, если подключение не сбрасывали с эпохи `epoch`. `false` — сбрасывали
+    /// (вход, новый токен, 401), и права, прочитанные прежним клиентом, не кэшируются.
+    pub fn put(
+        &self,
+        connection_id: &str,
+        namespace: &str,
+        epoch: u64,
+        access: NamespaceAccess,
+    ) -> bool {
+        let mut inner = self.inner.lock_safe();
+        if inner.epoch(connection_id) != epoch {
+            return false;
+        }
+        inner.rights.insert(
             (connection_id.to_string(), namespace.to_string()),
             (Instant::now(), access),
         );
+        true
     }
 
     pub fn forget(&self, connection_id: &str, namespace: &str) {
         self.inner
             .lock_safe()
+            .rights
             .remove(&(connection_id.to_string(), namespace.to_string()));
     }
 
     pub fn forget_connection(&self, connection_id: &str) {
-        self.inner
-            .lock_safe()
-            .retain(|(c, _), _| c != connection_id);
+        let mut inner = self.inner.lock_safe();
+        inner.rights.retain(|(c, _), _| c != connection_id);
+        *inner.epochs.entry(connection_id.to_string()).or_default() += 1;
     }
 }
 
@@ -244,6 +277,22 @@ mod tests {
         assert_eq!(seen[0].body["spec"]["namespace"], "team-a");
     }
 
+    /// Сервер не вернул статус проверки — о правах ничего не известно, интерфейс ничего не
+    /// скрывает.
+    #[tokio::test]
+    async fn review_without_a_status_hides_nothing() {
+        let (client, _) = mock_client(|_| {
+            (
+                201,
+                serde_json::json!({"apiVersion": "authorization.k8s.io/v1",
+                    "kind": "SelfSubjectRulesReview", "metadata": {}, "spec": {"namespace": "team-a"}}),
+            )
+        });
+        let r = ReadClient::new(client, Duration::from_secs(5));
+        let a = namespace_access(&r, "team-a").await.unwrap();
+        assert!(a.incomplete);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn cache_lives_five_minutes_and_can_be_forgotten() {
         let c = AccessCache::default();
@@ -251,20 +300,36 @@ mod tests {
             incomplete: true,
             ..Default::default()
         };
-        c.put("c", "team-a", a.clone());
-        c.put("c", "team-b", a.clone());
-        c.put("d", "team-a", a.clone());
+        assert!(c.put("c", "team-a", 0, a.clone()));
+        assert!(c.put("c", "team-b", 0, a.clone()));
+        assert!(c.put("d", "team-a", 0, a.clone()));
         assert_eq!(c.get("c", "team-a"), Some(a.clone()));
         c.forget("c", "team-b");
         assert_eq!(c.get("c", "team-b"), None);
+        assert_eq!(c.epoch("c"), 0, "403 в проекте эпоху не меняет");
         tokio::time::advance(ACCESS_TTL).await;
         assert_eq!(c.get("c", "team-a"), None, "устарело");
-        c.put("c", "team-a", a.clone());
+        assert!(c.put("c", "team-a", 0, a.clone()));
         c.forget_connection("c");
         assert_eq!(c.get("c", "team-a"), None);
         assert!(
-            c.inner.lock_safe().len() == 1,
+            c.inner.lock_safe().rights.len() == 1,
             "права другого подключения остались"
         );
+    }
+
+    /// Права, проверка которых началась до сброса подключения, в кэш не попадают; права
+    /// другого подключения и новая проверка — попадают.
+    #[test]
+    fn rights_read_before_a_reset_are_not_cached() {
+        let c = AccessCache::default();
+        let a = NamespaceAccess::default();
+        let (before, other) = (c.epoch("c"), c.epoch("d"));
+        c.forget_connection("c");
+        assert!(!c.put("c", "team-a", before, a.clone()));
+        assert_eq!(c.get("c", "team-a"), None);
+        assert!(c.put("d", "team-a", other, a.clone()));
+        assert!(c.put("c", "team-a", c.epoch("c"), a.clone()));
+        assert_eq!(c.get("c", "team-a"), Some(a));
     }
 }

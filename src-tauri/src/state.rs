@@ -57,7 +57,9 @@ impl AppState {
         let seen = self.pool.finished_attempts(id);
         let _turn = self.pool.connect_lock(id).await;
         if fresh {
-            self.pool.evict(id);
+            // Вход, новый токен, «Подключиться заново»: с новым токеном и права могут быть
+            // другими — кэш прав забывается вместе с клиентом.
+            self.evict_connection(id);
         } else if let Some(c) = self.pool.get(id)
             && !c.expiring(SystemTime::now())
         {
@@ -170,6 +172,13 @@ mod tests {
 
     fn state(dir: &Path) -> AppState {
         AppState::new(dir, Arc::new(MemoryStore::default())).unwrap()
+    }
+
+    /// Права проекта в кэше подключения (пустые).
+    fn cache_rights(st: &AppState, connection_id: &str, namespace: &str) {
+        let epoch = st.access.epoch(connection_id);
+        let rights = crate::k8s::access::NamespaceAccess::default();
+        assert!(st.access.put(connection_id, namespace, epoch, rights));
     }
 
     #[tokio::test]
@@ -401,11 +410,7 @@ mod tests {
                 st.pool
                     .insert_if_current("a", st.pool.generation("a"), pooled.clone())
             );
-            st.access.put(
-                "a",
-                "team-a",
-                crate::k8s::access::NamespaceAccess::default(),
-            );
+            cache_rights(&st, "a", "team-a");
             let expected = pooled.clone();
             let e = st
                 .read("a", move |c| async move {
@@ -432,11 +437,7 @@ mod tests {
         let st = state(dir.path());
         let (old, new) = (pooled_client().await, pooled_client().await);
         assert!(st.pool.insert_if_current("a", st.pool.generation("a"), old));
-        st.access.put(
-            "a",
-            "team-a",
-            crate::k8s::access::NamespaceAccess::default(),
-        );
+        cache_rights(&st, "a", "team-a");
         let pool = st.pool.clone();
         let replacement = new.clone();
         let e = st
@@ -476,9 +477,8 @@ mod tests {
             st.pool
                 .insert_if_current("a", st.pool.generation("a"), connected)
         );
-        let a = crate::k8s::access::NamespaceAccess::default();
-        st.access.put("a", "team-a", a.clone());
-        st.access.put("a", "team-b", a.clone());
+        cache_rights(&st, "a", "team-a");
+        cache_rights(&st, "a", "team-b");
         let ok = st.read_in("a", "team-a", |_| async { Ok(1) }).await;
         assert_eq!(ok.unwrap(), 1);
         assert!(st.access.get("a", "team-a").is_some());
@@ -505,12 +505,21 @@ mod tests {
     fn evicting_a_client_forgets_the_rights_of_the_connection() {
         let dir = tempfile::tempdir().unwrap();
         let st = state(dir.path());
-        st.access.put(
-            "a",
-            "team-a",
-            crate::k8s::access::NamespaceAccess::default(),
-        );
+        cache_rights(&st, "a", "team-a");
         st.evict_connection("a");
+        assert!(st.access.get("a", "team-a").is_none());
+    }
+
+    /// Новое подключение («Подключиться заново», вход через браузер, вставленный токен)
+    /// забывает и кэш прав: с новым токеном права могут быть другими.
+    #[tokio::test]
+    async fn fresh_connect_forgets_the_rights_of_the_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = state(dir.path());
+        cache_rights(&st, "a", "team-a");
+        // Профиля нет: подключение не удастся, но клиент сбрасывается до чтения профиля.
+        let e = st.connected("a", true).await.err().unwrap();
+        assert_eq!(e.code, ErrorCode::NotFound);
         assert!(st.access.get("a", "team-a").is_none());
     }
 

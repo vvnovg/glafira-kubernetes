@@ -239,7 +239,11 @@ impl ReadClient {
             ..Default::default()
         };
         let r = timed(self.timeout, api.create(&PostParams::default(), &review)).await?;
-        Ok(r.status.unwrap_or_default())
+        // Без статуса о правах ничего не известно: `incomplete`, и интерфейс ничего не скрывает.
+        Ok(r.status.unwrap_or_else(|| SubjectRulesReviewStatus {
+            incomplete: true,
+            ..Default::default()
+        }))
     }
 
     /// Имена проектов (или namespace): первые 500 и признак «есть ещё».
