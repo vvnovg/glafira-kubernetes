@@ -1,7 +1,9 @@
 # Connections
 
 A connection is the API server address, the sign-in method and the TLS settings of one cluster. Passwords, tokens
-and keys are kept in the system secret store (Keychain, Credential Manager, Secret Service), never in files.
+and keys are kept in the system secret store (Keychain, Credential Manager, Secret Service), never in files. The one
+exception is the secret values in the arguments and environment of an exec plugin: they stay in the connection file,
+which only you can read, like kubeconfig, and are not exported.
 
 ## API server address {#api-url}
 
@@ -31,9 +33,14 @@ Glafira runs the plugin by its full path, without a shell. An app started from t
 your terminal, so enter the command name and click [[ui:connections.form.exec.find]]: Glafira looks in the `PATH` of
 your login shell and in the standard folders (`/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`).
 
-The form shows the exact launch line: the path, the arguments and the environment variables; values of variables that
-look like secrets are hidden. Glafira runs the line only after you tick [[ui:connections.form.exec.confirm]]. Any
-change to the line, and a connection imported from a file, needs a new confirmation.
+The form shows the exact launch line: the path, the arguments and the environment variables; values of variables and
+options that look like secrets are hidden. Glafira runs the line only after you tick
+[[ui:connections.form.exec.confirm]]. Any change to the line, and a connection imported from a file, needs a new
+confirmation.
+
+Secret values are kept in the connection file, not in the secret store, and are not written to the exchange file:
+after importing such a connection on another computer, fill them in again. If the plugin supports it, keep the secret
+out of the command line instead, for example in the plugin's own config or credential helper.
 
 Plugins that open the browser (`kubectl oidc-login`, `kubelogin`) work: Glafira waits up to 5 minutes, and the
 connection tab can cancel the wait. Plugins that need a terminal (`interactiveMode: Always`, device code sign-in) are
@@ -45,8 +52,9 @@ not supported. The credentials are kept in memory until they expire; then the pl
 [[ui:sidebar.importKubeconfig]] reads `~/.kube/config` (or the first file from `KUBECONFIG`) and lists its contexts.
 Choose the contexts to import: tokens and keys go to the secret store, CA certificates and the project of the
 context are copied into the connection. Glafira does not keep a link to the file. For an exec plugin the dialog shows
-the launch line with the full path to the command; tick the permission under the line to import it confirmed.
-Commands outside the allowed list and `auth-provider` contexts are not supported: the preview explains why.
+the launch line with the full path to the command; the line is copied into the connection as it is, with its secret
+arguments and variables. Tick the permission under the line to import it confirmed. Commands outside the allowed list
+and `auth-provider` contexts are not supported: the preview explains why.
 
 ## Platform {#platform}
 
