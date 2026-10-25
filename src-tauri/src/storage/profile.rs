@@ -147,6 +147,59 @@ pub fn pem_certificates(text: &str) -> Result<Vec<Vec<u8>>, String> {
     Ok(certs)
 }
 
+/// Диапазоны PEM-текста, занятые блоками с приватным ключом: тег содержит `PRIVATE KEY`
+/// (`PRIVATE KEY`, `RSA PRIVATE KEY`, `EC PRIVATE KEY`, `ENCRYPTED PRIVATE KEY`). Блок идёт от
+/// `-----BEGIN` до конца `-----END …-----`, незавершённый — до конца текста. Разбор не зависит
+/// от того, корректно ли тело блока: ключ находится и в повреждённом PEM.
+fn private_key_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    const BEGIN: &str = "-----BEGIN ";
+    const END: &str = "-----END ";
+    const DASHES: &str = "-----";
+    let mut ranges = Vec::new();
+    let mut pos = 0;
+    while let Some(found) = text[pos..].find(BEGIN) {
+        let start = pos + found;
+        let label_start = start + BEGIN.len();
+        let Some(label_len) = text[label_start..].find(DASHES) else {
+            break;
+        };
+        let body = label_start + label_len + DASHES.len();
+        if !text[label_start..label_start + label_len].contains("PRIVATE KEY") {
+            // Следующий блок ищем сразу за заголовком этого: так не пропускается ключ,
+            // стоящий внутри незавершённого блока другого вида.
+            pos = body;
+            continue;
+        }
+        let end = text[body..]
+            .find(END)
+            .and_then(|e| {
+                let tail = body + e + END.len();
+                text[tail..].find(DASHES).map(|d| tail + d + DASHES.len())
+            })
+            .unwrap_or(text.len());
+        ranges.push(start..end);
+        pos = end;
+    }
+    ranges
+}
+
+/// В PEM-тексте есть блок с приватным ключом (секреты хранятся только в keychain, спец. §5.1).
+pub fn pem_has_private_key(text: &str) -> bool {
+    !private_key_ranges(text).is_empty()
+}
+
+/// PEM-текст без блоков с приватным ключом; остальное (сертификаты) остаётся как есть.
+pub fn strip_private_keys(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut pos = 0;
+    for range in private_key_ranges(text) {
+        out.push_str(&text[pos..range.start]);
+        pos = range.end;
+    }
+    out.push_str(&text[pos..]);
+    out
+}
+
 /// Имя проекта (namespace) по правилам DNS-1123: строчные латинские буквы, цифры и `-`,
 /// начало и конец — буква или цифра, не длиннее 63 символов.
 pub fn is_valid_namespace(name: &str) -> bool {
@@ -162,6 +215,24 @@ pub fn is_valid_namespace(name: &str) -> bool {
 
 fn invalid(key_and_text: crate::i18n::LocalizedText) -> AppError {
     AppError::localized(ErrorCode::InvalidInput, key_and_text)
+}
+
+/// В адресе есть имя пользователя или пароль (`https://user:pass@host`).
+fn has_userinfo(u: &url::Url) -> bool {
+    !u.username().is_empty() || u.password().is_some()
+}
+
+/// Ошибка «учётные данные в адресе»; в тексте адрес показан без имени и пароля.
+fn credentials_in_url(u: &url::Url) -> AppError {
+    let mut clean = u.clone();
+    // Ошибка возможна только для адреса без хоста, а у проверяемых адресов хост есть.
+    let _ = clean.set_username("");
+    let _ = clean.set_password(None);
+    invalid(ltext!(
+        "errors.connections.credentialsInUrl",
+        "Remove the user name and password from “{{url}}”: credentials do not belong in the address (a proxy with a password is set via the system HTTPS_PROXY)",
+        url = clean.as_str().trim_end_matches('/')
+    ))
 }
 
 pub fn validate_profile(p: &ConnectionProfile) -> AppResult<()> {
@@ -197,6 +268,17 @@ pub fn validate_profile(p: &ConnectionProfile) -> AppResult<()> {
             "The API server address must start with https:// and contain a host"
         )));
     }
+    if has_userinfo(&url) {
+        return Err(credentials_in_url(&url));
+    }
+    if matches!(&p.auth, AuthConfig::ClientCert { certificate_pem } if pem_has_private_key(certificate_pem))
+        || matches!(&p.ca, CaConfig::Pem { pem } if pem_has_private_key(pem))
+    {
+        return Err(invalid(ltext!(
+            "errors.connections.pemContainsKey",
+            "A certificate field contains a private key — put the key into the key field"
+        )));
+    }
     if let AuthConfig::ClientCert { certificate_pem } = &p.auth
         && pem_certificates(certificate_pem).is_err()
     {
@@ -223,6 +305,12 @@ pub fn validate_profile(p: &ConnectionProfile) -> AppResult<()> {
                 url = url
             )));
         }
+    }
+    if let ProxyConfig::Url { url } = &p.proxy
+        && let Ok(u) = url::Url::parse(url.trim())
+        && has_userinfo(&u)
+    {
+        return Err(credentials_in_url(&u));
     }
     if let Some(ns) = p
         .favorite_namespaces
@@ -446,5 +534,135 @@ mod tests {
         for word in ["\"token\":", "password", "clientkey"] {
             assert!(!v.contains(word), "{word}");
         }
+    }
+
+    /// Сертификат и приватный ключ в одном PEM — то, что получается из `cat client.crt client.key`.
+    fn cert_with_key() -> String {
+        format!("{TEST_CERT_PEM}\n{}", include_str!("testdata/test-key.pem"))
+    }
+
+    fn assert_invalid(p: &ConnectionProfile, key: &str) -> AppError {
+        let e = validate_profile(p).unwrap_err();
+        assert_eq!((e.code, e.key.as_str()), (ErrorCode::InvalidInput, key));
+        e
+    }
+
+    #[test]
+    fn private_key_in_a_certificate_field_is_rejected() {
+        for tag in [
+            "PRIVATE KEY",
+            "RSA PRIVATE KEY",
+            "EC PRIVATE KEY",
+            "ENCRYPTED PRIVATE KEY",
+        ] {
+            let combined =
+                format!("{TEST_CERT_PEM}\n-----BEGIN {tag}-----\nAAAA\n-----END {tag}-----\n");
+            let mut p = sample_profile("a");
+            p.auth = AuthConfig::ClientCert {
+                certificate_pem: combined.clone(),
+            };
+            assert_invalid(&p, "errors.connections.pemContainsKey");
+            let mut p = sample_profile("a");
+            p.ca = CaConfig::Pem { pem: combined };
+            assert_invalid(&p, "errors.connections.pemContainsKey");
+        }
+        let mut p = sample_profile("a");
+        p.auth = AuthConfig::ClientCert {
+            certificate_pem: cert_with_key(),
+        };
+        let e = assert_invalid(&p, "errors.connections.pemContainsKey");
+        assert_eq!(
+            e.message,
+            "A certificate field contains a private key — put the key into the key field"
+        );
+        // Ключ раньше сертификата и ключ без сертификата — тоже ключ, а не «неверный PEM».
+        p.auth = AuthConfig::ClientCert {
+            certificate_pem: format!("{}\n{TEST_CERT_PEM}", include_str!("testdata/test-key.pem")),
+        };
+        assert_invalid(&p, "errors.connections.pemContainsKey");
+        p.auth = AuthConfig::ClientCert {
+            certificate_pem: include_str!("testdata/test-key.pem").into(),
+        };
+        assert_invalid(&p, "errors.connections.pemContainsKey");
+        // Обычные сертификаты проходят по-прежнему.
+        p.auth = AuthConfig::ClientCert {
+            certificate_pem: TEST_CERT_PEM.into(),
+        };
+        p.ca = CaConfig::Pem {
+            pem: format!("{TEST_CERT_PEM}\n{TEST_CERT_PEM}"),
+        };
+        assert!(validate_profile(&p).is_ok());
+    }
+
+    #[test]
+    fn credentials_in_urls_are_rejected_without_echoing_them() {
+        for url in [
+            "https://user:s3cr3t@api.c:6443",
+            "https://user@api.c:6443",
+            "https://:s3cr3t@api.c:6443/k8s/clusters/c-x1",
+        ] {
+            let mut p = sample_profile("a");
+            p.api_url = url.into();
+            let e = assert_invalid(&p, "errors.connections.credentialsInUrl");
+            assert!(e.params["url"].starts_with("https://api.c:6443"), "{url}");
+            let all = serde_json::to_string(&e).unwrap();
+            assert!(!all.contains("s3cr3t") && !all.contains('@'), "{all}");
+        }
+        for (url, shown) in [
+            ("http://u:s3cr3t@proxy:3128", "http://proxy:3128"),
+            ("https://u@proxy:3128/", "https://proxy:3128"),
+        ] {
+            let mut p = sample_profile("a");
+            p.proxy = ProxyConfig::Url { url: url.into() };
+            let e = assert_invalid(&p, "errors.connections.credentialsInUrl");
+            assert_eq!(e.params["url"], shown, "{url}");
+            let all = serde_json::to_string(&e).unwrap();
+            assert!(!all.contains("s3cr3t") && !all.contains('@'), "{all}");
+        }
+        let mut p = sample_profile("a");
+        p.api_url = "https://u:s3cr3t@api.c:6443".into();
+        let e = validate_profile(&p).unwrap_err();
+        assert_eq!(
+            e.message,
+            "Remove the user name and password from “https://api.c:6443”: credentials do not belong in the address (a proxy with a password is set via the system HTTPS_PROXY)"
+        );
+        // «@» в пути — не учётные данные; адрес без них проходит.
+        p.api_url = "https://api.c:6443/k8s/clusters/c-x@1".into();
+        p.proxy = ProxyConfig::Url {
+            url: "http://proxy.corp:3128".into(),
+        };
+        assert!(validate_profile(&p).is_ok());
+    }
+
+    #[test]
+    fn strip_private_keys_keeps_only_the_certificates() {
+        let key = include_str!("testdata/test-key.pem");
+        let body = key.lines().nth(1).unwrap();
+        let want = pem_certificates(TEST_CERT_PEM).unwrap();
+        for text in [
+            cert_with_key(),
+            format!("{key}\n{TEST_CERT_PEM}"),
+            format!("{TEST_CERT_PEM}\n-----BEGIN EC PRIVATE KEY-----\nAAAA\n"),
+            format!("{TEST_CERT_PEM}\n-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END"),
+            format!(
+                "{TEST_CERT_PEM}\n{key}\n-----BEGIN ENCRYPTED PRIVATE KEY-----\nBBBB\n-----END ENCRYPTED PRIVATE KEY-----\n"
+            ),
+        ] {
+            assert!(pem_has_private_key(&text), "{text}");
+            let stripped = strip_private_keys(&text);
+            assert!(
+                !stripped.contains("PRIVATE KEY") && !stripped.contains(body),
+                "{stripped}"
+            );
+            assert_eq!(pem_certificates(&stripped).unwrap(), want, "{stripped}");
+        }
+        // Без ключа текст не меняется ни на байт.
+        let plain = format!("# CA\n{TEST_CERT_PEM}\n{TEST_CERT_PEM}");
+        assert!(!pem_has_private_key(&plain));
+        assert_eq!(strip_private_keys(&plain), plain);
+        // Ключ внутри незавершённого блока другого вида тоже находится и вырезается.
+        let nested = format!("-----BEGIN CERTIFICATE-----\nAAAA\n{key}");
+        assert!(pem_has_private_key(&nested));
+        assert!(!strip_private_keys(&nested).contains(body));
     }
 }

@@ -12,7 +12,7 @@ use crate::storage::connections::{
     ConnectionFolder, ConnectionProfile, ConnectionStore, StoreData, check_tree, folder_not_found,
     unique_name, validate_profile,
 };
-use crate::storage::profile::{AuthConfig, CaConfig};
+use crate::storage::profile::{AuthConfig, CaConfig, strip_private_keys};
 use crate::storage::tree::TreeItemKind;
 
 pub const EXCHANGE_FORMAT: &str = "glafira-kubernetes-connections";
@@ -130,6 +130,9 @@ pub fn build_export(
             })
         })
         .collect::<AppResult<Vec<_>>>()?;
+    // Профили читаются с диска без повторной проверки (файл могли править руками): приватный
+    // ключ из PEM-полей в файл обмена не попадает, сертификаты остаются.
+    let connections = connections.into_iter().map(without_private_keys).collect();
 
     Ok(ExchangeFileOut {
         format: EXCHANGE_FORMAT,
@@ -139,6 +142,17 @@ pub fn build_export(
         folders,
         connections,
     })
+}
+
+/// Убирает блоки с приватным ключом из `certificate_pem` и `ca.pem` (спец. §5.1: секреты — только в keychain).
+fn without_private_keys(mut c: ExportedConnection) -> ExportedConnection {
+    if let AuthConfig::ClientCert { certificate_pem } = &mut c.profile.auth {
+        *certificate_pem = strip_private_keys(certificate_pem);
+    }
+    if let CaConfig::Pem { pem } = &mut c.profile.ca {
+        *pem = strip_private_keys(pem);
+    }
+    c
 }
 
 /// Подключение файла, которое не будет импортировано, и причина.
@@ -535,7 +549,7 @@ mod tests {
     use super::*;
     use crate::secrets::MemoryStore;
     use crate::storage::connections::sample_profile;
-    use crate::storage::profile::TEST_CERT_PEM;
+    use crate::storage::profile::{TEST_CERT_PEM, pem_certificates};
 
     fn store() -> (tempfile::TempDir, ConnectionStore) {
         let d = tempfile::tempdir().unwrap();
@@ -1062,5 +1076,50 @@ mod tests {
         assert_eq!(sort_f(p.next.folders.clone()), sort_f(s.list_folders()));
         assert_eq!(sort_c(p.next.connections.clone()), sort_c(s.list()));
         let _ = (ift, k1);
+    }
+
+    #[test]
+    fn private_keys_in_stored_pem_fields_never_reach_the_export() {
+        let key = include_str!("testdata/test-key.pem");
+        let mut p = sample_profile("k");
+        p.auth = AuthConfig::ClientCert {
+            certificate_pem: format!("{TEST_CERT_PEM}\n{key}"),
+        };
+        p.ca = CaConfig::Pem {
+            pem: format!("{key}\n{TEST_CERT_PEM}"),
+        };
+        // Профиль, записанный в обход проверки (файл правили руками или писала старая версия).
+        let dir = tempfile::tempdir().unwrap();
+        let stored = serde_json::json!({
+            "schemaVersion": 1,
+            "folders": [],
+            "connections": [serde_json::to_value(&p).unwrap()],
+        });
+        std::fs::write(
+            dir.path().join("connections.json"),
+            serde_json::to_vec(&stored).unwrap(),
+        )
+        .unwrap();
+        let s = ConnectionStore::open(dir.path()).unwrap();
+        assert_eq!(s.get("k").unwrap().auth, p.auth, "в хранилище ключ остался");
+
+        let out = build_export(&s, &MemoryStore::default(), None, "1", "now").unwrap();
+        let text = serde_json::to_string(&out).unwrap();
+        assert!(!text.contains("PRIVATE KEY"), "{text}");
+        assert!(!text.contains(key.lines().nth(1).unwrap()), "{text}");
+        let exported = &out.connections[0].profile;
+        let AuthConfig::ClientCert { certificate_pem } = &exported.auth else {
+            panic!("clientCert")
+        };
+        let CaConfig::Pem { pem } = &exported.ca else {
+            panic!("pem")
+        };
+        let want = pem_certificates(TEST_CERT_PEM).unwrap();
+        assert_eq!(pem_certificates(certificate_pem).unwrap(), want);
+        assert_eq!(pem_certificates(pem).unwrap(), want);
+        // Результат экспорта проходит проверку при импорте.
+        let parsed = parse_exchange(&serde_json::to_vec(&out).unwrap()).unwrap();
+        assert!(parsed.skipped.is_empty());
+        assert_eq!(parsed.connections.len(), 1);
     }
 }
