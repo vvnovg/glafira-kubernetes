@@ -34,3 +34,10 @@
 | `SECURITY.md` | `SECURITY.md` | `8bbd0bd` | адаптирован: имя продукта и товарные знаки |
 | `CONTRIBUTING.md` | `CONTRIBUTING.md` | `8bbd0bd` | адаптирован: имя продукта и товарные знаки |
 | `src-tauri/.gitignore` | `src-tauri/.gitignore` | `8bbd0bd` | как есть |
+| `src-tauri/src/i18n.rs` | `src-tauri/src/i18n.rs` | `8bbd0bd` | как есть |
+| `src-tauri/src/sync.rs` | `src-tauri/src/sync.rs` | `8bbd0bd` | как есть |
+| `src-tauri/src/storage/fs.rs` | `src-tauri/src/storage/fs.rs` | `8bbd0bd` | как есть |
+| `src-tauri/src/logging.rs` | `src-tauri/src/logging.rs` | `8bbd0bd` | адаптирован: комментарий |
+| `src-tauri/src/dock_name.rs` | `src-tauri/src/dock_name.rs` | `8bbd0bd` | адаптирован: комментарий |
+| `src-tauri/src/secrets.rs` | `src-tauri/src/secrets.rs` | `8bbd0bd` | адаптирован: поля секретов подключения |
+| `src-tauri/src/error.rs` | `src-tauri/src/error.rs` | `8bbd0bd` | адаптирован: коды Kubernetes, без librdkafka |
