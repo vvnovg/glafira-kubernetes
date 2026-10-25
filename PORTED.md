@@ -50,3 +50,7 @@
 | `docs/admin/policy.json` | `docs/admin/policy.json` | `8bbd0bd` | адаптирован: идентификаторы, allowInsecureTls |
 | `docs/admin/policy.mobileconfig` | `docs/admin/policy.mobileconfig` | `8bbd0bd` | адаптирован: идентификаторы, allowInsecureTls |
 | `docs/admin/policy.reg` | `docs/admin/policy.reg` | `8bbd0bd` | адаптирован: идентификаторы, allowInsecureTls |
+| `src-tauri/src/storage/connections.rs` | `src-tauri/src/storage/connections.rs` | `8bbd0bd` | адаптирован: профиль вынесен в profile.rs, тесты под Kubernetes |
+| `src-tauri/src/storage/tree.rs` | `src-tauri/src/storage/tree.rs` | `8bbd0bd` | как есть |
+| `src-tauri/src/storage/exchange.rs` | `src-tauri/src/storage/exchange.rs` | `8bbd0bd` | адаптирован: формат glafira-kubernetes-connections, флаги секретов, запрет insecure политикой |
+| `src-tauri/src/commands/folders.rs` | `src-tauri/src/commands/folders.rs` | `8bbd0bd` | адаптирован: политика в импорте, без сессий Kafka |

@@ -38,6 +38,14 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::folders::list_folders,
+            commands::folders::create_folder,
+            commands::folders::rename_folder,
+            commands::folders::delete_folder,
+            commands::folders::move_items,
+            commands::folders::export_connections,
+            commands::folders::preview_import,
+            commands::folders::apply_import,
             commands::settings::get_language_settings,
             commands::settings::set_language,
             commands::settings::get_policy_status,

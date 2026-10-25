@@ -1,3 +1,4 @@
+pub mod folders;
 pub mod settings;
 
 use crate::error::{AppResult, ErrorCode};
