@@ -154,11 +154,16 @@ fn import_from_file(
     if !apply {
         return Ok(plan_import(&st.connections.snapshot(), &parsed, &opts)?.preview);
     }
-    st.connections.update(|data| {
+    let preview = st.connections.update(|data| {
         let plan = plan_import(data, &parsed, &opts)?;
         *data = plan.next;
         Ok(plan.preview)
-    })
+    })?;
+    // Обновлённые подключения переподключатся с новым профилем — как при сохранении формы.
+    for item in &preview.updated {
+        st.evict_connection(&item.id);
+    }
+    Ok(preview)
 }
 
 #[cfg(test)]

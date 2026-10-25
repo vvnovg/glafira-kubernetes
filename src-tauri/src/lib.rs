@@ -5,6 +5,7 @@ mod dock_name;
 pub mod error;
 pub mod k8s;
 pub mod logging;
+pub mod platform;
 pub mod policy;
 pub mod product;
 pub mod secrets;
