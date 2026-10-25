@@ -1448,6 +1448,7 @@ name = "glafira-kubernetes"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "dirs",
  "getrandom 0.4.3",
  "http",
  "http-body-util",

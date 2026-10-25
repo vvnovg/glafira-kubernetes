@@ -85,7 +85,7 @@ fn token(p: &ConnectionProfile, secrets: &dyn SecretStore) -> AppResult<String> 
 
 /// `kube::Config` профиля. Таймаут ответа не задаётся: он оборвал бы долгие потоки (логи, watch);
 /// таймаут запроса ставит вызывающий код (`request_timeout`). У exec-плагина учётных данных здесь
-/// нет: их выдаёт запуск плагина (задача следующего шага), конфигурация — без них.
+/// нет: их выдаёт запуск плагина, и их подставляет `apply_exec_credential`.
 pub fn build_kube_config(
     p: &ConnectionProfile,
     secrets: &dyn SecretStore,
@@ -167,6 +167,24 @@ pub fn build_kube_config(
         http::HeaderValue::from_static(concat!("glafira-kubernetes/", env!("CARGO_PKG_VERSION"))),
     ));
     Ok(c)
+}
+
+/// Учётные данные, которые выдал exec-плагин: клиентский сертификат или токен.
+pub fn apply_exec_credential(c: &mut kube::Config, cred: &crate::auth::exec::PluginCredential) {
+    use secrecy::ExposeSecret;
+    c.auth_info = match (&cred.client_certificate_pem, &cred.client_key_pem) {
+        (Some(cert), Some(key)) => AuthInfo {
+            client_certificate_data: Some(STANDARD.encode(cert.as_bytes())),
+            client_key_data: Some(SecretString::from(
+                STANDARD.encode(key.expose_secret().as_bytes()),
+            )),
+            ..Default::default()
+        },
+        _ => AuthInfo {
+            token: cred.token.clone(),
+            ..Default::default()
+        },
+    };
 }
 
 /// Таймаут одного запроса к API-серверу.
@@ -386,6 +404,30 @@ mod tests {
                 .to_lowercase()
                 .contains("authorization: bearer sha256~abc")
         );
+    }
+
+    #[tokio::test]
+    async fn exec_profile_gets_credentials_from_the_plugin() {
+        let mut p = sample_profile("a");
+        p.auth = AuthConfig::Exec(crate::storage::profile::sample_exec());
+        let mut c = build_kube_config(&p, &MemoryStore::default(), &no_env).unwrap();
+        assert!(c.auth_info.token.is_none() && c.auth_info.client_key_data.is_none());
+        let mut cred = crate::auth::exec::PluginCredential {
+            token: Some(SecretString::from("t-exec")),
+            client_certificate_pem: None,
+            client_key_pem: None,
+            expires_at: None,
+        };
+        apply_exec_credential(&mut c, &cred);
+        assert_eq!(
+            c.auth_info.token.as_ref().unwrap().expose_secret(),
+            "t-exec"
+        );
+        cred.client_certificate_pem = Some(TEST_CERT_PEM.into());
+        cred.client_key_pem = Some(SecretString::from(TEST_KEY_PEM));
+        apply_exec_credential(&mut c, &cred);
+        assert!(c.auth_info.token.is_none(), "сертификат вместо токена");
+        assert!(kube::Client::try_from(c).is_ok());
     }
 
     #[test]

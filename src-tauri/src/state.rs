@@ -1,10 +1,12 @@
 use std::path::Path;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::k8s::pool::{ClientPool, Connected, open};
 use crate::secrets::SecretStore;
 use crate::storage::connections::ConnectionStore;
+use crate::storage::profile::AuthConfig;
 
 /// Общее состояние приложения: хранилища, политика и подключённые кластеры.
 /// Клонируется дёшево (всё за `Arc`).
@@ -15,6 +17,8 @@ pub struct AppState {
     pub policy: Arc<crate::policy::Policy>,
     pub settings: Arc<crate::settings::SettingsStore>,
     pub pool: Arc<ClientPool>,
+    /// Идущие входы: через браузер и запуском exec-плагина.
+    pub logins: Arc<crate::auth::Logins>,
 }
 
 impl AppState {
@@ -25,6 +29,7 @@ impl AppState {
             policy: Arc::new(crate::policy::Policy::default()),
             settings: Arc::new(crate::settings::SettingsStore::open(data_dir)),
             pool: Arc::new(ClientPool::default()),
+            logins: Arc::new(crate::auth::Logins::default()),
         })
     }
 
@@ -34,16 +39,31 @@ impl AppState {
         self
     }
 
-    /// Клиент подключения: из пула или новое подключение (`fresh` — всегда новое).
+    /// Клиент подключения: из пула или новое подключение (`fresh` — всегда новое; истекающие
+    /// учётные данные exec-плагина — тоже). Подключения одного профиля идут по очереди, ожидание
+    /// exec-плагина отменяется так же, как вход через браузер (`logins`).
     pub async fn connected(&self, id: &str, fresh: bool) -> AppResult<Arc<Connected>> {
+        let _turn = self.pool.connect_lock(id).await;
         if fresh {
             self.pool.evict(id);
-        } else if let Some(c) = self.pool.get(id) {
+        } else if let Some(c) = self.pool.get(id)
+            && !c.expiring(SystemTime::now())
+        {
             return Ok(c);
         }
         let generation = self.pool.generation(id);
         let profile = self.connections.get(id)?;
-        let c = Arc::new(open(profile, self.secrets.clone()).await?);
+        let login = matches!(profile.auth, AuthConfig::Exec(_)).then(|| self.logins.begin(id));
+        let (n, cancel) = match login {
+            Some((n, rx)) => (Some(n), rx),
+            // Не exec-плагин: `open` сигнал отмены не ждёт.
+            None => (None, tokio::sync::oneshot::channel().1),
+        };
+        let result = open(profile, self.secrets.clone(), cancel).await;
+        if let Some(n) = n {
+            self.logins.finish(id, n);
+        }
+        let c = Arc::new(result?);
         self.pool.insert_if_current(id, generation, c.clone());
         Ok(c)
     }

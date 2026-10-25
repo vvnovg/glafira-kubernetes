@@ -2,14 +2,16 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
+
+use tokio::sync::oneshot;
 
 use crate::error::{AppError, AppResult};
 use crate::k8s::cluster::{ConnectionInfo, probe};
-use crate::k8s::config::{build_kube_config, process_env, request_timeout};
+use crate::k8s::config::{apply_exec_credential, build_kube_config, process_env, request_timeout};
 use crate::k8s::errors::from_kube;
 use crate::secrets::SecretStore;
-use crate::storage::profile::ConnectionProfile;
+use crate::storage::profile::{AuthConfig, ConnectionProfile};
 use crate::sync::MutexExt;
 
 pub struct Connected {
@@ -17,6 +19,16 @@ pub struct Connected {
     pub info: ConnectionInfo,
     /// Таймаут одного запроса (из профиля).
     pub timeout: Duration,
+    /// Когда истекают учётные данные exec-плагина (`expirationTimestamp`).
+    pub expires_at: Option<SystemTime>,
+}
+
+impl Connected {
+    /// Учётные данные истекают в ближайшую минуту: пора запустить плагин снова.
+    pub fn expiring(&self, now: SystemTime) -> bool {
+        self.expires_at
+            .is_some_and(|t| now + Duration::from_secs(60) >= t)
+    }
 }
 
 /// Клиенты подключений. Поколение растёт при каждом сбросе: клиент, который подключался
@@ -24,6 +36,9 @@ pub struct Connected {
 #[derive(Default)]
 pub struct ClientPool {
     inner: Mutex<PoolInner>,
+    /// По замку на подключение: одновременные подключения ждут первое, а не запускают
+    /// exec-плагин ещё раз.
+    connecting: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 #[derive(Default)]
@@ -56,6 +71,17 @@ impl ClientPool {
         true
     }
 
+    /// Замок подключения `id` на время подключения.
+    pub async fn connect_lock(&self, id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = self
+            .connecting
+            .lock_safe()
+            .entry(id.to_string())
+            .or_default()
+            .clone();
+        lock.lock_owned().await
+    }
+
     /// Сбрасывает клиент подключения. `true` — клиент был.
     pub fn evict(&self, id: &str) -> bool {
         let mut inner = self.inner.lock_safe();
@@ -64,23 +90,34 @@ impl ClientPool {
     }
 }
 
-/// Новое подключение: клиент из профиля (keychain — на blocking-потоке) и `probe`.
+/// Новое подключение: клиент из профиля (keychain — на blocking-потоке), учётные данные
+/// exec-плагина (`cancel` прерывает его ожидание) и `probe`.
 pub async fn open(
     profile: ConnectionProfile,
     secrets: Arc<dyn SecretStore>,
+    cancel: oneshot::Receiver<()>,
 ) -> AppResult<Connected> {
     let timeout = request_timeout(&profile);
-    let config = tokio::task::spawn_blocking(move || {
-        build_kube_config(&profile, secrets.as_ref(), &process_env)
-    })
-    .await
-    .map_err(|e| AppError::internal_with(e.to_string()))??;
+    let p = profile.clone();
+    let mut config =
+        tokio::task::spawn_blocking(move || build_kube_config(&p, secrets.as_ref(), &process_env))
+            .await
+            .map_err(|e| AppError::internal_with(e.to_string()))??;
+    let mut expires_at = None;
+    if matches!(profile.auth, AuthConfig::Exec(_)) {
+        let cred =
+            crate::auth::exec::credential_for(&profile, cancel, crate::auth::oauth::LOGIN_TIMEOUT)
+                .await?;
+        expires_at = cred.expires_at;
+        apply_exec_credential(&mut config, &cred);
+    }
     let client = kube::Client::try_from(config).map_err(|e| from_kube(&e))?;
     let info = probe(&client, timeout).await?;
     Ok(Connected {
         client,
         info,
         timeout,
+        expires_at,
     })
 }
 
@@ -102,6 +139,7 @@ mod tests {
                 capabilities: Capabilities::default(),
             },
             timeout: Duration::from_secs(1),
+            expires_at: None,
         })
     }
 
@@ -125,10 +163,56 @@ mod tests {
     #[tokio::test]
     async fn open_reports_missing_token_without_network() {
         let p = crate::storage::profile::sample_profile("a");
-        let e = open(p, Arc::new(crate::secrets::MemoryStore::default()))
+        let (_keep, cancel) = oneshot::channel();
+        let e = open(p, Arc::new(crate::secrets::MemoryStore::default()), cancel)
             .await
             .err()
             .unwrap();
         assert_eq!(e.key, "errors.connections.tokenMissing");
+    }
+
+    #[tokio::test]
+    async fn unapproved_exec_plugin_is_not_started() {
+        let mut p = crate::storage::profile::sample_profile("a");
+        p.auth = AuthConfig::Exec(crate::storage::profile::sample_exec());
+        let (_keep, cancel) = oneshot::channel();
+        let e = open(p, Arc::new(crate::secrets::MemoryStore::default()), cancel)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(e.key, "errors.exec.notApproved");
+    }
+
+    #[tokio::test]
+    async fn exec_credentials_expire_a_minute_early() {
+        let (client, _) = crate::k8s::testing::mock_client(|_| (200, serde_json::json!({})));
+        let now = SystemTime::now();
+        let mut c = Connected {
+            client,
+            info: connected().info.clone(),
+            timeout: Duration::from_secs(1),
+            expires_at: None,
+        };
+        assert!(!c.expiring(now), "токен без срока");
+        c.expires_at = Some(now + Duration::from_secs(30));
+        assert!(c.expiring(now));
+        c.expires_at = Some(now + Duration::from_secs(600));
+        assert!(!c.expiring(now));
+    }
+
+    #[tokio::test]
+    async fn connect_lock_serializes_connections_of_one_profile() {
+        let pool = ClientPool::default();
+        let first = pool.connect_lock("a").await;
+        let other = tokio::time::timeout(Duration::from_millis(50), pool.connect_lock("b")).await;
+        assert!(other.is_ok(), "другое подключение не ждёт");
+        let same = tokio::time::timeout(Duration::from_millis(50), pool.connect_lock("a")).await;
+        assert!(same.is_err(), "второе подключение того же профиля ждёт");
+        drop(first);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), pool.connect_lock("a"))
+                .await
+                .is_ok()
+        );
     }
 }

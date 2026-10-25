@@ -1,13 +1,22 @@
 //! Exec-плагины kubeconfig (спец. §5.2): список разрешённых команд, путь к команде, строка запуска
-//! и её подтверждение человеком. Glafira запускает только команды из списка, по абсолютному пути
-//! и без оболочки.
+//! и её подтверждение человеком, запуск и учётные данные. Glafira запускает только команды из
+//! списка, по абсолютному пути и без оболочки; плагин запускает Glafira, а не `kube`: в `kube`
+//! запуск блокирующий, без таймаута и отмены, а текст ошибки содержит переменные окружения.
 
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::{Duration, SystemTime};
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use secrecy::SecretString;
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use tokio::sync::oneshot;
 
+use crate::error::{AppError, AppResult, ErrorCode};
 use crate::i18n::LocalizedText;
-use crate::storage::profile::ExecAuth;
+use crate::storage::profile::{AuthConfig, CaConfig, ConnectionProfile, ExecAuth, ProxyConfig};
 
 /// Разрешённые команды: имя исполняемого файла и первые позиционные аргументы
 /// (пустой список — любые аргументы).
@@ -319,6 +328,279 @@ pub fn resolve_command(
         }
         candidates.into_iter().find(|c| is_file(c))
     })
+}
+
+/// Учётные данные от плагина: токен или клиентский сертификат и срок действия.
+#[derive(Debug, Clone)]
+pub struct PluginCredential {
+    pub token: Option<SecretString>,
+    pub client_certificate_pem: Option<String>,
+    pub client_key_pem: Option<SecretString>,
+    /// `expirationTimestamp`: до этого времени Glafira не запускает плагин снова.
+    pub expires_at: Option<SystemTime>,
+}
+
+#[derive(Deserialize)]
+struct CredentialOut {
+    status: Option<CredentialStatus>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CredentialStatus {
+    token: Option<String>,
+    client_certificate_data: Option<String>,
+    client_key_data: Option<String>,
+    expiration_timestamp: Option<String>,
+}
+
+/// Разбор `ExecCredential` из вывода плагина. Ошибка — причина без содержимого вывода.
+pub fn parse_credential(stdout: &[u8]) -> Result<PluginCredential, String> {
+    let out: CredentialOut = serde_json::from_slice(stdout).map_err(|e| e.to_string())?;
+    let s = out.status.ok_or("no status in ExecCredential")?;
+    let expires_at = s
+        .expiration_timestamp
+        .map(|ts| {
+            time::OffsetDateTime::parse(&ts, &time::format_description::well_known::Rfc3339)
+                .map(SystemTime::from)
+                .map_err(|e| format!("expirationTimestamp: {e}"))
+        })
+        .transpose()?;
+    let token = s
+        .token
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+    let cert = s.client_certificate_data.filter(|c| !c.trim().is_empty());
+    let key = s.client_key_data.filter(|k| !k.trim().is_empty());
+    if token.is_none() && (cert.is_none() || key.is_none()) {
+        return Err("neither token nor clientCertificateData and clientKeyData".into());
+    }
+    Ok(PluginCredential {
+        token: token.map(SecretString::from),
+        client_certificate_pem: cert,
+        client_key_pem: key.map(SecretString::from),
+        expires_at,
+    })
+}
+
+/// Вывод плагина для сообщения об ошибке: без токенов (JWT, `sha256~…`, `Bearer …`) и значений
+/// переменных, похожих на секреты; не длиннее 2000 символов (хвост — там обычно причина).
+pub fn mask_output(text: &str, secrets: &[&str]) -> String {
+    let mut out = text.to_string();
+    for s in secrets.iter().filter(|s| s.len() >= 4) {
+        out = out.replace(s, "***");
+    }
+    let jwt = regex::Regex::new(r"eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*")
+        .expect("valid regex");
+    let sha = regex::Regex::new(r"sha256~[A-Za-z0-9_-]+").expect("valid regex");
+    let bearer = regex::Regex::new(r"(?i)(bearer\s+)\S+").expect("valid regex");
+    out = jwt.replace_all(&out, "***").into_owned();
+    out = sha.replace_all(&out, "sha256~***").into_owned();
+    out = bearer.replace_all(&out, "${1}***").into_owned();
+    let chars: Vec<char> = out.trim().chars().collect();
+    if chars.len() > 2000 {
+        format!(
+            "…{}",
+            chars[chars.len() - 2000..].iter().collect::<String>()
+        )
+    } else {
+        chars.into_iter().collect()
+    }
+}
+
+/// `KUBERNETES_EXEC_INFO` для плагина: версия API, `interactive: false` (терминала у приложения
+/// нет) и, если `provideClusterInfo`, адрес, CA и прокси кластера.
+pub fn exec_info(e: &ExecAuth, p: &ConnectionProfile) -> String {
+    let mut spec = serde_json::json!({"interactive": false});
+    if e.provide_cluster_info {
+        let mut cluster = serde_json::json!({"server": p.api_url});
+        match &p.ca {
+            CaConfig::Pem { pem } => {
+                cluster["certificate-authority-data"] = STANDARD.encode(pem).into();
+            }
+            CaConfig::Insecure => cluster["insecure-skip-tls-verify"] = true.into(),
+            CaConfig::System => {}
+        }
+        if let Some(name) = &p.tls_server_name {
+            cluster["tls-server-name"] = name.clone().into();
+        }
+        if let ProxyConfig::Url { url } = &p.proxy {
+            cluster["proxy-url"] = url.clone().into();
+        }
+        spec["cluster"] = cluster;
+    }
+    serde_json::json!({"apiVersion": e.api_version, "kind": "ExecCredential", "spec": spec})
+        .to_string()
+}
+
+const PATH_MARK: &str = "__GLAFIRA_PATH__";
+
+/// PATH оболочки входа `shell` (`-l -c`): у приложения, запущенного из Dock, PATH короткий.
+pub async fn shell_path(shell: &Path, limit: Duration) -> Option<String> {
+    let mut cmd = tokio::process::Command::new(shell);
+    cmd.args([
+        "-l",
+        "-c",
+        r#"printf '__GLAFIRA_PATH__%s__GLAFIRA_PATH__' "$PATH""#,
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .kill_on_drop(true);
+    let out = tokio::time::timeout(limit, cmd.output()).await.ok()?.ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let start = text.find(PATH_MARK)? + PATH_MARK.len();
+    let end = start + text[start..].find(PATH_MARK)?;
+    Some(text[start..end].to_string()).filter(|p| !p.is_empty())
+}
+
+static LOGIN_PATH: tokio::sync::OnceCell<Option<String>> = tokio::sync::OnceCell::const_new();
+
+/// PATH оболочки входа пользователя (один раз за запуск); на Windows и при ошибке — `None`.
+pub async fn login_shell_path() -> Option<String> {
+    LOGIN_PATH
+        .get_or_init(|| async {
+            if cfg!(windows) {
+                return None;
+            }
+            let shell = std::env::var("SHELL")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "/bin/sh".into());
+            shell_path(Path::new(&shell), Duration::from_secs(5)).await
+        })
+        .await
+        .clone()
+}
+
+/// Каталоги поиска команд на этой машине: PATH оболочки входа (или процесса) и стандартные.
+pub async fn command_dirs() -> Vec<PathBuf> {
+    let path = match login_shell_path().await {
+        Some(p) => Some(p),
+        None => std::env::var("PATH").ok(),
+    };
+    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    search_dirs(
+        path.as_deref(),
+        standard_dirs(dirs::home_dir().as_deref(), local.as_deref()),
+    )
+}
+
+/// PATH для процесса плагина: каталог самой команды и каталоги поиска (`kubectl oidc-login`
+/// ищет `kubectl-oidc_login` в PATH, `kubelogin` — `az`).
+fn plugin_path(command: &Path, dirs: &[PathBuf]) -> Option<String> {
+    let own = command.parent().map(Path::to_path_buf);
+    let all: Vec<&PathBuf> = own.iter().chain(dirs).collect();
+    std::env::join_paths(all)
+        .ok()
+        .map(|p| p.to_string_lossy().to_string())
+}
+
+/// Запускает плагин: без оболочки, `stdin` закрыт, не дольше `limit`; `cancel` прерывает
+/// ожидание (как у входа через браузер). Процесс завершается вместе с ожиданием.
+pub async fn run(
+    e: &ExecAuth,
+    exec_info: &str,
+    path_env: Option<&str>,
+    cancel: oneshot::Receiver<()>,
+    limit: Duration,
+) -> AppResult<PluginCredential> {
+    check_allowed(&e.command, &e.args)
+        .map_err(|t| AppError::localized(ErrorCode::AuthFailed, t))?;
+    let name = command_name(&e.command);
+    let mut cmd = tokio::process::Command::new(&e.command);
+    cmd.args(&e.args)
+        .envs(e.env.iter().map(|v| (&v.name, &v.value)))
+        .env("KUBERNETES_EXEC_INFO", exec_info)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    if let Some(p) = path_env {
+        cmd.env("PATH", p);
+    }
+    #[cfg(windows)]
+    {
+        // CREATE_NO_WINDOW: без мелькающего окна консоли.
+        cmd.creation_flags(0x0800_0000);
+    }
+    let start_error = |err: std::io::Error| {
+        app_err!(
+            ErrorCode::AuthFailed,
+            "errors.exec.start",
+            "Cannot start the exec plugin {{command}}: {{error}}",
+            command = name,
+            error = err
+        )
+    };
+    let child = cmd.spawn().map_err(start_error)?;
+    let output = tokio::select! {
+        out = child.wait_with_output() => out.map_err(start_error)?,
+        _ = cancel => return Err(crate::auth::callback::cancelled()),
+        _ = tokio::time::sleep(limit) => {
+            return Err(app_err!(
+                ErrorCode::Timeout,
+                "errors.exec.timeout",
+                "The exec plugin {{command}} did not finish in {{seconds}} s",
+                command = name,
+                seconds = limit.as_secs()
+            ));
+        }
+    };
+    let secrets: Vec<&str> = e
+        .env
+        .iter()
+        .filter(|v| is_secret_name(&v.name))
+        .map(|v| v.value.as_str())
+        .collect();
+    if !output.status.success() {
+        let code = output
+            .status
+            .code()
+            .map_or_else(|| "—".to_string(), |c| c.to_string());
+        return Err(app_err!(
+            ErrorCode::AuthFailed,
+            "errors.exec.failed",
+            "The exec plugin {{command}} failed (exit code {{code}})",
+            command = name,
+            code = code
+        )
+        .with_details(mask_output(
+            &String::from_utf8_lossy(&output.stderr),
+            &secrets,
+        )));
+    }
+    parse_credential(&output.stdout).map_err(|reason| {
+        app_err!(
+            ErrorCode::AuthFailed,
+            "errors.exec.badOutput",
+            "The exec plugin {{command}} returned no credentials",
+            command = name
+        )
+        .with_details(reason)
+    })
+}
+
+/// Учётные данные подключения с exec-плагином: только по подтверждённой строке запуска
+/// (спец. §5.2). Политику проверяет вызывающий код (`ensure_allowed`).
+pub async fn credential_for(
+    p: &ConnectionProfile,
+    cancel: oneshot::Receiver<()>,
+    limit: Duration,
+) -> AppResult<PluginCredential> {
+    let AuthConfig::Exec(e) = &p.auth else {
+        return Err(AppError::internal_with("not an exec plugin connection"));
+    };
+    if !is_approved(e) {
+        return Err(app_err!(
+            ErrorCode::AuthFailed,
+            "errors.exec.notApproved",
+            "Confirm the exec plugin launch line in the connection settings"
+        ));
+    }
+    let dirs = command_dirs().await;
+    let path = plugin_path(Path::new(&e.command), &dirs);
+    run(e, &exec_info(e, p), path.as_deref(), cancel, limit).await
 }
 
 #[cfg(test)]
@@ -699,5 +981,264 @@ mod tests {
             None
         );
         assert_eq!(resolve_command(" ", None, &dirs, &is_file), None);
+    }
+
+    #[test]
+    fn credentials_from_plugin_output() {
+        use secrecy::ExposeSecret;
+        let c = parse_credential(
+            br#"{"apiVersion":"client.authentication.k8s.io/v1","kind":"ExecCredential",
+                "status":{"token":" t1 ","expirationTimestamp":"2030-01-01T00:00:00Z"}}"#,
+        )
+        .unwrap();
+        assert_eq!(c.token.unwrap().expose_secret(), "t1");
+        assert_eq!(
+            c.expires_at.unwrap(),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1_893_456_000)
+        );
+        let c = parse_credential(
+            br#"{"status":{"clientCertificateData":"CERT","clientKeyData":"KEY"}}"#,
+        )
+        .unwrap();
+        assert!(c.token.is_none() && c.expires_at.is_none());
+        assert_eq!(c.client_certificate_pem.as_deref(), Some("CERT"));
+        for bad in [
+            &b"not json"[..],
+            br#"{"kind":"ExecCredential"}"#,
+            br#"{"status":{"token":""}}"#,
+            br#"{"status":{"clientCertificateData":"CERT"}}"#,
+            br#"{"status":{"token":"t","expirationTimestamp":"tomorrow"}}"#,
+        ] {
+            assert!(
+                parse_credential(bad).is_err(),
+                "{}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+    }
+
+    #[test]
+    fn plugin_output_is_masked() {
+        let text = "error: token eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1In0.c2lnbmF0dXJl expired\n\
+                    Authorization: Bearer abc.def\nsha256~Zm9vYmFy\nsecret=hunter22";
+        let m = mask_output(text, &["hunter22"]);
+        for leaked in ["eyJhbGci", "abc.def", "Zm9vYmFy", "hunter22"] {
+            assert!(!m.contains(leaked), "{leaked}: {m}");
+        }
+        assert!(m.contains("Bearer ***") && m.contains("sha256~***"), "{m}");
+        let long = "x".repeat(5000);
+        assert_eq!(mask_output(&long, &[]).chars().count(), 2001);
+    }
+
+    #[test]
+    fn exec_info_has_cluster_only_on_request() {
+        let mut p = crate::storage::profile::sample_profile("a");
+        let mut e = sample_exec();
+        let v: serde_json::Value = serde_json::from_str(&exec_info(&e, &p)).unwrap();
+        assert_eq!(v["kind"], "ExecCredential");
+        assert_eq!(v["apiVersion"], "client.authentication.k8s.io/v1");
+        assert_eq!(v["spec"]["interactive"], false);
+        assert!(v["spec"]["cluster"].is_null());
+        e.provide_cluster_info = true;
+        p.ca = CaConfig::Pem { pem: "PEM".into() };
+        let v: serde_json::Value = serde_json::from_str(&exec_info(&e, &p)).unwrap();
+        assert_eq!(
+            v["spec"]["cluster"]["server"],
+            "https://api.dev.example.com:6443"
+        );
+        assert_eq!(v["spec"]["cluster"]["certificate-authority-data"], "UEVN");
+    }
+
+    /// Плагины в тестах — скрипт `sh` с именем `kubectl` (`oidc-login get-token <режим>`).
+    #[cfg(unix)]
+    mod running {
+        use super::*;
+
+        const SCRIPT: &str = r#"#!/bin/sh
+case "$3" in
+  ok) printf '{"kind":"ExecCredential","status":{"token":"tok-%s","expirationTimestamp":"2030-01-01T00:00:00Z"}}' "$TEAM" ;;
+  info) printf '%s' "$KUBERNETES_EXEC_INFO" > "$INFO_FILE"; printf '{"status":{"token":"t"}}' ;;
+  path) printf '{"status":{"token":"%s"}}' "$PATH" ;;
+  fail) echo "refresh token eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1In0.c2lnbmF0dXJl expired, key $AWS_SECRET_ACCESS_KEY" >&2; exit 3 ;;
+  slow) sleep 30 ;;
+  garbage) echo "not json" ;;
+esac
+"#;
+
+        fn plugin(dir: &Path, mode: &str) -> ExecAuth {
+            use std::os::unix::fs::PermissionsExt;
+            let path = dir.join("kubectl");
+            std::fs::write(&path, SCRIPT).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            ExecAuth {
+                command: path.display().to_string(),
+                args: vec!["oidc-login".into(), "get-token".into(), mode.into()],
+                env: vec![
+                    ExecEnv {
+                        name: "TEAM".into(),
+                        value: "a".into(),
+                    },
+                    ExecEnv {
+                        name: "AWS_SECRET_ACCESS_KEY".into(),
+                        value: "s3cr3t-value".into(),
+                    },
+                ],
+                ..sample_exec()
+            }
+        }
+
+        async fn go(e: &ExecAuth, limit: Duration) -> AppResult<PluginCredential> {
+            let (_keep, cancel) = oneshot::channel();
+            run(e, "{}", None, cancel, limit).await
+        }
+
+        #[tokio::test]
+        async fn token_env_and_expiry() {
+            use secrecy::ExposeSecret;
+            let dir = tempfile::tempdir().unwrap();
+            let c = go(&plugin(dir.path(), "ok"), Duration::from_secs(10))
+                .await
+                .unwrap();
+            assert_eq!(c.token.unwrap().expose_secret(), "tok-a");
+            assert!(c.expires_at.is_some());
+        }
+
+        #[tokio::test]
+        async fn exec_info_and_path_reach_the_plugin() {
+            use secrecy::ExposeSecret;
+            let dir = tempfile::tempdir().unwrap();
+            let info_file = dir.path().join("info.json");
+            let mut e = plugin(dir.path(), "info");
+            e.env.push(ExecEnv {
+                name: "INFO_FILE".into(),
+                value: info_file.display().to_string(),
+            });
+            let (_keep, cancel) = oneshot::channel();
+            run(
+                &e,
+                r#"{"kind":"ExecCredential"}"#,
+                None,
+                cancel,
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                std::fs::read_to_string(&info_file).unwrap(),
+                r#"{"kind":"ExecCredential"}"#
+            );
+            let e = plugin(dir.path(), "path");
+            let (_keep, cancel) = oneshot::channel();
+            let c = run(
+                &e,
+                "{}",
+                Some("/opt/x/bin:/usr/bin:/bin"),
+                cancel,
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+            assert_eq!(c.token.unwrap().expose_secret(), "/opt/x/bin:/usr/bin:/bin");
+            let dirs = [PathBuf::from("/usr/bin")];
+            assert_eq!(
+                plugin_path(Path::new("/opt/homebrew/bin/kubectl"), &dirs).as_deref(),
+                Some("/opt/homebrew/bin:/usr/bin")
+            );
+        }
+
+        #[tokio::test]
+        async fn failure_reports_exit_code_and_masked_stderr() {
+            let dir = tempfile::tempdir().unwrap();
+            let e = go(&plugin(dir.path(), "fail"), Duration::from_secs(10))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                (e.code, e.key.as_str()),
+                (ErrorCode::AuthFailed, "errors.exec.failed")
+            );
+            assert_eq!(e.params["code"], "3");
+            let details = e.details.unwrap();
+            assert!(details.contains("refresh token *** expired"), "{details}");
+            assert!(!details.contains("s3cr3t-value"), "{details}");
+            let e = go(&plugin(dir.path(), "garbage"), Duration::from_secs(10))
+                .await
+                .unwrap_err();
+            assert_eq!(e.key, "errors.exec.badOutput");
+        }
+
+        #[tokio::test]
+        async fn timeout_and_cancel_stop_the_plugin() {
+            let dir = tempfile::tempdir().unwrap();
+            let e = plugin(dir.path(), "slow");
+            let started = std::time::Instant::now();
+            let err = go(&e, Duration::from_millis(300)).await.unwrap_err();
+            assert_eq!(
+                (err.code, err.key.as_str()),
+                (ErrorCode::Timeout, "errors.exec.timeout")
+            );
+            let (tx, cancel) = oneshot::channel();
+            let waiting = tokio::spawn({
+                let e = e.clone();
+                async move { run(&e, "{}", None, cancel, Duration::from_secs(60)).await }
+            });
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            tx.send(()).unwrap();
+            let err = waiting.await.unwrap().unwrap_err();
+            assert_eq!(err.key, "errors.oauth.cancelled");
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "процесс не ждали"
+            );
+        }
+
+        #[tokio::test]
+        async fn unapproved_or_foreign_command_is_not_started() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut p = crate::storage::profile::sample_profile("a");
+            let mut e = plugin(dir.path(), "ok");
+            p.auth = AuthConfig::Exec(e.clone());
+            let (_keep, cancel) = oneshot::channel();
+            let err = credential_for(&p, cancel, Duration::from_secs(10))
+                .await
+                .unwrap_err();
+            assert_eq!(err.key, "errors.exec.notApproved");
+            e.approved = Some(fingerprint(&e));
+            p.auth = AuthConfig::Exec(e.clone());
+            let (_keep, cancel) = oneshot::channel();
+            assert!(
+                credential_for(&p, cancel, Duration::from_secs(10))
+                    .await
+                    .is_ok()
+            );
+            // Профиль поправили вручную: команда не из списка не запускается.
+            let sh = ExecAuth {
+                command: "/bin/sh".into(),
+                args: vec!["-c".into(), "echo".into()],
+                ..e
+            };
+            let err = go(&sh, Duration::from_secs(10)).await.unwrap_err();
+            assert_eq!(err.key, "errors.exec.notAllowed");
+        }
+
+        #[tokio::test]
+        async fn login_shell_path_between_markers() {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = tempfile::tempdir().unwrap();
+            let shell = dir.path().join("fake-shell");
+            std::fs::write(
+                &shell,
+                "#!/bin/sh\necho 'motd from profile'\nprintf '__GLAFIRA_PATH__/a/bin:/b__GLAFIRA_PATH__'\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(
+                shell_path(&shell, Duration::from_secs(5)).await.as_deref(),
+                Some("/a/bin:/b")
+            );
+            assert_eq!(
+                shell_path(Path::new("/no/such/shell"), Duration::from_secs(5)).await,
+                None
+            );
+        }
     }
 }

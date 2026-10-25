@@ -29,18 +29,19 @@ plist = "1"
 pem = "3"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
-time = { version = "0.3", features = ["formatting"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
 kube = { version = "4.2", default-features = false, features = ["client", "rustls-tls", "ring", "http-proxy"] }
 k8s-openapi = { version = "0.28", features = ["v1_32"] }
 http = "1"
 secrecy = "0.10"
 base64 = "0.22"
 regex = "1"
-tokio = { version = "1", features = ["rt", "macros", "time", "net", "io-util", "sync"] }
+tokio = { version = "1", features = ["rt", "macros", "time", "net", "io-util", "sync", "process"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "form", "http2", "system-proxy"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 sha2 = "0.11"
 getrandom = "0.4"
+dirs = "7"
 sys-locale = "0.3"
 
 [target.'cfg(windows)'.dependencies]

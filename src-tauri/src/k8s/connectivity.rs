@@ -1,15 +1,16 @@
-//! Пошаговая проверка подключения (спец. §5.3): конфигурация → TCP → TLS → вход → discovery →
-//! проекты. Останавливается на первом неуспешном шаге и называет его.
+//! Пошаговая проверка подключения (спец. §5.3): конфигурация → TCP → [exec-плагин] → TLS → вход →
+//! discovery → проекты. Останавливается на первом неуспешном шаге и называет его.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
+use tokio::sync::oneshot;
 
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::i18n::LocalizedText;
 use crate::k8s::cluster::{Discovered, discover, list_project_names, whoami};
-use crate::k8s::config::{build_kube_config, process_env, request_timeout};
+use crate::k8s::config::{apply_exec_credential, build_kube_config, process_env, request_timeout};
 use crate::k8s::errors::from_kube;
 use crate::policy::PolicyStatus;
 use crate::secrets::SecretStore;
@@ -252,15 +253,58 @@ pub async fn check_cluster(
     }
 }
 
+/// Exec-плагин без подтверждённой строки запуска не запускается и при проверке.
+fn ensure_exec_approved(p: &ConnectionProfile) -> AppResult<()> {
+    match &p.auth {
+        AuthConfig::Exec(e) if !crate::auth::exec::is_approved(e) => Err(app_err!(
+            ErrorCode::AuthFailed,
+            "errors.exec.notApproved",
+            "Confirm the exec plugin launch line in the connection settings"
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Что выдал exec-плагин: учётные данные и, если есть, их срок.
+fn exec_message(
+    p: &ConnectionProfile,
+    cred: &crate::auth::exec::PluginCredential,
+) -> LocalizedText {
+    let command = match &p.auth {
+        AuthConfig::Exec(e) => crate::auth::exec::command_name(&e.command),
+        _ => String::new(),
+    };
+    let expires = cred.expires_at.and_then(|t| {
+        time::OffsetDateTime::from(t)
+            .format(&time::format_description::well_known::Rfc3339)
+            .ok()
+    });
+    match expires {
+        Some(expires) => ltext!(
+            "messages.connectionTest.execOkUntil",
+            "The exec plugin {{command}} returned credentials valid until {{expires}}",
+            command = command,
+            expires = expires
+        ),
+        None => ltext!(
+            "messages.connectionTest.execOk",
+            "The exec plugin {{command}} returned credentials",
+            command = command
+        ),
+    }
+}
+
 /// Проверяет и несохранённый профиль: секреты берутся из `secrets` (поверх keychain — форма).
+/// У exec-плагина после TCP идёт шаг `exec` — запуск плагина; `cancel` прерывает его ожидание.
 pub async fn test_connection(
     p: &ConnectionProfile,
     secrets: Arc<dyn SecretStore>,
     policy: &PolicyStatus,
+    cancel: oneshot::Receiver<()>,
 ) -> TestReport {
     let mut steps = Vec::new();
     let profile = p.clone();
-    let config = match ensure_allowed(p, policy) {
+    let config = match ensure_allowed(p, policy).and_then(|()| ensure_exec_approved(p)) {
         Err(e) => Err(e),
         Ok(()) => tokio::task::spawn_blocking(move || {
             crate::storage::profile::validate_profile(&profile)?;
@@ -269,7 +313,7 @@ pub async fn test_connection(
         .await
         .unwrap_or_else(|e| Err(AppError::internal_with(e.to_string()))),
     };
-    let config = match config {
+    let mut config = match config {
         Ok(c) => c,
         Err(e) => return report(vec![failed_step("config", e)]),
     };
@@ -300,6 +344,20 @@ pub async fn test_connection(
         Err(e) => {
             steps.push(failed_step("tcp", e));
             return report(steps);
+        }
+    }
+
+    if matches!(p.auth, AuthConfig::Exec(_)) {
+        let limit = crate::auth::oauth::LOGIN_TIMEOUT;
+        match crate::auth::exec::credential_for(p, cancel, limit).await {
+            Ok(cred) => {
+                steps.push(passed("exec", exec_message(p, &cred)));
+                apply_exec_credential(&mut config, &cred);
+            }
+            Err(e) => {
+                steps.push(failed_step("exec", e));
+                return report(steps);
+            }
         }
     }
 
@@ -638,13 +696,12 @@ mod tests {
             allow_insecure_tls: false,
             ..PolicyStatus::default()
         };
+        let test = |p: ConnectionProfile, s: MemoryStore, policy: PolicyStatus| async move {
+            let (_keep, cancel) = oneshot::channel();
+            test_connection(&p, Arc::new(s), &policy, cancel).await
+        };
         // Нет токена.
-        let r = test_connection(
-            &sample_profile("a"),
-            Arc::new(MemoryStore::default()),
-            &open,
-        )
-        .await;
+        let r = test(sample_profile("a"), MemoryStore::default(), open.clone()).await;
         assert!(!r.ok);
         assert_eq!(names(&r.steps), [("config", false)]);
         assert_eq!(
@@ -656,7 +713,7 @@ mod tests {
         p.ca = CaConfig::Insecure;
         let secrets = MemoryStore::default();
         secrets.set(&secret_key("a", TOKEN), "t").unwrap();
-        let r = test_connection(&p, Arc::new(secrets), &strict).await;
+        let r = test(p, secrets, strict).await;
         assert_eq!(
             r.steps[0].error.as_ref().unwrap().key,
             "errors.connections.insecureForbidden"
@@ -664,10 +721,19 @@ mod tests {
         // Невалидный профиль.
         let mut p = sample_profile("a");
         p.api_url = "http://api.c:6443".into();
-        let r = test_connection(&p, Arc::new(MemoryStore::default()), &open).await;
+        let r = test(p, MemoryStore::default(), open.clone()).await;
         assert_eq!(
             r.steps[0].error.as_ref().unwrap().key,
             "errors.connections.httpsRequired"
+        );
+        // Строка запуска exec-плагина не подтверждена: плагин не запускается.
+        let mut p = sample_profile("a");
+        p.auth = AuthConfig::Exec(crate::storage::profile::sample_exec());
+        let r = test(p, MemoryStore::default(), open).await;
+        assert_eq!(names(&r.steps), [("config", false)]);
+        assert_eq!(
+            r.steps[0].error.as_ref().unwrap().key,
+            "errors.exec.notApproved"
         );
     }
 
@@ -681,7 +747,57 @@ mod tests {
         p.proxy = crate::storage::profile::ProxyConfig::None;
         let secrets = MemoryStore::default();
         secrets.set(&secret_key("a", TOKEN), "t").unwrap();
-        let r = test_connection(&p, Arc::new(secrets), &PolicyStatus::default()).await;
+        let (_keep, cancel) = oneshot::channel();
+        let r = test_connection(&p, Arc::new(secrets), &PolicyStatus::default(), cancel).await;
         assert_eq!(names(&r.steps), [("config", true), ("tcp", false)]);
+    }
+
+    /// Шаг `exec` идёт после TCP: плагин — скрипт `sh` с именем `kubectl`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_plugin_step_runs_after_tcp() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = dir.path().join("kubectl");
+        std::fs::write(
+            &plugin,
+            "#!/bin/sh\nprintf '{\"status\":{\"token\":\"t\",\"expirationTimestamp\":\"2030-01-01T00:00:00Z\"}}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&plugin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Сервер принимает соединения и сразу закрывает их: TLS дальше не пройдёт.
+        tokio::spawn(async move {
+            while let Ok((s, _)) = listener.accept().await {
+                drop(s);
+            }
+        });
+        let mut exec = crate::storage::profile::sample_exec();
+        exec.command = plugin.display().to_string();
+        exec.approved = Some(crate::auth::exec::fingerprint(&exec));
+        let mut p = sample_profile("a");
+        p.api_url = format!("https://127.0.0.1:{port}");
+        p.proxy = crate::storage::profile::ProxyConfig::None;
+        p.auth = AuthConfig::Exec(exec);
+        let (_keep, cancel) = oneshot::channel();
+        let r = test_connection(
+            &p,
+            Arc::new(MemoryStore::default()),
+            &PolicyStatus::default(),
+            cancel,
+        )
+        .await;
+        assert_eq!(
+            names(&r.steps)[..3],
+            [("config", true), ("tcp", true), ("exec", true)]
+        );
+        assert_eq!(
+            r.steps[2].message.key,
+            "messages.connectionTest.execOkUntil"
+        );
+        assert_eq!(r.steps[2].message.params["expires"], "2030-01-01T00:00:00Z");
+        assert_eq!(r.steps[2].message.params["command"], "kubectl");
+        assert!(!r.ok, "TLS не прошёл");
     }
 }
