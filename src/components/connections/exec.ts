@@ -33,20 +33,50 @@ export function formatEnv(env: ExecEnv[]): string {
   return env.map((v) => `${v.name}=${v.value}`).join("\n");
 }
 
-/** Как `auth::exec::is_secret_name` в Rust: значения таких переменных не показываются. */
+/**
+ * Как `auth::exec::is_secret_name` в Rust: значения таких переменных и ключей не показываются.
+ * `PASS` покрывает PASSWORD, PASSWD и PASSPHRASE.
+ */
 export function isSecretName(name: string): boolean {
   const n = name.toUpperCase();
-  return ["TOKEN", "SECRET", "PASSWORD", "PASSWD", "KEY", "CREDENTIAL"].some((w) => n.includes(w));
+  return ["TOKEN", "SECRET", "PASS", "KEY", "BEARER", "COOKIE", "CREDENTIAL"].some((w) => n.includes(w));
 }
 
 function quote(s: string): string {
   return s === "" || /[\s'"\\$`]/.test(s) ? `'${s.replace(/'/g, `'\\''`)}'` : s;
 }
 
-/** Строка запуска для подтверждения: переменные (секреты скрыты), путь к команде и аргументы. */
+/**
+ * Аргументы для строки запуска, значения секретных ключей скрыты, как в Rust (`secret_args`).
+ * Ключ — аргумент с `-`, чьё имя без ведущих дефисов и до первого `=` подходит под `isSecretName`.
+ * `--имя=значение` показывается как `--имя=••••`; в паре `--имя значение` скрывается следующий
+ * элемент, каким бы он ни был; ключ без значения в конце списка ничего не скрывает. Пустое
+ * значение не скрывается.
+ */
+function maskedArgs(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    const eq = a.indexOf("=");
+    const secret = a.startsWith("-") && isSecretName((eq < 0 ? a : a.slice(0, eq)).replace(/^-+/, ""));
+    if (!secret) {
+      out.push(quote(a));
+    } else if (eq >= 0) {
+      out.push(a.length > eq + 1 ? `${a.slice(0, eq + 1)}••••` : quote(a));
+    } else if (i + 1 < args.length) {
+      const value = args[++i];
+      out.push(quote(a), value ? "••••" : quote(value));
+    } else {
+      out.push(quote(a));
+    }
+  }
+  return out;
+}
+
+/** Строка запуска для подтверждения: переменные и значения секретных ключей скрыты, путь к команде и аргументы. */
 export function launchLine(e: ExecAuth): string {
   const env = e.env.map((v) => `${v.name}=${isSecretName(v.name) && v.value ? "••••" : quote(v.value)}`);
-  return [...env, quote(e.command), ...e.args.map(quote)].join(" ");
+  return [...env, quote(e.command), ...maskedArgs(e.args)].join(" ");
 }
 
 function sameLaunch(a: ExecAuth, b: ExecAuth): boolean {

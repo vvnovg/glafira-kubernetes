@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AuthConfig } from "../../api/types";
-import { formatArgs, formatEnv, launchLine, needsExecConfirmation, newExec, parseArgs, parseEnv } from "./exec";
+import { formatArgs, formatEnv, isSecretName, launchLine, needsExecConfirmation, newExec, parseArgs, parseEnv } from "./exec";
 
 const exec = (patch: Partial<ReturnType<typeof newExec>> = {}): AuthConfig => ({
   method: "exec",
@@ -33,6 +33,31 @@ describe("exec", () => {
       ],
     };
     expect(launchLine(e)).toBe("AWS_PROFILE=dev AWS_SECRET_ACCESS_KEY=•••• /usr/local/bin/aws eks get-token --cluster-name 'my cluster'");
+  });
+
+  it("секретные имена — как в Rust: PASS, BEARER и COOKIE тоже", () => {
+    for (const name of ["GIT_PASSPHRASE", "AUTH_BEARER", "SESSION_COOKIE", "password", "client_secret"]) {
+      expect(isSecretName(name), name).toBe(true);
+    }
+    for (const name of ["AWS_PROFILE", "KUBECONFIG"]) {
+      expect(isSecretName(name), name).toBe(false);
+    }
+  });
+
+  it("строка запуска: значения секретных ключей скрыты", () => {
+    const line = (args: string[]) => launchLine({ ...newExec(), command: "plugin", args });
+    expect(line(["get-token", "--oidc-client-secret=abc"])).toBe("plugin get-token --oidc-client-secret=••••");
+    expect(line(["--client-secret", "abc", "--login=azurecli"])).toBe("plugin --client-secret •••• --login=azurecli");
+    expect(line(["-token=x"])).toBe("plugin -token=••••");
+    expect(line(["--client-secret", "--next"])).toBe("plugin --client-secret ••••");
+    expect(line(["--cluster-name", "my cluster"])).toBe("plugin --cluster-name 'my cluster'");
+  });
+
+  it("строка запуска: ключ без значения и пустое значение ничего не скрывают", () => {
+    const line = (args: string[]) => launchLine({ ...newExec(), command: "plugin", args });
+    expect(line(["get-token", "--password"])).toBe("plugin get-token --password");
+    expect(line(["--password="])).toBe("plugin --password=");
+    expect(line(["--password", ""])).toBe("plugin --password ''");
   });
 
   it("подтверждение нужно для новой, изменённой и неподтверждённой строки", () => {
