@@ -1,4 +1,4 @@
-import { useIsFetching, useMutation, useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, useIsFetching, useMutation, useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -26,6 +26,16 @@ export function LoginWait({ connectionId, label }: { connectionId: string; label
   );
 }
 
+/** Ключ мутаций входа: по нему панель блокирует «Подключиться заново», пока идёт вход. */
+export const sessionMutationKey = (connectionId: string) => ["session", connectionId];
+
+/**
+ * Подключение заново (свежие сведения и права). Идёт через запрос вкладки: тот помечается как загружаемый,
+ * и панель не запускает рядом второй exec-плагин (бэкенд ставит подключения одного id в очередь).
+ */
+export const reconnect = (queryClient: QueryClient, connectionId: string) =>
+  queryClient.fetchQuery({ queryKey: ["connection", connectionId], queryFn: () => api.connect(connectionId, true) });
+
 /**
  * Что сделать, если сессия истекла или токена нет: войти через браузер, вставить токен
  * (в том числе со страницы токена кластера), запустить exec-плагин снова или изменить
@@ -39,20 +49,19 @@ export function SessionActions({ profile }: { profile: ConnectionProfile }) {
   const id = profile.id;
   const done = (info: ConnectionInfo) => queryClient.setQueryData(["connection", id], info);
   // Подключение этой вкладки (в том числе «Подключиться заново» на панели) тоже может запускать exec-плагин.
-  const connecting = useIsFetching({ queryKey: ["connection", id] }) > 0;
+  const connecting = useIsFetching({ queryKey: ["connection", id], exact: true }) > 0;
+  const mutationKey = sessionMutationKey(id);
 
-  const login = useMutation({ mutationFn: () => api.startOauthLogin(id), onSuccess: done });
-  // Exec-плагин: подключение заново запускает его снова.
-  const rerun = useMutation({ mutationFn: () => api.connect(id, true), onSuccess: done });
+  const login = useMutation({ mutationKey, mutationFn: () => api.startOauthLogin(id), onSuccess: done });
+  // Exec-плагин: подключение заново запускает его снова; сведения запрос сохраняет сам.
+  const rerun = useMutation({ mutationKey, mutationFn: () => reconnect(queryClient, id) });
   const paste = useMutation({
+    mutationKey,
     mutationFn: async () => {
       await api.setConnectionToken(id, token);
-      return api.connect(id, true);
+      return reconnect(queryClient, id);
     },
-    onSuccess: (info) => {
-      setToken("");
-      done(info);
-    },
+    onSuccess: () => setToken(""),
   });
   const tokenPage = useMutation({
     mutationFn: async () => {
@@ -95,7 +104,7 @@ export function SessionActions({ profile }: { profile: ConnectionProfile }) {
           {login.isPending ? (
             <LoginWait connectionId={id} label={t("cluster.session.waitingBrowser")} />
           ) : (
-            <button type="button" className="primary" onClick={() => login.mutate()}>
+            <button type="button" className="primary" disabled={connecting} onClick={() => login.mutate()}>
               {t("cluster.session.loginBrowser")}
             </button>
           )}
@@ -113,7 +122,7 @@ export function SessionActions({ profile }: { profile: ConnectionProfile }) {
           value={token}
           onChange={(e) => setToken(e.target.value)}
         />
-        <button type="button" disabled={!token.trim() || paste.isPending} onClick={() => paste.mutate()}>
+        <button type="button" disabled={!token.trim() || paste.isPending || connecting} onClick={() => paste.mutate()}>
           {t("cluster.session.saveToken")}
         </button>
         <button type="button" className="link" disabled={tokenPage.isPending} onClick={() => tokenPage.mutate()}>

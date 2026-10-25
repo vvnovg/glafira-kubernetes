@@ -1,11 +1,11 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useIsMutating, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../api/client";
 import type { ApiGroups, AppError, Capabilities, ConnectionInfo, ConnectionProfile } from "../../api/types";
 import { useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Hint } from "../common/Hint";
-import { LoginWait, SessionActions } from "./SessionActions";
+import { LoginWait, reconnect, SessionActions, sessionMutationKey } from "./SessionActions";
 
 /** Ошибки, которые лечатся входом заново или новым токеном. */
 const SIGN_IN_KEYS = new Set(["errors.connections.tokenMissing", "errors.connections.loginRequired", "errors.connections.clientKeyMissing"]);
@@ -37,9 +37,8 @@ export function ConnectionPanel({ connectionId }: { connectionId: string }) {
   const q = useQuery({ queryKey: ["connection", connectionId], queryFn: () => api.connect(connectionId, false) });
   const profile = connections.data?.find((c) => c.id === connectionId);
   const error = q.error ? toAppError(q.error) : null;
-
-  // Подключение заново: свежие сведения и права (после смены токена или прав в кластере).
-  const reconnect = () => queryClient.fetchQuery({ queryKey: ["connection", connectionId], queryFn: () => api.connect(connectionId, true) });
+  // Идёт вход, запуск exec-плагина или сохранение токена: второе подключение рядом не запускаем.
+  const signingIn = useIsMutating({ mutationKey: sessionMutationKey(connectionId) }) > 0;
 
   if (!profile) return <p className="empty">{connections.isPending ? t("common.loading") : t("connections.form.deleted")}</p>;
 
@@ -51,7 +50,8 @@ export function ConnectionPanel({ connectionId }: { connectionId: string }) {
       <div className="toolbar">
         <h2>{profile.name}</h2>
         <span className="muted">{profile.apiUrl}</span>
-        <button type="button" disabled={q.isFetching} onClick={() => void reconnect().catch(() => undefined)}>
+        {/* Подключение заново: свежие сведения и права (после смены токена или прав в кластере). */}
+        <button type="button" disabled={q.isFetching || signingIn} onClick={() => void reconnect(queryClient, connectionId).catch(() => undefined)}>
           {t("cluster.connection.reconnect")}
         </button>
         <button type="button" onClick={() => open({ kind: "connection-form", connectionId })}>

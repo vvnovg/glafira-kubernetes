@@ -152,6 +152,42 @@ describe("ConnectionPanel", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
+  it.each([
+    ["первое подключение не удалось", false],
+    ["после успешного подключения", true],
+  ])("exec-плагин: пока идёт «Запустить exec-плагин снова» (%s), «Подключиться заново» недоступна", async (_name, hadData) => {
+    vi.mocked(api.listConnections).mockResolvedValue([profile(EXEC)]);
+    if (hadData) vi.mocked(api.connect).mockResolvedValueOnce(INFO);
+    vi.mocked(api.connect).mockRejectedValueOnce(EXEC_FAILED);
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionPanel connectionId="c1" />);
+    if (hadData) {
+      expect(await screen.findByText("dev1")).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Подключиться заново" }));
+    }
+    const rerun = await screen.findByRole("button", { name: "Запустить exec-плагин снова" });
+    const before = hadData ? 2 : 1;
+    expect(api.connect).toHaveBeenCalledTimes(before);
+
+    let finish: (i: ConnectionInfo) => void = () => {};
+    vi.mocked(api.connect).mockReturnValueOnce(new Promise((r) => (finish = r)));
+    await user.click(rerun);
+    expect(api.connect).toHaveBeenCalledTimes(before + 1);
+    expect(api.connect).toHaveBeenLastCalledWith("c1", true);
+    const reconnect = screen.getByRole("button", { name: "Подключиться заново" });
+    expect(reconnect).toBeDisabled();
+    // Второй запуск плагина в очередь не встаёт.
+    await user.click(reconnect);
+    expect(api.connect).toHaveBeenCalledTimes(before + 1);
+    await user.click(screen.getByRole("button", { name: "Отменить" }));
+    expect(api.cancelOauthLogin).toHaveBeenCalledTimes(1);
+
+    finish(INFO);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Подключиться заново" })).toBeEnabled());
+    expect(screen.getByText("dev1")).toBeInTheDocument();
+    expect(api.connect).toHaveBeenCalledTimes(before + 1);
+  });
+
   it("истёкшая сессия у входа через браузер: вход и успешное подключение", async () => {
     vi.mocked(api.listConnections).mockResolvedValue([profile({ method: "browser" })]);
     vi.mocked(api.connect).mockRejectedValue(EXPIRED);
@@ -162,6 +198,8 @@ describe("ConnectionPanel", () => {
     await user.click(await screen.findByRole("button", { name: "Войти через браузер" }));
     expect(api.startOauthLogin).toHaveBeenCalledWith("c1");
     expect(screen.getByText("Ожидание входа в браузере…")).toBeInTheDocument();
+    // Пока ждём вход, подключение заново не запускаем.
+    expect(screen.getByRole("button", { name: "Подключиться заново" })).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "Отменить" }));
     expect(api.cancelOauthLogin).toHaveBeenCalledWith("c1");
     finish(INFO);
@@ -197,6 +235,31 @@ describe("ConnectionPanel", () => {
     await waitFor(() => expect(api.setConnectionToken).toHaveBeenCalledWith("c1", "sha256~new"));
     expect(api.connect).toHaveBeenLastCalledWith("c1", true);
     expect(await screen.findByText("dev1")).toBeInTheDocument();
+  });
+
+  it("вставка токена: пока токен сохраняется и идёт подключение, «Подключиться заново» недоступна", async () => {
+    vi.mocked(api.listConnections).mockResolvedValue([profile({ method: "token" })]);
+    vi.mocked(api.connect).mockRejectedValueOnce(EXPIRED);
+    let saved: () => void = () => {};
+    vi.mocked(api.setConnectionToken).mockReturnValue(new Promise<void>((r) => (saved = r)));
+    let finish: (i: ConnectionInfo) => void = () => {};
+    vi.mocked(api.connect).mockReturnValueOnce(new Promise((r) => (finish = r)));
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionPanel connectionId="c1" />);
+    await user.type(await screen.findByLabelText("Токен"), "sha256~new");
+    await user.click(screen.getByRole("button", { name: "Сохранить токен" }));
+    await waitFor(() => expect(api.setConnectionToken).toHaveBeenCalledWith("c1", "sha256~new"));
+    expect(screen.getByRole("button", { name: "Подключиться заново" })).toBeDisabled();
+    expect(api.connect).toHaveBeenCalledTimes(1);
+
+    saved();
+    await waitFor(() => expect(api.connect).toHaveBeenCalledTimes(2));
+    expect(api.connect).toHaveBeenLastCalledWith("c1", true);
+    expect(screen.getByRole("button", { name: "Подключиться заново" })).toBeDisabled();
+
+    finish(INFO);
+    expect(await screen.findByText("dev1")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Подключиться заново" })).toBeEnabled();
   });
 
   it("страница токена кластера открывается в браузере", async () => {
