@@ -222,6 +222,44 @@ describe("ConnectionPanel", () => {
     expect(screen.getAllByRole("alert")).toHaveLength(1);
   });
 
+  it("пока идёт вход через браузер, «Сохранить токен» недоступна", async () => {
+    vi.mocked(api.listConnections).mockResolvedValue([profile({ method: "browser" })]);
+    vi.mocked(api.connect).mockRejectedValue(EXPIRED);
+    let signedIn: (i: ConnectionInfo) => void = () => {};
+    vi.mocked(api.startOauthLogin).mockReturnValue(new Promise<ConnectionInfo>((r) => (signedIn = r)));
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionPanel connectionId="c1" />);
+    await user.click(await screen.findByRole("button", { name: "Войти через браузер" }));
+    expect(await screen.findByText("Ожидание входа в браузере…")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Токен"), "sha256~new");
+    expect(screen.getByRole("button", { name: "Сохранить токен" })).toBeDisabled();
+    expect(api.setConnectionToken).not.toHaveBeenCalled();
+
+    signedIn(INFO);
+    expect(await screen.findByText("dev1")).toBeInTheDocument();
+  });
+
+  it("пока сохраняется токен, «Войти через браузер» недоступна", async () => {
+    vi.mocked(api.listConnections).mockResolvedValue([profile({ method: "browser" })]);
+    vi.mocked(api.connect).mockRejectedValueOnce(EXPIRED);
+    let saved: () => void = () => {};
+    vi.mocked(api.setConnectionToken).mockReturnValue(new Promise<void>((r) => (saved = r)));
+    let finish: (i: ConnectionInfo) => void = () => {};
+    vi.mocked(api.connect).mockReturnValueOnce(new Promise((r) => (finish = r)));
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionPanel connectionId="c1" />);
+    await user.type(await screen.findByLabelText("Токен"), "sha256~new");
+    await user.click(screen.getByRole("button", { name: "Сохранить токен" }));
+    await waitFor(() => expect(api.setConnectionToken).toHaveBeenCalledWith("c1", "sha256~new"));
+    expect(screen.getByRole("button", { name: "Войти через браузер" })).toBeDisabled();
+
+    // После сохранения токена идёт подключение: блок входа скрыт, пока оно не закончится.
+    saved();
+    await waitFor(() => expect(api.connect).toHaveBeenCalledTimes(2));
+    finish(INFO);
+    expect(await screen.findByText("dev1")).toBeInTheDocument();
+  });
+
   it("вставка токена сохраняет его и подключается заново", async () => {
     vi.mocked(api.listConnections).mockResolvedValue([profile({ method: "token" })]);
     vi.mocked(api.connect).mockRejectedValueOnce(EXPIRED).mockResolvedValue(INFO);

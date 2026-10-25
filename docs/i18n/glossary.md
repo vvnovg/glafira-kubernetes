@@ -31,8 +31,8 @@ HTTPRoute, GRPCRoute, Service, ConfigMap, Secret, PVC, HPA, ResourceQuota, Limit
 | read-only | только чтение | |
 | environment | окружение | local, dev, test, stage, prod не переводятся |
 | folder | папка | |
-| session expired | сессия истекла | |
-| rights / permissions | права | «нет прав: …» |
+| sign in again | войдите снова | заголовок блока на вкладке подключения, когда сессия истекла или токена нет; про токен и сертификат — «истёк» («токен истёк или неверен») |
+| not allowed | нет прав | «Not allowed: …» → «Нет прав: …»; «права» — права пользователя в тексте («какие бы права у вас ни были») |
 | connection check / test connection | проверка подключения / проверить подключение | |
 | platform | платформа | OpenShift или Kubernetes (§4.3 спеки) |
 | distribution | дистрибутив | EKS, GKE, Rancher… |

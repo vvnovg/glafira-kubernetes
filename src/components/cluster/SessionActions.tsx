@@ -104,7 +104,7 @@ export function SessionActions({ profile }: { profile: ConnectionProfile }) {
           {login.isPending ? (
             <LoginWait connectionId={id} label={t("cluster.session.waitingBrowser")} />
           ) : (
-            <button type="button" className="primary" disabled={connecting} onClick={() => login.mutate()}>
+            <button type="button" className="primary" disabled={connecting || paste.isPending} onClick={() => login.mutate()}>
               {t("cluster.session.loginBrowser")}
             </button>
           )}
@@ -122,7 +122,7 @@ export function SessionActions({ profile }: { profile: ConnectionProfile }) {
           value={token}
           onChange={(e) => setToken(e.target.value)}
         />
-        <button type="button" disabled={!token.trim() || paste.isPending || connecting} onClick={() => paste.mutate()}>
+        <button type="button" disabled={!token.trim() || paste.isPending || login.isPending || connecting} onClick={() => paste.mutate()}>
           {t("cluster.session.saveToken")}
         </button>
         <button type="button" className="link" disabled={tokenPage.isPending} onClick={() => tokenPage.mutate()}>

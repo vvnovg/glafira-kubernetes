@@ -40,8 +40,9 @@ The form shows the exact launch line: the path, the arguments and the environmen
 (`••••`) when the name of the variable or option contains TOKEN, SECRET, PASS, KEY, CREDENTIAL, BEARER or COOKIE, for
 example `--client-secret x`, `--oidc-client-secret=x` or `AWS_SECRET_ACCESS_KEY`. Glafira runs the line only after you
 tick [[ui:connections.form.exec.confirm]]. The confirmation is bound to the exact line: any change to the command, the
-arguments or the variables, and a switch of the sign-in method, needs a new confirmation. A connection that arrives
-from an export file as a new one is unconfirmed too.
+arguments or the variables needs a new confirmation. In the form, a switch of the sign-in method also drops a tick you
+have set; a line that was saved confirmed and is unchanged stays confirmed. A connection that arrives from an export
+file as a new one is unconfirmed.
 
 Secret values are kept in the connections file, not in the secret store. They are not written to the export file that
 you create with [[ui:sidebar.exportAll]] or [[ui:sidebar.folder.export]]: after importing such a connection on another
