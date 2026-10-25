@@ -7,7 +7,6 @@ use std::collections::BTreeMap;
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use k8s_openapi::api::networking::v1::{Ingress, IngressBackend};
-use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{ApiResource, DynamicObject, GroupVersionKind, ListParams};
 use serde::Serialize;
 
@@ -15,7 +14,9 @@ use crate::der::read_tlv;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::k8s::read::ReadClient;
 use crate::k8s::selectors::map_selector_string;
-use crate::k8s::view::{ConditionView, Part, condition, condition_flag, conditions, created, name};
+use crate::k8s::view::{
+    ConditionView, Part, condition, condition_flag, conditions, created, int_or_string, name,
+};
 use crate::platform::ApiGroups;
 
 pub fn routes() -> ApiResource {
@@ -89,13 +90,6 @@ fn asn1_time(tag: u8, v: &[u8]) -> Option<i64> {
     )
 }
 
-fn port_text(p: &IntOrString) -> String {
-    match p {
-        IntOrString::Int(i) => i.to_string(),
-        IntOrString::String(s) => s.clone(),
-    }
-}
-
 /// Готовые endpoints и все.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -162,7 +156,7 @@ pub fn service_row(s: &Service, endpoints: Option<EndpointCount>) -> ServiceRow 
                             None => format!("{}/{proto}", p.port),
                         };
                         match &p.target_port {
-                            Some(t) => format!("{port} → {}", port_text(t)),
+                            Some(t) => format!("{port} → {}", int_or_string(t)),
                             None => port,
                         }
                     })
@@ -176,9 +170,11 @@ pub fn service_row(s: &Service, endpoints: Option<EndpointCount>) -> ServiceRow 
 }
 
 /// Endpoints по сервисам: метка `kubernetes.io/service-name` у EndpointSlice. Endpoint без
-/// условия `ready` считается готовым (так читает его kube-proxy).
+/// условия `ready` считается готовым (так читает его kube-proxy). На dual-stack кластере у
+/// сервиса по EndpointSlice на семейство адресов (`addressType`: IPv4, IPv6), и каждый под
+/// есть в обоих: считаем по семействам и берём то, где endpoints больше.
 pub fn endpoints_by_service(slices: &[EndpointSlice]) -> BTreeMap<String, EndpointCount> {
-    let mut out: BTreeMap<String, EndpointCount> = BTreeMap::new();
+    let mut families: BTreeMap<(&str, &str), EndpointCount> = BTreeMap::new();
     for s in slices {
         let Some(service) = s
             .metadata
@@ -188,8 +184,8 @@ pub fn endpoints_by_service(slices: &[EndpointSlice]) -> BTreeMap<String, Endpoi
         else {
             continue;
         };
-        let e = out
-            .entry(service.clone())
+        let e = families
+            .entry((service.as_str(), s.address_type.as_str()))
             .or_insert(EndpointCount { ready: 0, total: 0 });
         for ep in &s.endpoints {
             e.total += 1;
@@ -197,6 +193,16 @@ pub fn endpoints_by_service(slices: &[EndpointSlice]) -> BTreeMap<String, Endpoi
                 e.ready += 1;
             }
         }
+    }
+    let mut out: BTreeMap<String, EndpointCount> = BTreeMap::new();
+    for ((service, _), count) in families {
+        out.entry(service.to_string())
+            .and_modify(|best| {
+                if (count.total, count.ready) > (best.total, best.ready) {
+                    *best = count;
+                }
+            })
+            .or_insert(count);
     }
     out
 }
@@ -240,7 +246,7 @@ pub fn route_row(o: &DynamicObject) -> RouteRow {
         .collect();
     let accepted = admitted.iter().any(ConditionView::is_true);
     RouteRow {
-        name: o.metadata.name.clone().unwrap_or_default(),
+        name: name(&o.metadata),
         host: text(&spec["host"]),
         path: text(&spec["path"]),
         service: text(&spec["to"]["name"]),
@@ -418,7 +424,7 @@ pub struct GatewayRow {
 pub fn gateway_row(o: &DynamicObject) -> GatewayRow {
     let conds = conditions(&o.data["status"]["conditions"]);
     GatewayRow {
-        name: o.metadata.name.clone().unwrap_or_default(),
+        name: name(&o.metadata),
         class: o.data["spec"]["gatewayClassName"]
             .as_str()
             .map(String::from),
@@ -480,9 +486,18 @@ pub fn gateway_route_row(kind: &str, o: &DynamicObject) -> GatewayRouteRow {
         .as_array()
         .cloned()
         .unwrap_or_default();
+    // Пропущенный `namespace` в parentRef — namespace самого маршрута (Gateway API).
+    let route_ns = o.metadata.namespace.as_deref();
+    let parent_ns = |p: &serde_json::Value| {
+        p["namespace"]
+            .as_str()
+            .filter(|n| !n.is_empty())
+            .or(route_ns)
+            .map(String::from)
+    };
     let same = |a: &serde_json::Value, b: &serde_json::Value| {
         a["name"] == b["name"]
-            && a["namespace"] == b["namespace"]
+            && parent_ns(a) == parent_ns(b)
             && a["sectionName"] == b["sectionName"]
     };
     let parents = spec["parentRefs"]
@@ -521,7 +536,7 @@ pub fn gateway_route_row(kind: &str, o: &DynamicObject) -> GatewayRouteRow {
         .unwrap_or_default();
     GatewayRouteRow {
         kind: kind.into(),
-        name: o.metadata.name.clone().unwrap_or_default(),
+        name: name(&o.metadata),
         hostnames: spec["hostnames"]
             .as_array()
             .map(|h| {
@@ -638,6 +653,7 @@ pub async fn get_network(r: &ReadClient, namespace: &str, groups: &ApiGroups) ->
 mod tests {
     use super::*;
     use crate::k8s::testing::{Seen, mock_client, status};
+    use crate::storage::profile::TEST_CERT_PEM;
     use std::time::Duration;
 
     const ROUTE_CERT: &str = include_str!("testdata/route-cert.pem");
@@ -661,11 +677,94 @@ mod tests {
             "UTCTime"
         );
         assert_eq!(
-            certificate_expiry(crate::storage::profile::TEST_CERT_PEM),
+            certificate_expiry(TEST_CERT_PEM),
             Some(4_946_471_467),
             "GeneralizedTime после 2049 года"
         );
         assert_eq!(certificate_expiry("not a pem"), None);
+    }
+
+    fn pem_of(tag: &str, der: &[u8]) -> String {
+        pem::encode(&pem::Pem::new(tag, der.to_vec()))
+    }
+
+    fn der_of(pem_text: &str) -> Vec<u8> {
+        pem::parse(pem_text).unwrap().into_contents()
+    }
+
+    #[test]
+    fn certificate_expiry_of_truncated_and_malformed_input_is_none() {
+        for text in [ROUTE_CERT, TEST_CERT_PEM] {
+            let der = der_of(text);
+            assert!(certificate_expiry(&pem_of("CERTIFICATE", &der)).is_some());
+            for n in 0..der.len() {
+                assert_eq!(
+                    certificate_expiry(&pem_of("CERTIFICATE", &der[..n])),
+                    None,
+                    "первые {n} из {} байт",
+                    der.len()
+                );
+            }
+        }
+        // Неверный тег срока: второе время в сертификате — `notAfter`.
+        let der = der_of(ROUTE_CERT);
+        let not_after = der
+            .windows(2)
+            .enumerate()
+            .filter(|(_, w)| *w == [0x17, 13])
+            .map(|(i, _)| i)
+            .nth(1)
+            .unwrap();
+        for tag in [0x04, 0x13, 0x30] {
+            let mut bad = der.clone();
+            bad[not_after] = tag;
+            assert_eq!(
+                certificate_expiry(&pem_of("CERTIFICATE", &bad)),
+                None,
+                "тег {tag:#x}"
+            );
+        }
+        let mut bad = der.clone();
+        bad[not_after + 2] = b'x';
+        assert_eq!(certificate_expiry(&pem_of("CERTIFICATE", &bad)), None);
+        // Блок не сертификат.
+        assert_eq!(
+            certificate_expiry(&pem_of("TRUSTED CERTIFICATE", &der)),
+            None
+        );
+        assert_eq!(certificate_expiry(""), None);
+    }
+
+    #[test]
+    fn certificate_expiry_skips_private_key_blocks() {
+        // Блок «ключа» со срезом настоящего сертификата: прочитай его, срок вышел бы другим.
+        let key = pem_of("PRIVATE KEY", &der_of(TEST_CERT_PEM));
+        assert_eq!(certificate_expiry(&key), None);
+        assert_eq!(
+            certificate_expiry(&format!("{key}{ROUTE_CERT}")),
+            Some(1_795_537_583),
+            "ключ раньше сертификата"
+        );
+        assert_eq!(
+            certificate_expiry(&format!("{ROUTE_CERT}{key}")),
+            Some(1_795_537_583)
+        );
+    }
+
+    #[test]
+    fn utc_time_pivots_between_1950_and_2049() {
+        assert_eq!(asn1_time(0x17, b"500101000000Z"), Some(-631_152_000), "50");
+        assert_eq!(asn1_time(0x17, b"991231235959Z"), Some(946_684_799), "99");
+        assert_eq!(asn1_time(0x17, b"000101000000Z"), Some(946_684_800), "00");
+        assert_eq!(asn1_time(0x17, b"491231235959Z"), Some(2_524_607_999), "49");
+        assert_eq!(
+            asn1_time(0x18, b"20500101000000Z"),
+            Some(2_524_608_000),
+            "GeneralizedTime"
+        );
+        assert_eq!(asn1_time(0x17, b"501301000000Z"), None, "месяц 13");
+        assert_eq!(asn1_time(0x17, b"5001"), None, "короткое значение");
+        assert_eq!(asn1_time(0x04, b"500101000000Z"), None, "не время");
     }
 
     #[test]
@@ -701,6 +800,73 @@ mod tests {
         let row = service_row(&manual, Some(EndpointCount { ready: 0, total: 0 }));
         assert_eq!(row.endpoints, None, "без селектора endpoints не считаются");
         assert_eq!(row.external, ["db.example.com"]);
+    }
+
+    #[test]
+    fn dual_stack_endpoints_are_not_counted_twice() {
+        let slice = |name: &str, family: &str, endpoints: serde_json::Value| -> EndpointSlice {
+            from(serde_json::json!({"metadata": {"name": name,
+                "labels": {"kubernetes.io/service-name": "web"}},
+                "addressType": family, "endpoints": endpoints}))
+        };
+        let v4 = slice(
+            "web-v4",
+            "IPv4",
+            serde_json::json!([{"addresses": ["10.1.0.1"], "conditions": {"ready": true}}]),
+        );
+        let v6 = slice(
+            "web-v6",
+            "IPv6",
+            serde_json::json!([{"addresses": ["fd00::1"], "conditions": {"ready": true}}]),
+        );
+        assert_eq!(
+            endpoints_by_service(&[v4, v6])["web"],
+            EndpointCount { ready: 1, total: 1 },
+            "один под в обоих семействах"
+        );
+        // Слайсы одного семейства складываются, из семейств берётся то, где endpoints больше.
+        let a = slice(
+            "web-a",
+            "IPv4",
+            serde_json::json!([{"addresses": ["10.1.0.1"], "conditions": {"ready": true}}]),
+        );
+        let b = slice(
+            "web-b",
+            "IPv4",
+            serde_json::json!([{"addresses": ["10.1.0.2"], "conditions": {"ready": false}}]),
+        );
+        let six = slice(
+            "web-6",
+            "IPv6",
+            serde_json::json!([{"addresses": ["fd00::1"], "conditions": {"ready": true}}]),
+        );
+        assert_eq!(
+            endpoints_by_service(&[six, a, b])["web"],
+            EndpointCount { ready: 1, total: 2 }
+        );
+    }
+
+    #[test]
+    fn route_parents_match_status_with_namespace_defaulting_to_the_routes_own() {
+        let accepted = |spec_ref: serde_json::Value, status_ref: serde_json::Value| {
+            let route = gateway_route_row(
+                "HTTPRoute",
+                &from(serde_json::json!({
+                    "metadata": {"name": "web", "namespace": "team-a"},
+                    "spec": {"parentRefs": [spec_ref]},
+                    "status": {"parents": [{"parentRef": status_ref,
+                        "conditions": [{"type": "Accepted", "status": "True"}]}]}})),
+            );
+            route.parents[0].accepted.is_some()
+        };
+        let gw = || serde_json::json!({"name": "gw"});
+        let gw_in = |ns: &str| serde_json::json!({"name": "gw", "namespace": ns});
+        assert!(accepted(gw(), gw_in("team-a")), "в spec namespace опущен");
+        assert!(accepted(gw_in("team-a"), gw()), "в status namespace опущен");
+        assert!(accepted(gw(), gw()));
+        assert!(accepted(gw_in("infra"), gw_in("infra")));
+        assert!(!accepted(gw(), gw_in("infra")), "Gateway в другом проекте");
+        assert!(!accepted(gw_in("infra"), gw()));
     }
 
     fn route(name: &str, admitted: Option<&str>, owner: Option<&str>) -> serde_json::Value {
@@ -899,5 +1065,88 @@ mod tests {
         assert!(n.endpoints_error.is_none());
         drop(r);
         assert_eq!(server.await.unwrap().len(), 4);
+    }
+
+    /// Сеть проекта, где на путь, оканчивающийся на `denied`, API-сервер отвечает 403.
+    async fn network_forbidding(denied: &'static str) -> NetworkView {
+        let (client, server) = mock_client(move |s| {
+            if s.path().ends_with(denied) {
+                let resource = denied.rsplit('/').next().unwrap();
+                return status(
+                    403,
+                    "Forbidden",
+                    &format!(
+                        r#"{resource} is forbidden: User "u" cannot list resource "{resource}" in API group "" in the namespace "team-a""#
+                    ),
+                );
+            }
+            gateway_objects(s).unwrap_or_else(|| match s.path() {
+                "/api/v1/namespaces/team-a/services" => list(vec![serde_json::json!({
+                    "metadata": {"name": "web"}, "spec": {"selector": {"app": "web"}, "ports": [{"port": 80}]}})]),
+                "/apis/discovery.k8s.io/v1/namespaces/team-a/endpointslices" => list(vec![serde_json::json!({
+                    "metadata": {"name": "web-1", "labels": {"kubernetes.io/service-name": "web"}},
+                    "addressType": "IPv4", "endpoints": [{"addresses": ["10.1.0.1"], "conditions": {"ready": true}}]})]),
+                "/apis/route.openshift.io/v1/namespaces/team-a/routes" => {
+                    list(vec![route("web-abcde", Some("True"), Some("web"))])
+                }
+                "/apis/networking.k8s.io/v1/namespaces/team-a/ingresses" => list(vec![serde_json::json!({
+                    "metadata": {"name": "web"}, "spec": {"ingressClassName": "openshift-default"}})]),
+                other => panic!("лишний запрос {other}"),
+            })
+        });
+        let r = ReadClient::new(client, Duration::from_secs(5));
+        let groups = ApiGroups {
+            routes: true,
+            gateway_api: true,
+            ..Default::default()
+        };
+        let n = get_network(&r, "team-a", &groups).await;
+        drop(r);
+        assert_eq!(server.await.unwrap().len(), 7, "все виды спрошены");
+        n
+    }
+
+    fn forbidden_resource<T>(part: &Part<T>) -> &str {
+        let e = part.error.as_ref().expect("часть без данных");
+        assert_eq!(e.code, ErrorCode::Forbidden);
+        e.params["resource"].as_str()
+    }
+
+    #[tokio::test]
+    async fn forbidden_services_leave_the_other_parts_visible() {
+        let n = network_forbidding("/namespaces/team-a/services").await;
+        assert_eq!(forbidden_resource(&n.services), "services");
+        assert!(n.endpoints_error.is_none());
+        assert_eq!(n.routes.unwrap().data.unwrap().len(), 1);
+        assert_eq!(n.ingresses.data.unwrap()[0].routes, ["web-abcde"]);
+        assert_eq!(n.gateways.unwrap().data.unwrap().len(), 1);
+        assert_eq!(n.http_routes.unwrap().data.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn forbidden_routes_leave_the_other_parts_visible() {
+        let n = network_forbidding("/namespaces/team-a/routes").await;
+        assert_eq!(forbidden_resource(n.routes.as_ref().unwrap()), "routes");
+        let services = n.services.data.unwrap();
+        assert_eq!(
+            services[0].endpoints,
+            Some(EndpointCount { ready: 1, total: 1 })
+        );
+        let ingresses = n.ingresses.data.unwrap();
+        assert_eq!(ingresses.len(), 1);
+        assert!(ingresses[0].routes.is_empty(), "Routes не прочитаны");
+        assert_eq!(n.gateways.unwrap().data.unwrap().len(), 1);
+        assert_eq!(n.http_routes.unwrap().data.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn forbidden_gateways_leave_the_other_parts_visible() {
+        let n = network_forbidding("/namespaces/team-a/gateways").await;
+        assert_eq!(forbidden_resource(n.gateways.as_ref().unwrap()), "gateways");
+        assert_eq!(n.services.data.unwrap().len(), 1);
+        assert_eq!(n.routes.unwrap().data.unwrap().len(), 1);
+        assert_eq!(n.ingresses.data.unwrap()[0].routes, ["web-abcde"]);
+        let http = &n.http_routes.unwrap().data.unwrap()[0];
+        assert_eq!(http.backends, ["web:80", "canary:80"]);
     }
 }
