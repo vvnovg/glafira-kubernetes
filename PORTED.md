@@ -41,15 +41,15 @@
 | `src-tauri/src/dock_name.rs` | `src-tauri/src/dock_name.rs` | `8bbd0bd` | адаптирован: комментарий |
 | `src-tauri/src/secrets.rs` | `src-tauri/src/secrets.rs` | `8bbd0bd` | адаптирован: поля секретов подключения |
 | `src-tauri/src/error.rs` | `src-tauri/src/error.rs` | `8bbd0bd` | адаптирован: коды Kubernetes, без librdkafka |
-| `src-tauri/src/policy/mod.rs` | `src-tauri/src/policy/mod.rs` | `8bbd0bd` | адаптирован: ключ allowInsecureTls, языки тестов |
-| `src-tauri/src/policy/sources.rs` | `src-tauri/src/policy/sources.rs` | `8bbd0bd` | адаптирован: тест примеров с allowInsecureTls |
+| `src-tauri/src/policy/mod.rs` | `src-tauri/src/policy/mod.rs` | `8bbd0bd` | адаптирован: ключи allowInsecureTls и allowExecAuth, языки тестов |
+| `src-tauri/src/policy/sources.rs` | `src-tauri/src/policy/sources.rs` | `8bbd0bd` | адаптирован: тест примеров с allowInsecureTls и allowExecAuth |
 | `src-tauri/src/settings.rs` | `src-tauri/src/settings.rs` | `8bbd0bd` | адаптирован: языки en и ru |
 | `src-tauri/src/commands/settings.rs` | `src-tauri/src/commands/settings.rs` | `8bbd0bd` | адаптирован: языки тестов |
 | `src-tauri/src/state.rs` | `src-tauri/src/state.rs` | `8bbd0bd` | адаптирован: только хранилища, без Kafka |
 | `src-tauri/src/commands/mod.rs` | `src-tauri/src/commands/mod.rs` | `8bbd0bd` | адаптирован: только blocking |
-| `docs/admin/policy.json` | `docs/admin/policy.json` | `8bbd0bd` | адаптирован: идентификаторы, allowInsecureTls |
-| `docs/admin/policy.mobileconfig` | `docs/admin/policy.mobileconfig` | `8bbd0bd` | адаптирован: идентификаторы, allowInsecureTls |
-| `docs/admin/policy.reg` | `docs/admin/policy.reg` | `8bbd0bd` | адаптирован: идентификаторы, allowInsecureTls |
+| `docs/admin/policy.json` | `docs/admin/policy.json` | `8bbd0bd` | адаптирован: идентификаторы, allowInsecureTls, allowExecAuth |
+| `docs/admin/policy.mobileconfig` | `docs/admin/policy.mobileconfig` | `8bbd0bd` | адаптирован: идентификаторы, allowInsecureTls, allowExecAuth |
+| `docs/admin/policy.reg` | `docs/admin/policy.reg` | `8bbd0bd` | адаптирован: идентификаторы, allowInsecureTls, allowExecAuth |
 | `src-tauri/src/storage/connections.rs` | `src-tauri/src/storage/connections.rs` | `8bbd0bd` | адаптирован: профиль вынесен в profile.rs, тесты под Kubernetes |
 | `src-tauri/src/storage/tree.rs` | `src-tauri/src/storage/tree.rs` | `8bbd0bd` | как есть |
 | `src-tauri/src/storage/exchange.rs` | `src-tauri/src/storage/exchange.rs` | `8bbd0bd` | адаптирован: формат glafira-kubernetes-connections, флаги секретов, запрет insecure политикой |
