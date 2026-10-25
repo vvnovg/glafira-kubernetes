@@ -52,8 +52,10 @@ export const api = {
   setConnectionToken: (connectionId: string, token: string) =>
     call<void>("set_connection_token", { connectionId, token }),
   startOauthLogin: (connectionId: string) => call<ConnectionInfo>("start_oauth_login", { connectionId }),
-  /** Отменяет вход через браузер или ожидание exec-плагина. */
+  /** Отменяет вход через браузер или ожидание exec-плагина при подключении. */
   cancelOauthLogin: (connectionId: string) => call<boolean>("cancel_oauth_login", { connectionId }),
+  /** Отменяет ожидание exec-плагина при проверке подключения в форме; подключение вкладки не трогает. */
+  cancelConnectionTest: (connectionId: string) => call<boolean>("cancel_connection_test", { connectionId }),
   oauthTokenPage: (connectionId: string) => call<string>("oauth_token_page", { connectionId }),
   resolveExecCommand: (command: string) => call<string>("resolve_exec_command", { command }),
   previewKubeconfigImport: (path: string | null) => call<KubeconfigPreview>("preview_kubeconfig_import", { path }),

@@ -403,7 +403,7 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
             type="button"
             onClick={() => {
               // Сбой отмены не показываем: ожидание закончится само, а кнопка остаётся для повторной отмены.
-              api.cancelOauthLogin(profile.id).catch(() => undefined);
+              api.cancelConnectionTest(profile.id).catch(() => undefined);
             }}
           >
             {t("common.cancel")}

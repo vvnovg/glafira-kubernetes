@@ -153,6 +153,35 @@ fn discovery_message(d: &Discovered) -> LocalizedText {
     }
 }
 
+/// Сколько групп пользователя показывает шаг «Вход»; остальные — числом.
+const SHOWN_GROUPS: usize = 10;
+
+/// Имя пользователя и его группы (спец. §5.3): первые `SHOWN_GROUPS` через запятую, дальше «+N».
+fn auth_message(user: &str, groups: &[String]) -> LocalizedText {
+    if groups.is_empty() {
+        return ltext!(
+            "messages.connectionTest.authOk",
+            "Signed in as {{user}}",
+            user = user
+        );
+    }
+    let mut list = groups
+        .iter()
+        .take(SHOWN_GROUPS)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if groups.len() > SHOWN_GROUPS {
+        list.push_str(&format!(", +{}", groups.len() - SHOWN_GROUPS));
+    }
+    ltext!(
+        "messages.connectionTest.authOkGroups",
+        "Signed in as {{user}}, groups: {{groups}}",
+        user = user,
+        groups = list
+    )
+}
+
 /// Ошибка транспорта — до ответа API-сервера дело не дошло (TLS, DNS, соединение, таймаут,
 /// сеть). Различаем по ключу, а не по коду: `k8s::errors` отдаёт те же коды и для HTTP-ответов
 /// (429 — `Timeout`, 5xx — `ConnectionFailed`, прочие 4xx — `Internal`), а ответ сервера
@@ -184,16 +213,9 @@ pub async fn check_cluster(
         )
     };
     match whoami(client, limit).await {
-        Ok((user, _)) => {
+        Ok((user, groups)) => {
             steps.push(passed("tls", tls_ok));
-            steps.push(passed(
-                "auth",
-                ltext!(
-                    "messages.connectionTest.authOk",
-                    "Signed in as {{user}}",
-                    user = user
-                ),
-            ));
+            steps.push(passed("auth", auth_message(&user, &groups)));
         }
         // Ошибка транспорта: ответа сервера не было, значит, не прошёл TLS (или связь).
         Err(e) if is_transport_failure(&e) => {
@@ -401,7 +423,12 @@ mod tests {
                 ("projects", true)
             ]
         );
+        assert_eq!(steps[1].message.key, "messages.connectionTest.authOkGroups");
         assert_eq!(steps[1].message.params["user"], "dev1");
+        assert_eq!(
+            steps[1].message.params["groups"],
+            "system:authenticated, team-a"
+        );
         assert_eq!(
             steps[2].message.key,
             "messages.connectionTest.discoveryGroups"
@@ -440,6 +467,21 @@ mod tests {
             !seen
                 .iter()
                 .any(|s| s.path().contains("project.openshift.io"))
+        );
+    }
+
+    #[test]
+    fn sign_in_step_lists_ten_groups_and_counts_the_rest() {
+        assert_eq!(auth_message("u", &[]).key, "messages.connectionTest.authOk");
+        let groups: Vec<String> = (1..=12).map(|i| format!("g{i}")).collect();
+        let m = auth_message("u", &groups);
+        assert_eq!(
+            m.params["groups"],
+            "g1, g2, g3, g4, g5, g6, g7, g8, g9, g10, +2"
+        );
+        assert_eq!(
+            m.text,
+            "Signed in as u, groups: g1, g2, g3, g4, g5, g6, g7, g8, g9, g10, +2"
         );
     }
 

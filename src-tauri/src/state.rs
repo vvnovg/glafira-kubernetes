@@ -42,9 +42,12 @@ impl AppState {
 
     /// Клиент подключения: из пула или новое подключение (`fresh` — всегда новое; истекающие
     /// учётные данные exec-плагина — тоже). Подключения одного профиля идут по очереди, ожидание
-    /// exec-плагина отменяется так же, как вход через браузер (`logins`). Подключение, которое
-    /// запрещено политикой (CA `insecure`, exec-плагин), не открывается.
+    /// exec-плагина отменяется так же, как вход через браузер (`logins`). Кто ждал очереди, пока
+    /// чужая попытка не удалась (или её отменили), получает ту же ошибку: чтения одной вкладки
+    /// не запускают плагин по разу каждое. Подключение, которое запрещено политикой (CA
+    /// `insecure`, exec-плагин), не открывается.
     pub async fn connected(&self, id: &str, fresh: bool) -> AppResult<Arc<Connected>> {
+        let seen = self.pool.finished_attempts(id);
         let _turn = self.pool.connect_lock(id).await;
         if fresh {
             self.pool.evict(id);
@@ -52,6 +55,8 @@ impl AppState {
             && !c.expiring(SystemTime::now())
         {
             return Ok(c);
+        } else if let Some(e) = self.pool.failure_since(id, seen) {
+            return Err(e);
         }
         let generation = self.pool.generation(id);
         let profile = self.connections.get(id)?;
@@ -67,6 +72,8 @@ impl AppState {
         if let Some(n) = n {
             self.logins.finish(id, n);
         }
+        self.pool
+            .finish_attempt(id, generation, result.as_ref().err());
         let c = Arc::new(result?);
         self.pool.insert_if_current(id, generation, c.clone());
         Ok(c)
@@ -146,6 +153,103 @@ mod tests {
                 assert_eq!(e.key, key, "{id}, fresh = {fresh}");
             }
         }
+    }
+
+    /// Exec-плагин, который считает свои запуски (строка в `COUNT_FILE`) и через 0,3 с падает
+    /// (`fail`) или ждёт отмены (`wait`).
+    #[cfg(unix)]
+    fn counting_plugin(st: &AppState, dir: &Path, mode: &str) -> std::path::PathBuf {
+        use crate::storage::profile::{AuthConfig, ExecEnv, sample_exec};
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("kubectl");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\necho run >> \"$COUNT_FILE\"\ncase \"$3\" in\n  fail) sleep 0.3; exit 1 ;;\n  wait) sleep 30 ;;\nesac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let count = dir.join("count");
+        let mut exec = sample_exec();
+        exec.command = script.display().to_string();
+        exec.args = vec!["oidc-login".into(), "get-token".into(), mode.into()];
+        exec.env = vec![ExecEnv {
+            name: "COUNT_FILE".into(),
+            value: count.display().to_string(),
+        }];
+        exec.approved = Some(crate::auth::exec::fingerprint(&exec));
+        let mut p = sample_profile("e");
+        p.auth = AuthConfig::Exec(exec);
+        st.connections.upsert(p).unwrap();
+        count
+    }
+
+    /// Три чтения подключаются одновременно: плагин запускается один раз, все получают его ошибку.
+    #[cfg(unix)]
+    async fn concurrent_connects(st: &AppState) -> Vec<AppError> {
+        let first = tokio::spawn({
+            let st = st.clone();
+            async move { st.connected("e", false).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let rest: Vec<_> = (0..2)
+            .map(|_| {
+                let st = st.clone();
+                tokio::spawn(async move { st.connected("e", false).await })
+            })
+            .collect();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let mut errors = Vec::new();
+        for h in std::iter::once(first).chain(rest) {
+            errors.push(h.await.unwrap().err().expect("подключение не удалось"));
+        }
+        errors
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn waiters_share_the_failure_instead_of_rerunning_the_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = state(dir.path());
+        let count = counting_plugin(&st, dir.path(), "fail");
+        let errors = concurrent_connects(&st).await;
+        assert!(
+            errors.iter().all(|e| e.key == "errors.exec.failed"),
+            "{errors:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&count).unwrap().lines().count(), 1);
+        // Следующее подключение после неудачи — новая попытка.
+        let e = st.connected("e", false).await.err().unwrap();
+        assert_eq!(e.key, "errors.exec.failed");
+        assert_eq!(std::fs::read_to_string(&count).unwrap().lines().count(), 2);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_the_plugin_cancels_every_waiter() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = state(dir.path());
+        let count = counting_plugin(&st, dir.path(), "wait");
+        let waiting = tokio::spawn({
+            let st = st.clone();
+            async move { concurrent_connects(&st).await }
+        });
+        // Плагин запущен (записал строку) — отменяем его ожидание.
+        let started = async {
+            while !count.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), started)
+            .await
+            .expect("плагин запущен");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(st.logins.cancel("e"), "ожидание плагина отменяется");
+        let errors = waiting.await.unwrap();
+        assert!(
+            errors.iter().all(|e| e.key == "errors.oauth.cancelled"),
+            "{errors:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&count).unwrap().lines().count(), 1);
     }
 
     #[test]

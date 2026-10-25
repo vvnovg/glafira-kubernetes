@@ -16,7 +16,7 @@ vi.mock("../../api/client", async (importOriginal) => {
       moveItems: vi.fn(),
       getPolicyStatus: vi.fn(),
       resolveExecCommand: vi.fn(),
-      cancelOauthLogin: vi.fn(),
+      cancelConnectionTest: vi.fn(),
     },
   };
 });
@@ -261,6 +261,22 @@ describe("ConnectionForm", () => {
     renderWithClient(<ConnectionForm initial={newProfile()} tabId="t" />);
     const option = await screen.findByRole("option", { name: "Exec-плагин" });
     await waitFor(() => expect(option).toBeDisabled());
+  });
+
+  it("exec-плагин: «Отмена» во время проверки отменяет только проверку", async () => {
+    const approved: ConnectionProfile = {
+      ...newProfile(),
+      id: "e1",
+      name: "eks",
+      auth: { method: "exec", command: "/usr/local/bin/aws", args: ["eks", "get-token"], env: [], apiVersion: "client.authentication.k8s.io/v1beta1", provideClusterInfo: false, approved: "fp" },
+    };
+    vi.mocked(api.testConnection).mockReturnValue(new Promise(() => undefined));
+    vi.mocked(api.cancelConnectionTest).mockResolvedValue(true);
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionForm initial={approved} tabId="t" />);
+    await user.click(screen.getByRole("button", { name: "Проверить подключение" }));
+    await user.click(await screen.findByRole("button", { name: "Отмена" }));
+    expect(api.cancelConnectionTest).toHaveBeenCalledWith("e1");
   });
 
   it("удаление с подтверждением закрывает вкладки подключения", async () => {

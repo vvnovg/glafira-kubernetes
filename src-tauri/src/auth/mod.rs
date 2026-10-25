@@ -13,6 +13,12 @@ use tokio::sync::oneshot;
 
 use crate::sync::MutexExt;
 
+/// Ключ входа проверки подключения в `Logins`: проверка в форме и подключение вкладки того же
+/// профиля не отменяют друг друга.
+pub fn test_key(id: &str) -> String {
+    format!("test:{id}")
+}
+
 /// Идущие входы — через браузер и запуском exec-плагина: на подключение — один, новый
 /// отменяет прежний.
 #[derive(Default)]
@@ -75,5 +81,22 @@ mod tests {
         assert!(rx2.try_recv().is_ok());
         assert!(!l.cancel("a"));
         l.finish("a", n2);
+    }
+
+    #[test]
+    fn connection_test_and_connect_do_not_cancel_each_other() {
+        let l = Logins::default();
+        let (_, mut connect) = l.begin("a");
+        let (_, mut test) = l.begin(&test_key("a"));
+        assert!(
+            connect.try_recv().is_err(),
+            "проверка не отменила подключение"
+        );
+        assert!(l.cancel(&test_key("a")));
+        assert!(test.try_recv().is_ok());
+        assert!(
+            connect.try_recv().is_err(),
+            "отмена проверки не задела подключение"
+        );
     }
 }

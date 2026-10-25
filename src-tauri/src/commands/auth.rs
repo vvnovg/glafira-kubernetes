@@ -54,10 +54,19 @@ pub async fn start_oauth_login(
     Ok(c.info.clone())
 }
 
-/// Отменяет вход через браузер или ожидание exec-плагина (подключение и проверка).
+/// Отменяет вход через браузер или ожидание exec-плагина при подключении.
 #[tauri::command]
 pub fn cancel_oauth_login(state: State<'_, AppState>, connection_id: String) -> AppResult<bool> {
     Ok(state.logins.cancel(&connection_id))
+}
+
+/// Отменяет ожидание exec-плагина при проверке подключения в форме.
+#[tauri::command]
+pub fn cancel_connection_test(
+    state: State<'_, AppState>,
+    connection_id: String,
+) -> AppResult<bool> {
+    Ok(state.logins.cancel(&crate::auth::test_key(&connection_id)))
 }
 
 /// Абсолютный путь к команде exec-плагина — кнопка «Найти» в форме: PATH оболочки входа

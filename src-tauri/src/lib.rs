@@ -53,6 +53,7 @@ pub fn run() {
             commands::connections::set_connection_token,
             commands::auth::start_oauth_login,
             commands::auth::cancel_oauth_login,
+            commands::auth::cancel_connection_test,
             commands::auth::oauth_token_page,
             commands::auth::resolve_exec_command,
             commands::kubeconfig::preview_kubeconfig_import,

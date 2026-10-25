@@ -45,6 +45,15 @@ pub struct ClientPool {
 struct PoolInner {
     clients: HashMap<String, Arc<Connected>>,
     generations: HashMap<String, u64>,
+    attempts: HashMap<String, Attempts>,
+}
+
+/// Попытки подключения профиля: сколько завершилось и ошибка последней — вместе с поколением,
+/// при котором она началась.
+#[derive(Default)]
+struct Attempts {
+    finished: u64,
+    failure: Option<(u64, AppError)>,
 }
 
 impl ClientPool {
@@ -69,6 +78,36 @@ impl ClientPool {
         }
         inner.clients.insert(id.to_string(), c);
         true
+    }
+
+    /// Сколько попыток подключения `id` завершилось. Ожидающий очереди запоминает число до
+    /// `connect_lock`, чтобы потом узнать, чем кончилась попытка, которую он ждал.
+    pub fn finished_attempts(&self, id: &str) -> u64 {
+        self.inner
+            .lock_safe()
+            .attempts
+            .get(id)
+            .map_or(0, |a| a.finished)
+    }
+
+    /// Записывает итог попытки, начатой при поколении `generation`; `None` — удалась.
+    pub fn finish_attempt(&self, id: &str, generation: u64, failure: Option<&AppError>) {
+        let mut inner = self.inner.lock_safe();
+        let a = inner.attempts.entry(id.to_string()).or_default();
+        a.finished += 1;
+        a.failure = failure.map(|e| (generation, e.clone()));
+    }
+
+    /// Ошибка попытки, завершившейся после `seen`, если профиль с её начала не сбрасывали:
+    /// ожидавшие очереди получают её, а не запускают exec-плагин или вход ещё раз.
+    pub fn failure_since(&self, id: &str, seen: u64) -> Option<AppError> {
+        let inner = self.inner.lock_safe();
+        let a = inner.attempts.get(id)?;
+        let current = inner.generations.get(id).copied().unwrap_or(0);
+        match &a.failure {
+            Some((g, e)) if a.finished > seen && *g == current => Some(e.clone()),
+            _ => None,
+        }
     }
 
     /// Замок подключения `id` на время подключения.
@@ -158,6 +197,32 @@ mod tests {
         );
         assert!(!pool.evict("a"), "клиента уже нет");
         assert!(pool.insert_if_current("a", pool.generation("a"), connected()));
+    }
+
+    #[test]
+    fn failure_is_shared_only_with_those_who_waited_for_it() {
+        let pool = ClientPool::default();
+        let e = AppError::internal_with("boom");
+        let seen = pool.finished_attempts("a");
+        assert_eq!(pool.failure_since("a", seen).map(|e| e.key), None);
+        pool.finish_attempt("a", pool.generation("a"), Some(&e));
+        assert_eq!(
+            pool.failure_since("a", seen).and_then(|e| e.details),
+            Some("boom".into()),
+            "ждал эту попытку"
+        );
+        let later = pool.finished_attempts("a");
+        assert!(
+            pool.failure_since("a", later).is_none(),
+            "пришёл после неё — подключается сам"
+        );
+        pool.evict("a");
+        assert!(
+            pool.failure_since("a", seen).is_none(),
+            "профиль сбросили — прежняя ошибка не годится"
+        );
+        pool.finish_attempt("a", pool.generation("a"), None);
+        assert!(pool.failure_since("a", seen).is_none(), "удачная попытка");
     }
 
     #[tokio::test]

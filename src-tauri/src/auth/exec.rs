@@ -114,7 +114,6 @@ pub const ALLOWED: &[AllowedCommand] = &[
         leading: Some(LeadingOptions {
             values: &[
                 "--ca-bundle",
-                "--cli-binary-format",
                 "--cli-connect-timeout",
                 "--cli-read-timeout",
                 "--color",
@@ -844,8 +843,35 @@ fn plugin_path(command: &Path, dirs: &[PathBuf]) -> Option<String> {
         .map(|p| p.to_string_lossy().to_string())
 }
 
+/// Группа процессов плагина (на unix — своя, `process_group(0)`). Если ожидание прервано
+/// (отмена, таймаут, сбой), завершается вся группа: и плагин, и то, что он запустил (`sleep`,
+/// браузер, вспомогательные процессы), — `kill_on_drop` завершил бы только сам плагин. На
+/// Windows завершается только процесс плагина.
+struct PluginGroup(Option<u32>);
+
+impl PluginGroup {
+    /// Плагин завершился сам: его группу не трогаем.
+    fn release(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for PluginGroup {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.0.and_then(|p| libc::pid_t::try_from(p).ok()) {
+            // SAFETY: killpg только посылает сигнал группе, которую создали для плагина;
+            // если её уже нет, вызов вернёт ESRCH.
+            unsafe {
+                libc::killpg(pid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
 /// Запускает плагин: без оболочки, `stdin` закрыт, не дольше `limit`; `cancel` прерывает
-/// ожидание (как у входа через браузер). Процесс завершается вместе с ожиданием. Профиль могли
+/// ожидание (как у входа через браузер). Процесс завершается вместе с ожиданием — на unix
+/// вместе со всей своей группой (`PluginGroup`). Профиль могли
 /// поправить в обход проверки, поэтому абсолютный путь, список разрешённых команд и запрещённые
 /// переменные окружения проверяются и здесь. `path_env` — PATH процесса плагина.
 pub async fn run(
@@ -877,6 +903,8 @@ pub async fn run(
     if let Some(p) = path_env {
         cmd.env("PATH", p);
     }
+    #[cfg(unix)]
+    cmd.process_group(0);
     #[cfg(windows)]
     {
         // CREATE_NO_WINDOW: без мелькающего окна консоли.
@@ -892,6 +920,7 @@ pub async fn run(
         )
     };
     let child = cmd.spawn().map_err(start_error)?;
+    let group = PluginGroup(child.id());
     let output = tokio::select! {
         out = child.wait_with_output() => out.map_err(start_error)?,
         _ = cancel => return Err(crate::auth::callback::cancelled()),
@@ -905,6 +934,7 @@ pub async fn run(
             ));
         }
     };
+    group.release();
     // Значения секретных переменных и аргументов не попадают в текст ошибок.
     let secrets = secret_values(e);
     let secrets: Vec<&str> = secrets.iter().map(String::as_str).collect();
@@ -1166,6 +1196,17 @@ mod tests {
                 "/usr/local/bin/kubelogin",
                 &["--logtostderr", "get-token"][..],
                 "--logtostderr",
+            ),
+            // Только у AWS CLI v2, и к получению токена отношения не имеет.
+            (
+                "/usr/local/bin/aws",
+                &[
+                    "--cli-binary-format",
+                    "raw-in-base64-out",
+                    "eks",
+                    "get-token",
+                ][..],
+                "--cli-binary-format",
             ),
         ];
         for (cmd, a, option) in unknown {
@@ -1792,6 +1833,7 @@ case "$3" in
   path) printf '{"status":{"token":"%s"}}' "$PATH" ;;
   fail) echo "refresh token eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1In0.c2lnbmF0dXJl expired, key $AWS_SECRET_ACCESS_KEY, args $*" >&2; exit 3 ;;
   slow) sleep 30 ;;
+  orphan) sleep 30 & echo $! > "$PID_FILE"; sleep 30 ;;
   garbage) echo "not json" ;;
   wrongtype) printf '{"status":"opaque-t0ken-value"}' ;;
 esac
@@ -2029,6 +2071,69 @@ esac
                 started.elapsed() < Duration::from_secs(10),
                 "процесс не ждали"
             );
+        }
+
+        /// Процессы, которые запустил плагин, завершаются вместе с ним — и по таймауту, и по отмене.
+        #[tokio::test]
+        async fn timeout_and_cancel_stop_the_whole_process_group() {
+            /// pid фонового процесса, который записал плагин.
+            async fn started(pid_file: &Path) -> libc::pid_t {
+                let read = async {
+                    loop {
+                        if let Some(pid) = std::fs::read_to_string(pid_file)
+                            .ok()
+                            .and_then(|t| t.trim().parse().ok())
+                        {
+                            return pid;
+                        }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                };
+                tokio::time::timeout(Duration::from_secs(10), read)
+                    .await
+                    .expect("плагин записал pid")
+            }
+            async fn gone(pid: libc::pid_t) {
+                // SAFETY: kill с сигналом 0 только проверяет, есть ли процесс.
+                let alive = || unsafe { libc::kill(pid, 0) } == 0;
+                let stopped = async {
+                    while alive() {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                };
+                tokio::time::timeout(Duration::from_secs(5), stopped)
+                    .await
+                    .expect("процесс, запущенный плагином, завершён");
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let pid_file = dir.path().join("pid");
+            let mut e = plugin(dir.path(), "orphan");
+            e.env.push(ExecEnv {
+                name: "PID_FILE".into(),
+                value: pid_file.display().to_string(),
+            });
+            let timed_out = tokio::spawn({
+                let e = e.clone();
+                async move { go(&e, Duration::from_secs(3)).await }
+            });
+            let pid = started(&pid_file).await;
+            let err = timed_out.await.unwrap().unwrap_err();
+            assert_eq!(err.key, "errors.exec.timeout");
+            gone(pid).await;
+
+            std::fs::remove_file(&pid_file).unwrap();
+            let (tx, cancel) = oneshot::channel();
+            let waiting = tokio::spawn({
+                let e = e.clone();
+                async move { run(&e, "{}", None, cancel, Duration::from_secs(60)).await }
+            });
+            let pid = started(&pid_file).await;
+            tx.send(()).unwrap();
+            assert_eq!(
+                waiting.await.unwrap().unwrap_err().key,
+                "errors.oauth.cancelled"
+            );
+            gone(pid).await;
         }
 
         #[tokio::test]

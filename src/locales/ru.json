@@ -150,7 +150,8 @@
       "discovery": "{{platform}} · API-сервер {{version}}",
       "discoveryGroups": "{{platform}} · API-сервер {{version}} · найдены: {{groups}}",
       "projectsOk": "Доступных проектов: {{count}}",
-      "projectsManual": "Кластер не отдаёт вам список проектов; проектов в профиле: {{count}}"
+      "projectsManual": "Кластер не отдаёт вам список проектов; проектов в профиле: {{count}}",
+      "authOkGroups": "Вход выполнен: {{user}}, группы: {{groups}}"
     },
     "import": {
       "addressChanged": "«{{name}}»: адрес API меняется с {{from}} на {{to}}. Сохранённые учётные данные (токен, ключ или подтверждённый exec-плагин) будут отправлены на новый адрес.",

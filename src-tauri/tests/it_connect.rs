@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use glafira_kubernetes_lib::error::ErrorCode;
+use glafira_kubernetes_lib::k8s::cluster::can_i;
 use glafira_kubernetes_lib::k8s::{connectivity, kubeconfig, pool};
 use glafira_kubernetes_lib::platform::PlatformKind;
 use glafira_kubernetes_lib::policy::PolicyStatus;
@@ -78,6 +79,11 @@ async fn admin_certificate_passes_every_step() {
             ("projects", true)
         ]
     );
+    assert_eq!(
+        r.steps[3].message.key, "messages.connectionTest.authOkGroups",
+        "у администратора kind есть группы"
+    );
+    assert!(r.steps[3].message.params["groups"].contains("system:authenticated"));
     assert_eq!(r.steps[4].message.key, "messages.connectionTest.discovery");
     assert!(r.steps[4].message.params["platform"].starts_with("Kubernetes 1."));
     let c = pool::open(profile, secrets, no_cancel()).await.unwrap();
@@ -119,6 +125,12 @@ async fn service_account_sees_only_its_project() {
     assert_eq!(c.info.user, "system:serviceaccount:team-a:glafira-dev");
     assert!(!c.info.capabilities.list_nodes);
     assert!(!c.info.capabilities.list_projects);
+    // Роль edit есть только в team-a: права проверяются и в обе стороны.
+    let limit = std::time::Duration::from_secs(10);
+    let create =
+        |ns: &'static str| can_i(&c.client, limit, "create", "apps", "deployments", Some(ns));
+    assert!(create("team-a").await, "роль edit в team-a");
+    assert!(!create("default").await, "в default прав нет");
 }
 
 #[tokio::test]

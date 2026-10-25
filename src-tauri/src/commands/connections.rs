@@ -177,7 +177,8 @@ pub async fn delete_connection(state: State<'_, AppState>, id: String) -> AppRes
 
 /// Проверяет и несохранённый профиль: секреты из формы накладываются поверх keychain
 /// (с той же семантикой, что и при сохранении). Ожидание exec-плагина отменяет
-/// `cancel_oauth_login`.
+/// `cancel_connection_test`: у проверки свой ключ в `Logins`, и она не отменяет подключение
+/// вкладки того же профиля, а та — её.
 #[tauri::command]
 pub async fn test_connection(
     state: State<'_, AppState>,
@@ -201,7 +202,8 @@ pub async fn test_connection(
         overrides,
     });
     let exec = matches!(input.profile.auth, AuthConfig::Exec(_));
-    let (n, cancel) = match exec.then(|| state.logins.begin(&id)) {
+    let key = crate::auth::test_key(&id);
+    let (n, cancel) = match exec.then(|| state.logins.begin(&key)) {
         Some((n, rx)) => (Some(n), rx),
         None => (None, tokio::sync::oneshot::channel().1),
     };
@@ -213,7 +215,7 @@ pub async fn test_connection(
     )
     .await;
     if let Some(n) = n {
-        state.logins.finish(&id, n);
+        state.logins.finish(&key, n);
     }
     Ok(report)
 }

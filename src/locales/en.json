@@ -150,7 +150,8 @@
       "discovery": "{{platform}} · API server {{version}}",
       "discoveryGroups": "{{platform}} · API server {{version}} · found: {{groups}}",
       "projectsOk": "Available projects: {{count}}",
-      "projectsManual": "The cluster does not list projects for you; projects from the profile: {{count}}"
+      "projectsManual": "The cluster does not list projects for you; projects from the profile: {{count}}",
+      "authOkGroups": "Signed in as {{user}}, groups: {{groups}}"
     },
     "import": {
       "addressChanged": "“{{name}}”: the API address changes from {{from}} to {{to}}. The saved credentials (token, key or confirmed exec plugin) will be sent to the new address.",

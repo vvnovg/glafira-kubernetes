@@ -156,7 +156,13 @@ fn import_from_file(
     let snapshot = st.connections.snapshot();
     // Keychain читается до `update`: запрос доступа (на macOS — окно с паролем) не держит
     // блокировку записи хранилища, под которой ждали бы `list_connections` и `connections.get`.
-    let stored = StoredSecrets::read(st.secrets.as_ref(), &snapshot, &parsed);
+    // Без «Обновлять существующие» сохранённые подключения не меняются — предупреждать не о чем,
+    // и keychain не читается вовсе.
+    let stored = if update_existing {
+        StoredSecrets::read(st.secrets.as_ref(), &snapshot, &parsed)
+    } else {
+        StoredSecrets::default()
+    };
     if !apply {
         return Ok(plan_import(&snapshot, &parsed, &opts, &stored)?.preview);
     }
@@ -331,6 +337,24 @@ mod tests {
         let reads = probe.reads.lock().unwrap().clone();
         assert!(!reads.is_empty(), "токен прочитан");
         assert!(reads.iter().all(|locked| !locked), "{reads:?}");
+    }
+
+    /// Без «Обновлять существующие» предупреждать не о чем: ни предпросмотр, ни применение
+    /// keychain не читают (на macOS — без лишнего запроса доступа).
+    #[test]
+    fn import_without_updating_existing_does_not_touch_the_keychain() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = Arc::new(LockProbe::default());
+        let st = AppState::new(dir.path(), probe.clone()).unwrap();
+        st.connections.upsert(sample_profile("a")).unwrap();
+        probe.reads.lock().unwrap().clear();
+        let path = write_file(dir.path(), "https://api.changed:6443");
+
+        let preview = import_from_file(&st, &path, None, false, false).unwrap();
+        assert!(preview.updated.is_empty() && preview.warnings.is_empty());
+        let applied = import_from_file(&st, &path, None, false, true).unwrap();
+        assert_eq!(applied.added.len(), 1);
+        assert!(probe.reads.lock().unwrap().is_empty());
     }
 
     #[cfg(unix)]
