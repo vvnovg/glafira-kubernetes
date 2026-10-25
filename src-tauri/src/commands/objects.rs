@@ -4,6 +4,7 @@ use tauri::State;
 
 use crate::error::AppResult;
 use crate::k8s::events::{EventObject, EventRow};
+use crate::k8s::network::NetworkView;
 use crate::k8s::pods::{PodDetails, PodRow, WorkloadRef};
 use crate::k8s::read::Listed;
 use crate::k8s::workloads::{WorkloadDetails, WorkloadKind, WorkloadList};
@@ -82,6 +83,21 @@ pub async fn list_events(
     state
         .read_in(&connection_id, &namespace, |c| async move {
             crate::k8s::events::list_events(&c.reader(), &ns, object.as_ref()).await
+        })
+        .await
+}
+
+/// Сеть проекта: Services, Routes, Ingress, Gateway API — по группам API кластера.
+#[tauri::command]
+pub async fn get_network(
+    state: State<'_, AppState>,
+    connection_id: String,
+    namespace: String,
+) -> AppResult<NetworkView> {
+    let ns = namespace.clone();
+    state
+        .read_in(&connection_id, &namespace, |c| async move {
+            Ok(crate::k8s::network::get_network(&c.reader(), &ns, &c.info.api_groups).await)
         })
         .await
 }

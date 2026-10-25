@@ -122,3 +122,4 @@
 | `.github/workflows/ci.yml` | `.github/workflows/ci.yml` | `8bbd0bd` | адаптирован: без Kafka и MCP-крейта, стенд kind |
 | `docs/i18n/README.md` | `docs/i18n/README.md` | `8bbd0bd` | адаптирован: языки en и ru, без Kafka |
 | `docs/i18n/glossary.md` | `docs/i18n/glossary.md` | `8bbd0bd` | адаптирован: термины Kubernetes и OpenShift, en и ru |
+| `src-tauri/src/der.rs` | `src-tauri/src/tls/der.rs` | `8bbd0bd` | адаптирован: комментарий модуля |

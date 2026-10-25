@@ -8,6 +8,7 @@ pub mod containers;
 pub mod errors;
 pub mod events;
 pub mod kubeconfig;
+pub mod network;
 pub mod nodes;
 pub mod openshift;
 pub mod overview;

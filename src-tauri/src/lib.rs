@@ -2,6 +2,7 @@
 pub mod i18n;
 pub mod auth;
 pub mod commands;
+pub mod der;
 mod dock_name;
 pub mod error;
 pub mod k8s;
@@ -91,6 +92,7 @@ pub fn run() {
             commands::objects::list_pods,
             commands::objects::get_pod,
             commands::objects::list_events,
+            commands::objects::get_network,
         ])
         .run(tauri::generate_context!())
         .expect("error while building tauri application");
