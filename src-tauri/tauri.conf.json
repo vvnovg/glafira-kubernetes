@@ -1,0 +1,54 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Glafira for Kubernetes",
+  "mainBinaryName": "glafira-kubernetes",
+  "version": "0.1.0",
+  "identifier": "io.github.vvnovg.glafira.kubernetes",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Glafira for Kubernetes",
+        "width": 1400,
+        "height": 900,
+        "minWidth": 900,
+        "minHeight": 600,
+        "dragDropEnabled": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg", "msi", "deb", "rpm", "appimage"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "publisher": "Glafira for Kubernetes",
+    "category": "DeveloperTool",
+    "shortDescription": "Glafira for Kubernetes — desktop client for Kubernetes, OpenShift and Platform V DropApp",
+    "copyright": "© 2026 Viacheslav Novgorodtsev",
+    "linux": {
+      "deb": { "depends": ["libsecret-1-0"] },
+      "rpm": { "depends": ["libsecret"] }
+    },
+    "macOS": { "minimumSystemVersion": "11.0" },
+    "windows": {
+      "wix": {
+        "upgradeCode": "c3a3f458-3ec5-4961-909a-d0ee6b19db8a",
+        "language": ["en-US"]
+      }
+    }
+  }
+}
