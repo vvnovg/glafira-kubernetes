@@ -14,7 +14,7 @@ use crate::i18n::LocalizedText;
 use crate::policy::PolicyStatus;
 use crate::storage::profile::{
     AuthConfig, CaConfig, ConnectionProfile, EXEC_API_V1, EXEC_API_V1BETA1, Environment, ExecAuth,
-    ExecEnv, ProxyConfig, is_valid_namespace, normalize_profile, pem_certificates,
+    ExecEnv, ProxyConfig, REDACTED, is_valid_namespace, normalize_profile, pem_certificates,
 };
 
 /// Поиск команды exec-плагина: имя из kubeconfig и каталог файла → абсолютный путь.
@@ -60,11 +60,24 @@ pub struct KubeconfigPreview {
 }
 
 /// Подключение из контекста и его секреты.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ImportedContext {
     pub profile: ConnectionProfile,
     pub token: Option<String>,
     pub client_key: Option<String>,
+}
+
+/// Токен и приватный ключ не печатаются: структура может попасть в лог, `assert!` или сообщение
+/// об ошибке. Профиль секретов не содержит и печатается целиком.
+impl std::fmt::Debug for ImportedContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let hide = |secret: &Option<String>| secret.as_ref().map(|_| REDACTED);
+        f.debug_struct("ImportedContext")
+            .field("profile", &self.profile)
+            .field("token", &hide(&self.token))
+            .field("client_key", &hide(&self.client_key))
+            .finish()
+    }
 }
 
 /// Файл по умолчанию: первый путь из `$KUBECONFIG`, иначе `~/.kube/config`.
@@ -290,6 +303,13 @@ fn data_or_file(data: Option<&str>, path: Option<&str>) -> AppResult<Option<Stri
     }
 }
 
+/// Предпросмотр не соответствует файлу (устарел или чужой): внутренняя ошибка вместо паники.
+fn mismatch(name: &str, what: &str) -> AppError {
+    AppError::internal_with(format!(
+        "kubeconfig preview of context {name} is stale: {what}"
+    ))
+}
+
 /// Подключение из контекста `name`. Ошибка — если контекст не поддерживается или данные
 /// не читаются.
 pub fn import_context(
@@ -336,21 +356,21 @@ pub fn import_context(
     let mut client_key = None;
     let auth = match preview.auth {
         ImportAuth::Token => {
-            let u = u.expect("token auth has a user");
+            let u = u.ok_or_else(|| mismatch(name, "token without a user"))?;
             token = Some(match (&u.token, &u.token_file) {
                 (Some(t), _) => t.expose_secret().trim().to_string(),
                 (None, Some(f)) => file_text(f)?.trim().to_string(),
-                (None, None) => String::new(),
+                (None, None) => return Err(mismatch(name, "token without a token or a file")),
             });
             AuthConfig::Token
         }
         ImportAuth::ClientCert => {
-            let u = u.expect("cert auth has a user");
+            let u = u.ok_or_else(|| mismatch(name, "certificate without a user"))?;
             let cert = data_or_file(
                 u.client_certificate_data.as_deref(),
                 u.client_certificate.as_deref(),
             )?
-            .unwrap_or_default();
+            .ok_or_else(|| mismatch(name, "certificate without a client certificate"))?;
             client_key = data_or_file(
                 u.client_key_data.as_ref().map(|k| k.expose_secret()),
                 u.client_key.as_deref(),
@@ -364,7 +384,7 @@ pub fn import_context(
             preview
                 .exec
                 .clone()
-                .ok_or_else(|| AppError::internal_with("exec context without a launch line"))?,
+                .ok_or_else(|| mismatch(name, "exec without a launch line"))?,
         ),
     };
     let mut profile = ConnectionProfile {
@@ -701,6 +721,96 @@ contexts:
             import_context(&bad, "x", &p.contexts[0]).unwrap_err().key,
             "errors.kubeconfig.badBase64"
         );
+    }
+
+    /// `{:?}` импортированного контекста (лог, `unwrap_err`, `assert!`) не показывает ни токен,
+    /// ни приватный ключ.
+    #[test]
+    fn debug_of_imported_context_hides_token_and_key() {
+        let k = kc(&format!(
+            r#"
+clusters:
+- name: c
+  cluster: {{server: "https://api.c:6443"}}
+users:
+- name: t
+  user: {{token: "sha256~SECRET-TOKEN-TEXT"}}
+- name: k
+  user:
+    client-certificate-data: {cert}
+    client-key-data: {key}
+contexts:
+- name: with-token
+  context: {{cluster: c, user: t}}
+- name: with-key
+  context: {{cluster: c, user: k}}
+"#,
+            cert = b64(TEST_CERT_PEM),
+            key = b64("-----BEGIN PRIVATE KEY-----\nSECRET-KEY-BODY\n-----END PRIVATE KEY-----\n"),
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let p = preview(&k, dir.path(), &[], &open(), &installed);
+        let get = |n: &str| {
+            let c = p.contexts.iter().find(|c| c.name == n).unwrap();
+            import_context(&k, n, c).unwrap()
+        };
+
+        let with_token = get("with-token");
+        assert_eq!(
+            with_token.token.as_deref(),
+            Some("sha256~SECRET-TOKEN-TEXT")
+        );
+        let text = format!("{with_token:?}");
+        assert!(!text.contains("SECRET-TOKEN-TEXT"), "{text}");
+        assert!(text.contains("with-token"), "профиль виден: {text}");
+        assert!(text.contains("***"), "{text}");
+
+        let with_key = get("with-key");
+        assert!(
+            with_key
+                .client_key
+                .as_deref()
+                .unwrap()
+                .contains("SECRET-KEY-BODY")
+        );
+        let text = format!("{with_key:#?}");
+        assert!(!text.contains("SECRET-KEY-BODY"), "{text}");
+        assert!(!text.contains("BEGIN PRIVATE KEY"), "{text}");
+        assert!(text.contains("***"), "{text}");
+    }
+
+    /// Устаревший или чужой предпросмотр (способ входа не тот, что в файле) — внутренняя ошибка,
+    /// а не паника.
+    #[test]
+    fn mismatched_preview_is_an_internal_error_not_a_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let k = kc(&sample(dir.path()));
+        let p = preview(&k, dir.path(), &[], &open(), &installed);
+        let ctx = |n: &str| p.contexts.iter().find(|c| c.name == n).unwrap().clone();
+        // (контекст, способ входа в предпросмотре): в файле нет пользователя, либо у пользователя
+        // нет токена или сертификата.
+        for (name, auth) in [
+            ("no-user", ImportAuth::Token),
+            ("no-user", ImportAuth::ClientCert),
+            ("corp-oidc", ImportAuth::Token),
+            ("corp-oidc", ImportAuth::ClientCert),
+            ("kind-admin", ImportAuth::Token),
+            ("dev/api-dev:6443/alice", ImportAuth::ClientCert),
+        ] {
+            let mut c = ctx(name);
+            c.auth = auth;
+            let e = import_context(&k, name, &c).unwrap_err();
+            assert_eq!(
+                (e.code, e.key.as_str()),
+                (ErrorCode::Internal, "errors.internal"),
+                "{name} как {auth:?}"
+            );
+        }
+        // Предпросмотр говорит «exec», а строки запуска в нём нет.
+        let mut c = ctx("corp-oidc");
+        c.exec = None;
+        let e = import_context(&k, "corp-oidc", &c).unwrap_err();
+        assert_eq!(e.key, "errors.internal");
     }
 
     #[test]

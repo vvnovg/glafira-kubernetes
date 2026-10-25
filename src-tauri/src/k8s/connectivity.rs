@@ -643,6 +643,12 @@ mod tests {
         }
     }
 
+    /// Порт, на котором никто не слушает и который не достанется параллельному тесту: тесты берут
+    /// порт `0` из динамического диапазона, до порта 1 он не доходит. Порт, освобождённый после
+    /// закрытия слушателя, не годится — его мог занять другой тест. Привязанный, но не слушающий
+    /// сокет тоже не годится: на macOS он не отказывает, а молча роняет SYN (таймаут вместо отказа).
+    const REFUSED_PORT: u16 = 1;
+
     #[tokio::test]
     async fn tcp_probe_reaches_listener_and_reports_refused_port() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -651,11 +657,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(addr, format!("127.0.0.1:{port}"));
-        drop(listener);
-        let e = tcp_probe("127.0.0.1", port, Duration::from_secs(2))
+        let e = tcp_probe("127.0.0.1", REFUSED_PORT, Duration::from_secs(2))
             .await
             .unwrap_err();
         assert_eq!(e.code, ErrorCode::ConnectionFailed);
+        let details = e.details.unwrap().to_lowercase();
+        assert!(
+            details.contains("refused"),
+            "отказ, а не таймаут: {details}"
+        );
     }
 
     #[test]
@@ -735,11 +745,8 @@ mod tests {
 
     #[tokio::test]
     async fn closed_port_fails_tcp_step() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
         let mut p = sample_profile("a");
-        p.api_url = format!("https://127.0.0.1:{port}");
+        p.api_url = format!("https://127.0.0.1:{REFUSED_PORT}");
         p.proxy = crate::storage::profile::ProxyConfig::None;
         let secrets = MemoryStore::default();
         secrets.set(&secret_key("a", TOKEN), "t").unwrap();
