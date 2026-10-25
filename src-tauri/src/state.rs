@@ -122,17 +122,22 @@ impl AppState {
         result
     }
 
-    /// Сбрасывает клиент, если ошибка значит, что с этими учётными данными или TLS он работать
-    /// не будет: следующий вызов подключится заново и подхватит новый токен.
-    pub fn evict_if_broken(&self, id: &str, e: &AppError) -> bool {
+    /// Сбрасывает клиент `used` после ошибки запроса им, если с этими учётными данными или TLS
+    /// он работать не будет: следующий вызов подключится заново и подхватит новый токен.
+    /// Сбрасывает, только пока в пуле он сам (`ClientPool::evict_if_same`): ответ на запрос,
+    /// ушедший прежним клиентом, не выбивает клиент, к которому уже подключились заново. Вместе
+    /// с клиентом забывается кэш прав подключения — с новым токеном права могут быть другими.
+    /// `true` — клиент сброшен.
+    pub fn evict_if_broken_client(&self, id: &str, used: &Arc<Connected>, e: &AppError) -> bool {
         let broken = matches!(
             e.code,
             ErrorCode::SessionExpired | ErrorCode::AuthFailed | ErrorCode::TlsError
         );
-        if broken {
-            self.evict_connection(id);
+        let evicted = broken && self.pool.evict_if_same(id, used);
+        if evicted {
+            self.access.forget_connection(id);
         }
-        broken
+        evicted
     }
 
     /// Сбрасывает клиент подключения и кэш его прав в проектах: со следующим подключением
@@ -154,22 +159,6 @@ impl AppState {
         self.evict_connection(id);
         Ok(())
     }
-
-    /// Сбрасывает клиент `used` после ошибки запроса им, если с этими учётными данными или TLS
-    /// он работать не будет, — и только пока в пуле он сам (`ClientPool::evict_if_same`): ответ
-    /// на запрос, ушедший прежним клиентом, не выбивает клиент, к которому уже подключились
-    /// заново. `true` — клиент сброшен.
-    pub fn evict_if_broken_client(&self, id: &str, used: &Arc<Connected>, e: &AppError) -> bool {
-        breaks_client(e) && self.pool.evict_if_same(id, used)
-    }
-}
-
-/// С этими учётными данными или TLS клиент работать не будет (как в `evict_if_broken`).
-fn breaks_client(e: &AppError) -> bool {
-    matches!(
-        e.code,
-        ErrorCode::SessionExpired | ErrorCode::AuthFailed | ErrorCode::TlsError
-    )
 }
 
 #[cfg(test)]
@@ -394,7 +383,8 @@ mod tests {
         })
     }
 
-    /// Ошибка учётных данных или TLS от клиента из пула сбрасывает его, другие ошибки — нет.
+    /// Ошибка учётных данных или TLS от клиента из пула сбрасывает его вместе с кэшем прав
+    /// подключения, другие ошибки — нет.
     #[tokio::test]
     async fn credential_error_of_the_pooled_client_evicts_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -411,6 +401,11 @@ mod tests {
                 st.pool
                     .insert_if_current("a", st.pool.generation("a"), pooled.clone())
             );
+            st.access.put(
+                "a",
+                "team-a",
+                crate::k8s::access::NamespaceAccess::default(),
+            );
             let expected = pooled.clone();
             let e = st
                 .read("a", move |c| async move {
@@ -421,6 +416,11 @@ mod tests {
                 .unwrap_err();
             assert_eq!(e.code, code);
             assert_eq!(st.pool.get("a").is_none(), evicts, "{code:?}");
+            assert_eq!(
+                st.access.get("a", "team-a").is_none(),
+                evicts,
+                "{code:?}: кэш прав"
+            );
         }
     }
 
@@ -432,6 +432,11 @@ mod tests {
         let st = state(dir.path());
         let (old, new) = (pooled_client().await, pooled_client().await);
         assert!(st.pool.insert_if_current("a", st.pool.generation("a"), old));
+        st.access.put(
+            "a",
+            "team-a",
+            crate::k8s::access::NamespaceAccess::default(),
+        );
         let pool = st.pool.clone();
         let replacement = new.clone();
         let e = st
@@ -448,6 +453,10 @@ mod tests {
         assert_eq!(e.code, ErrorCode::SessionExpired);
         let kept = st.pool.get("a").expect("новый клиент остался в пуле");
         assert!(Arc::ptr_eq(&kept, &new));
+        assert!(
+            st.access.get("a", "team-a").is_some(),
+            "кэш прав нового клиента не тронут"
+        );
     }
 
     #[tokio::test]
@@ -514,28 +523,5 @@ mod tests {
         st.delete_connection_full("a").unwrap();
         assert!(cancel.is_cancelled());
         assert!(st.sessions.is_empty());
-    }
-
-    #[test]
-    fn only_credential_errors_evict() {
-        let dir = tempfile::tempdir().unwrap();
-        let st = state(dir.path());
-        for (code, evicts) in [
-            (ErrorCode::SessionExpired, true),
-            (ErrorCode::AuthFailed, true),
-            (ErrorCode::TlsError, true),
-            (ErrorCode::Timeout, false),
-            (ErrorCode::Forbidden, false),
-        ] {
-            let before = st.pool.generation("a");
-            let e = AppError::localized(code, LocalizedText::raw("x"));
-            assert_eq!(
-                breaks_client(&e),
-                evicts,
-                "{code:?}: тот же список, что у чтения"
-            );
-            assert_eq!(st.evict_if_broken("a", &e), evicts, "{code:?}");
-            assert_eq!(st.pool.generation("a") > before, evicts, "{code:?}");
-        }
     }
 }
