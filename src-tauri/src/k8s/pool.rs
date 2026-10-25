@@ -10,6 +10,7 @@ use crate::error::{AppError, AppResult};
 use crate::k8s::cluster::{ConnectionInfo, probe};
 use crate::k8s::config::{apply_exec_credential, build_kube_config, process_env, request_timeout};
 use crate::k8s::errors::from_kube;
+use crate::k8s::read::ReadClient;
 use crate::secrets::SecretStore;
 use crate::storage::profile::{AuthConfig, ConnectionProfile};
 use crate::sync::MutexExt;
@@ -24,6 +25,11 @@ pub struct Connected {
 }
 
 impl Connected {
+    /// Чтение кластера этим подключением.
+    pub fn reader(&self) -> ReadClient {
+        ReadClient::new(self.client.clone(), self.timeout)
+    }
+
     /// Учётные данные истекают в ближайшую минуту: пора запустить плагин снова.
     pub fn expiring(&self, now: SystemTime) -> bool {
         self.expires_at

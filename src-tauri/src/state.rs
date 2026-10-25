@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -20,6 +21,8 @@ pub struct AppState {
     pub pool: Arc<ClientPool>,
     /// Идущие входы: через браузер и запуском exec-плагина.
     pub logins: Arc<crate::auth::Logins>,
+    /// Сессии watch и логов.
+    pub sessions: Arc<crate::sessions::Sessions>,
 }
 
 impl AppState {
@@ -31,6 +34,7 @@ impl AppState {
             settings: Arc::new(crate::settings::SettingsStore::open(data_dir)),
             pool: Arc::new(ClientPool::default()),
             logins: Arc::new(crate::auth::Logins::default()),
+            sessions: Arc::new(crate::sessions::Sessions::default()),
         })
     }
 
@@ -79,6 +83,24 @@ impl AppState {
         Ok(c)
     }
 
+    /// Чтение кластера для команды: клиент из пула (или новое подключение) и `f` с ним. Ошибка
+    /// учётных данных или TLS сбрасывает клиент (`evict_if_broken`): следующее чтение подключится
+    /// заново.
+    pub async fn read<T, F, Fut>(&self, id: &str, f: F) -> AppResult<T>
+    where
+        F: FnOnce(Arc<Connected>) -> Fut,
+        Fut: Future<Output = AppResult<T>>,
+    {
+        let result = match self.connected(id, false).await {
+            Ok(c) => f(c).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = &result {
+            self.evict_if_broken(id, e);
+        }
+        result
+    }
+
     /// Сбрасывает клиент, если ошибка значит, что с этими учётными данными или TLS он работать
     /// не будет: следующий вызов подключится заново и подхватит новый токен.
     pub fn evict_if_broken(&self, id: &str, e: &AppError) -> bool {
@@ -96,9 +118,11 @@ impl AppState {
         self.pool.evict(id);
     }
 
-    /// Удаляет подключение целиком: профиль, секреты и клиент. Блокирующий вызов (keychain).
+    /// Удаляет подключение целиком: профиль, секреты, клиент и сессии. Блокирующий вызов
+    /// (keychain).
     pub fn delete_connection_full(&self, id: &str) -> AppResult<()> {
         self.connections.delete(id)?;
+        self.sessions.stop_for(id);
         for field in crate::secrets::CONNECTION_SECRET_FIELDS {
             self.secrets
                 .delete(&crate::secrets::secret_key(id, field))?;
@@ -303,6 +327,25 @@ mod tests {
                 "{f}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn failed_read_of_an_unknown_connection_reports_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = state(dir.path());
+        let e = st.read("nope", |_| async { Ok(()) }).await.unwrap_err();
+        assert_eq!(e.code, ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn deleting_a_connection_stops_its_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = state(dir.path());
+        st.connections.upsert(sample_profile("a")).unwrap();
+        let (_, cancel) = st.sessions.register("a");
+        st.delete_connection_full("a").unwrap();
+        assert!(cancel.is_cancelled());
+        assert!(st.sessions.is_empty());
     }
 
     #[test]

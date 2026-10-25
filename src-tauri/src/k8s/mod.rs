@@ -6,5 +6,6 @@ pub mod connectivity;
 pub mod errors;
 pub mod kubeconfig;
 pub mod pool;
+pub mod read;
 #[cfg(test)]
 pub(crate) mod testing;

@@ -24,6 +24,17 @@ impl Seen {
 pub fn mock_client(
     handler: impl Fn(&Seen) -> (u16, serde_json::Value) + Send + 'static,
 ) -> (kube::Client, tokio::task::JoinHandle<Vec<Seen>>) {
+    mock_raw(move |s| {
+        let (code, json) = handler(s);
+        (code, serde_json::to_vec(&json).unwrap())
+    })
+}
+
+/// Как `mock_client`, но тело ответа — байты как есть (текст `/readyz`, строки лога, события
+/// watch по строке на событие).
+pub fn mock_raw(
+    handler: impl Fn(&Seen) -> (u16, Vec<u8>) + Send + 'static,
+) -> (kube::Client, tokio::task::JoinHandle<Vec<Seen>>) {
     let (svc, mut handle) = tower_test::mock::pair::<Request<Body>, Response<Body>>();
     let task = tokio::spawn(async move {
         let mut seen = Vec::new();
@@ -41,12 +52,12 @@ pub fn mock_client(
                 serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
             };
             let s = Seen { method, uri, body };
-            let (code, json) = handler(&s);
+            let (code, bytes) = handler(&s);
             seen.push(s);
             send.send_response(
                 Response::builder()
                     .status(code)
-                    .body(Body::from(serde_json::to_vec(&json).unwrap()))
+                    .body(Body::from(bytes))
                     .unwrap(),
             );
         }

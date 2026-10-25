@@ -10,6 +10,7 @@ pub mod platform;
 pub mod policy;
 pub mod product;
 pub mod secrets;
+pub mod sessions;
 pub mod settings;
 pub mod state;
 pub mod storage;
@@ -69,6 +70,7 @@ pub fn run() {
             commands::settings::get_language_settings,
             commands::settings::set_language,
             commands::settings::get_policy_status,
+            commands::sessions::stop_session,
         ])
         .run(tauri::generate_context!())
         .expect("error while building tauri application");

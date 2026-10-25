@@ -245,8 +245,10 @@ pub async fn connection_info(st: &AppState, id: &str, fresh: bool) -> AppResult<
     }
 }
 
+/// Отключение: клиент сбрасывается, сессии watch и логов подключения останавливаются.
 #[tauri::command]
 pub fn disconnect(state: State<'_, AppState>, connection_id: String) -> AppResult<()> {
+    state.sessions.stop_for(&connection_id);
     state.evict_connection(&connection_id);
     Ok(())
 }
