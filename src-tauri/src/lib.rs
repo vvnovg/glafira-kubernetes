@@ -88,6 +88,9 @@ pub fn run() {
             commands::projects::get_namespace_access,
             commands::objects::list_workloads,
             commands::objects::get_workload,
+            commands::objects::list_pods,
+            commands::objects::get_pod,
+            commands::objects::list_events,
         ])
         .run(tauri::generate_context!())
         .expect("error while building tauri application");
