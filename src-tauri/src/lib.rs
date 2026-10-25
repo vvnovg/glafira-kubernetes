@@ -93,6 +93,11 @@ pub fn run() {
             commands::objects::get_pod,
             commands::objects::list_events,
             commands::objects::get_network,
+            commands::objects::get_config,
+            commands::objects::get_config_map_values,
+            commands::objects::list_pvcs,
+            commands::objects::get_quotas,
+            commands::objects::get_yaml,
         ])
         .run(tauri::generate_context!())
         .expect("error while building tauri application");

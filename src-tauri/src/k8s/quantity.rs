@@ -1,0 +1,98 @@
+//! Quantity Kubernetes числом: `500m` → 0,5, `128Mi` → 134 217 728, `2e3` → 2000. Нужно,
+//! чтобы считать использование квот (и дальше — ресурсы контейнеров, этап O3).
+
+/// Значение quantity или `None`, если строка — не quantity.
+pub fn parse_quantity(q: &str) -> Option<f64> {
+    let q = q.trim();
+    let (number, suffix) = q.split_at(number_end(q.as_bytes()));
+    let multiplier = match suffix {
+        "" => 1.0,
+        "n" => 1e-9,
+        "u" => 1e-6,
+        "m" => 1e-3,
+        "k" => 1e3,
+        "M" => 1e6,
+        "G" => 1e9,
+        "T" => 1e12,
+        "P" => 1e15,
+        "E" => 1e18,
+        "Ki" => 1024.0,
+        "Mi" => 1024f64.powi(2),
+        "Gi" => 1024f64.powi(3),
+        "Ti" => 1024f64.powi(4),
+        "Pi" => 1024f64.powi(5),
+        "Ei" => 1024f64.powi(6),
+        _ => return None,
+    };
+    if number.is_empty() {
+        return None;
+    }
+    number.parse::<f64>().ok().map(|n| n * multiplier)
+}
+
+/// Где кончается число: знак, цифры и точка, затем показатель `e3` (`E` без цифр — суффикс).
+fn number_end(b: &[u8]) -> usize {
+    let digits = |mut i: usize| {
+        while i < b.len() && (b[i].is_ascii_digit() || b[i] == b'.') {
+            i += 1;
+        }
+        i
+    };
+    let mut i = digits(usize::from(
+        b.first().is_some_and(|c| *c == b'+' || *c == b'-'),
+    ));
+    if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
+        let mut j = i + 1;
+        if j < b.len() && (b[j] == b'+' || b[j] == b'-') {
+            j += 1;
+        }
+        if j < b.len() && b[j].is_ascii_digit() {
+            i = digits(j);
+        }
+    }
+    i
+}
+
+/// Доля `used` от `hard`; `None`, если что-то не разобрано или лимит нулевой.
+pub fn ratio(used: &str, hard: &str) -> Option<f64> {
+    let hard = parse_quantity(hard).filter(|h| *h > 0.0)?;
+    Some(parse_quantity(used)? / hard)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quantities() {
+        for (q, v) in [
+            ("1", 1.0),
+            ("500m", 0.5),
+            ("2.5", 2.5),
+            ("128Mi", 134_217_728.0),
+            ("1Gi", 1_073_741_824.0),
+            ("1k", 1000.0),
+            ("2e3", 2000.0),
+            ("1.5G", 1.5e9),
+            ("100n", 1e-7),
+            ("1E", 1e18),
+            ("1Ei", 1024f64.powi(6)),
+            ("2E3", 2000.0),
+        ] {
+            let got = parse_quantity(q).unwrap();
+            assert!((got - v).abs() < 1e-9 * v.max(1.0), "{q}: {got}");
+        }
+        for bad in ["", "Mi", "1Xi", "e3", "abc"] {
+            assert_eq!(parse_quantity(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn ratios() {
+        assert_eq!(ratio("500m", "1"), Some(0.5));
+        assert_eq!(ratio("9", "10"), Some(0.9));
+        assert_eq!(ratio("1Gi", "2Gi"), Some(0.5));
+        assert_eq!(ratio("1", "0"), None);
+        assert_eq!(ratio("x", "1"), None);
+    }
+}
