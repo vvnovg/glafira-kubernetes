@@ -72,6 +72,37 @@ fn exit_text(t: &k8s_openapi::api::core::v1::ContainerStateTerminated) -> String
     }
 }
 
+/// Имена нативных sidecar-контейнеров пода: init-контейнеры с `restartPolicy: Always`
+/// (Kubernetes 1.29+, OpenShift 4.16+). Статус init-контейнера сопоставляется со спецификацией
+/// по имени: `started` бывает и у обычного init-контейнера, пока он работает, но проходным
+/// он считается только у sidecar'а.
+fn sidecar_names(p: &Pod) -> BTreeSet<&str> {
+    p.spec
+        .iter()
+        .flat_map(|s| s.init_containers.iter().flatten())
+        .filter(|c| c.restart_policy.as_deref() == Some("Always"))
+        .map(|c| c.name.as_str())
+        .collect()
+}
+
+/// Статусы нативных sidecar-контейнеров пода.
+fn sidecar_statuses(p: &Pod) -> impl Iterator<Item = &ContainerStatus> {
+    let names = sidecar_names(p);
+    statuses(p, true)
+        .iter()
+        .filter(move |c| names.contains(c.name.as_str()))
+}
+
+/// Условие `Initialized` выполнено: kubectl тогда разбирает и основные контейнеры, даже если
+/// sidecar сейчас перезапускается.
+fn initialized(p: &Pod) -> bool {
+    p.status
+        .as_ref()
+        .and_then(|s| s.conditions.as_ref())
+        .and_then(|cs| cs.iter().find(|c| c.type_ == "Initialized"))
+        .is_some_and(|c| c.status == "True")
+}
+
 /// Статус пода по правилам `kubectl get pods` (printPod).
 pub fn pod_status(p: &Pod) -> String {
     let status = p.status.as_ref();
@@ -85,13 +116,19 @@ pub fn pod_status(p: &Pod) -> String {
         .as_ref()
         .and_then(|s| s.init_containers.as_ref())
         .map_or(0, Vec::len);
+    let sidecars = sidecar_names(p);
     let mut initializing = false;
     for (i, c) in statuses(p, true).iter().enumerate() {
         let state = c.state.as_ref();
-        if let Some(t) = state.and_then(|s| s.terminated.as_ref()) {
-            if t.exit_code == 0 {
-                continue;
-            }
+        let terminated = state.and_then(|s| s.terminated.as_ref());
+        if terminated.is_some_and(|t| t.exit_code == 0) {
+            continue;
+        }
+        // Запущенный sidecar не держит инициализацию: он работает, пока работает под.
+        if sidecars.contains(c.name.as_str()) && c.started == Some(true) {
+            continue;
+        }
+        if let Some(t) = terminated {
             reason = match t.reason.as_deref().filter(|r| !r.is_empty()) {
                 Some(r) => format!("Init:{r}"),
                 None => format!("Init:{}", exit_text(t)),
@@ -108,7 +145,7 @@ pub fn pod_status(p: &Pod) -> String {
         initializing = true;
         break;
     }
-    if !initializing {
+    if !initializing || initialized(p) {
         let mut running = false;
         for c in statuses(p, false).iter().rev() {
             let state = c.state.as_ref();
@@ -225,7 +262,11 @@ pub fn owner_of(p: &Pod) -> Option<OwnerRef> {
 pub fn pod_row(p: &Pod) -> PodRow {
     let status = p.status.as_ref();
     let main = statuses(p, false);
-    let last_restart = main
+    // Как в kubectl: нативные sidecar'ы считаются и в READY, и в общем числе контейнеров,
+    // а их рестарты — в RESTARTS.
+    let sidecars: Vec<&ContainerStatus> = sidecar_statuses(p).collect();
+    let counted: Vec<&ContainerStatus> = main.iter().chain(sidecars.iter().copied()).collect();
+    let last_restart = counted
         .iter()
         .filter_map(|c| {
             c.last_state
@@ -242,9 +283,14 @@ pub fn pod_row(p: &Pod) -> PodRow {
             .unwrap_or_else(|| "Unknown".into()),
         status: pod_status(p),
         problem: pod_problem(p),
-        ready: main.iter().filter(|c| c.ready).count() as i32,
-        containers: p.spec.as_ref().map_or(0, |s| s.containers.len() as i32),
-        restarts: main.iter().map(|c| c.restart_count).sum(),
+        ready: (main.iter().filter(|c| c.ready).count()
+            + sidecars
+                .iter()
+                .filter(|c| c.started == Some(true) && c.ready)
+                .count()) as i32,
+        containers: (p.spec.as_ref().map_or(0, |s| s.containers.len()) + sidecar_names(p).len())
+            as i32,
+        restarts: counted.iter().map(|c| c.restart_count).sum(),
         last_restart,
         node: p.spec.as_ref().and_then(|s| s.node_name.clone()),
         created: created(&p.metadata),
@@ -274,9 +320,8 @@ pub async fn list_pods(
             .await?
             .map(|p| pod_row(&p))),
         Some(w) if w.kind == WorkloadKind::CronJob => {
-            let jobs: BTreeSet<String> = r
-                .list::<Job>(ns, &ListParams::default())
-                .await?
+            let all_jobs = r.list::<Job>(ns, &ListParams::default()).await?;
+            let jobs: BTreeSet<String> = all_jobs
                 .items
                 .into_iter()
                 .filter(|j| {
@@ -292,21 +337,25 @@ pub async fn list_pods(
             let rows: Vec<PodRow> = pods
                 .items
                 .iter()
+                .filter(|p| owner_of(p).is_some_and(|o| o.kind == "Job" && jobs.contains(&o.name)))
                 .map(pod_row)
-                .filter(|p| {
-                    p.owner
-                        .as_ref()
-                        .is_some_and(|o| o.kind == "Job" && jobs.contains(&o.name))
-                })
                 .collect();
             Ok(Listed {
                 items: rows,
-                truncated: pods.truncated,
+                truncated: all_jobs.truncated || pods.truncated,
             })
         }
         Some(w) => {
             let selector = pod_selector(r, namespace, w.kind, &w.name).await?;
-            Ok(r.list::<Pod>(ns, &by_labels(selector.as_deref()))
+            // Без селектора поды workload'а определить нечем; пустой селектор подошёл бы всем
+            // подам проекта, а это чужие поды.
+            let Some(selector) = selector.filter(|s| !s.is_empty()) else {
+                return Ok(Listed {
+                    items: Vec::new(),
+                    truncated: false,
+                });
+            };
+            Ok(r.list::<Pod>(ns, &by_labels(Some(&selector)))
                 .await?
                 .map(|p| pod_row(&p)))
         }
@@ -618,6 +667,107 @@ mod tests {
         assert_eq!(pod_problem(&pod), Some(PodProblem::CrashLoop));
     }
 
+    /// Под `base` с нативным sidecar'ом `proxy` (init-контейнер с `restartPolicy: Always`):
+    /// `started` — поле статуса (`None` — не заполнено), `state` — JSON `ContainerState`.
+    fn with_sidecar(
+        mut base: serde_json::Value,
+        started: Option<bool>,
+        state: serde_json::Value,
+    ) -> serde_json::Value {
+        base["spec"]["initContainers"] =
+            serde_json::json!([{"name": "proxy", "restartPolicy": "Always"}]);
+        let mut status = serde_json::json!({"name": "proxy", "image": "x", "imageID": "",
+            "ready": started == Some(true), "restartCount": 2, "state": state,
+            "lastState": {"terminated": {"exitCode": 1, "finishedAt": "2026-10-25T10:07:00Z"}}});
+        if let Some(s) = started {
+            status["started"] = s.into();
+        }
+        base["status"]["initContainerStatuses"] = serde_json::json!([status]);
+        base
+    }
+
+    #[test]
+    fn a_started_sidecar_does_not_hold_the_pod_in_init() {
+        let p = from(with_sidecar(
+            running("a"),
+            Some(true),
+            serde_json::json!({"running": {}}),
+        ));
+        assert_eq!(pod_status(&p), "Running");
+        let row = pod_row(&p);
+        assert_eq!(
+            (row.ready, row.containers, row.restarts),
+            (2, 2, 2),
+            "sidecar считается и в готовых, и в общем числе, и в рестартах"
+        );
+        assert_eq!(row.last_restart, Some(1_792_922_820));
+        assert_eq!(row.problem, None);
+        // Запущен, но проба ещё не прошла: в общем числе есть, готовым не считается.
+        let mut not_ready =
+            with_sidecar(running("a"), Some(true), serde_json::json!({"running": {}}));
+        not_ready["status"]["initContainerStatuses"][0]["ready"] = false.into();
+        let row = pod_row(&from(not_ready));
+        assert_eq!((row.ready, row.containers), (1, 2));
+        // Запущенный sidecar проходной, но следующий за ним обычный init-контейнер ещё работает:
+        // номер в `Init:N/M` — позиция среди всех init-контейнеров.
+        let mut mixed = with_sidecar(running("a"), Some(true), serde_json::json!({"running": {}}));
+        mixed["spec"]["initContainers"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"name": "migrate"}));
+        mixed["status"]["initContainerStatuses"]
+            .as_array_mut()
+            .unwrap()
+            .push(
+                serde_json::json!({"name": "migrate", "image": "x", "imageID": "", "ready": false,
+                "restartCount": 0, "started": true, "state": {"running": {}}}),
+            );
+        assert_eq!(pod_status(&from(mixed)), "Init:1/2");
+    }
+
+    #[test]
+    fn a_sidecar_that_has_not_started_holds_the_pod_in_init() {
+        for started in [Some(false), None] {
+            let mut v = with_sidecar(running("a"), started, serde_json::json!({"running": {}}));
+            v["status"]["phase"] = "Pending".into();
+            v["status"]["containerStatuses"] = serde_json::json!([{"name": "web", "image": "web:1",
+                "imageID": "", "ready": false, "restartCount": 0,
+                "state": {"waiting": {"reason": "PodInitializing"}}}]);
+            let p = from(v);
+            assert_eq!(pod_status(&p), "Init:0/1", "started: {started:?}");
+            let row = pod_row(&p);
+            assert_eq!((row.ready, row.containers), (0, 2));
+        }
+    }
+
+    #[test]
+    fn started_is_not_enough_for_a_regular_init_container() {
+        // `started` бывает и у обычного init-контейнера, пока он работает: по статусу без
+        // спецификации его не отличить от sidecar'а.
+        let mut p = running("a");
+        p["spec"]["initContainers"] = serde_json::json!([{"name": "migrate"}]);
+        p["status"]["initContainerStatuses"] = serde_json::json!([{"name": "migrate",
+            "image": "x", "imageID": "", "ready": false, "restartCount": 0, "started": true,
+            "state": {"running": {}}}]);
+        let p = from(p);
+        assert_eq!(pod_status(&p), "Init:0/1");
+        assert_eq!(pod_row(&p).containers, 1);
+    }
+
+    #[test]
+    fn main_containers_are_read_once_the_pod_is_initialized() {
+        // Sidecar перезапускается (`started` сброшен), а под уже инициализирован: kubectl
+        // разбирает и основные контейнеры.
+        let mut v = with_sidecar(
+            crash_looping("a"),
+            Some(false),
+            serde_json::json!({"running": {}}),
+        );
+        assert_eq!(pod_status(&from(v.clone())), "Init:0/1");
+        v["status"]["conditions"] = serde_json::json!([{"type": "Initialized", "status": "True"}]);
+        assert_eq!(pod_status(&from(v)), "CrashLoopBackOff");
+    }
+
     #[test]
     fn owners_are_workloads_when_known() {
         assert_eq!(
@@ -759,5 +909,91 @@ mod tests {
             "{}",
             pods_of_web.uri
         );
+    }
+
+    #[tokio::test]
+    async fn a_workload_without_a_selector_has_no_pods_instead_of_all_of_them() {
+        let (client, server) = mock_client(|s| match s.path() {
+            // Пустой селектор: `matchLabels` нет.
+            "/apis/apps/v1/namespaces/team-a/deployments/web" => {
+                let mut d = crate::k8s::workloads::fixtures::deployment("web", 1, 1);
+                d["spec"]["selector"] = serde_json::json!({});
+                (200, d)
+            }
+            // Селектора нет вовсе.
+            "/apis/batch/v1/namespaces/team-a/jobs/migrate" => (
+                200,
+                serde_json::json!({"apiVersion": "batch/v1", "kind": "Job",
+                    "metadata": {"name": "migrate"}, "spec": {"template": {}}}),
+            ),
+            _ => (200, list(vec![running("web-7d9f-a"), running("other")])),
+        });
+        let r = ReadClient::new(client, Duration::from_secs(5));
+        for (kind, name) in [
+            (WorkloadKind::Deployment, "web"),
+            (WorkloadKind::Job, "migrate"),
+        ] {
+            let w = WorkloadRef {
+                kind,
+                name: name.into(),
+            };
+            let l = list_pods(&r, "team-a", Some(&w)).await.unwrap();
+            assert!(l.items.is_empty() && !l.truncated, "{name}: {:?}", l.items);
+        }
+        drop(r);
+        let uris: Vec<_> = server.await.unwrap().into_iter().map(|s| s.uri).collect();
+        assert!(
+            uris.iter().all(|u| !u.contains("/pods")),
+            "список подов не запрашивался: {uris:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pods_of_a_cron_job_are_truncated_when_either_list_is() {
+        let job_pod = |name: &str| {
+            let mut p = running(name);
+            p["metadata"]["ownerReferences"] = serde_json::json!([{"apiVersion": "batch/v1",
+                "kind": "Job", "name": "report-1", "uid": "j", "controller": true}]);
+            p
+        };
+        let cron = WorkloadRef {
+            kind: WorkloadKind::CronJob,
+            name: "report".into(),
+        };
+        // (Jobs не прочитаны до конца, Pod'ы не прочитаны до конца) → ожидаемые поды.
+        for (more_jobs, more_pods, expected) in
+            [(true, false, 1), (false, true, 0), (false, false, 1)]
+        {
+            let (client, server) = mock_client(move |s| {
+                let more =
+                    |on: bool| serde_json::json!({"continue": if on { "again" } else { "" }});
+                if s.path() == "/apis/batch/v1/namespaces/team-a/jobs" {
+                    (
+                        200,
+                        serde_json::json!({"apiVersion": "batch/v1", "kind": "JobList",
+                            "metadata": more(more_jobs), "items": [{"metadata": {"name": "report-1",
+                                "ownerReferences": [{"apiVersion": "batch/v1", "kind": "CronJob",
+                                    "name": "report", "uid": "c", "controller": true}]}}]}),
+                    )
+                } else {
+                    let items = if more_pods {
+                        vec![]
+                    } else {
+                        vec![job_pod("report-1-x"), running("web-7d9f-a")]
+                    };
+                    (
+                        200,
+                        serde_json::json!({"apiVersion": "v1", "kind": "PodList",
+                            "metadata": more(more_pods), "items": items}),
+                    )
+                }
+            });
+            let r = ReadClient::new(client, Duration::from_secs(5));
+            let l = list_pods(&r, "team-a", Some(&cron)).await.unwrap();
+            assert_eq!(l.truncated, more_jobs || more_pods);
+            assert_eq!(l.items.len(), expected, "{more_jobs} {more_pods}");
+            drop(r);
+            server.await.unwrap();
+        }
     }
 }
