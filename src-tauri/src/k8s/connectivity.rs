@@ -145,6 +145,18 @@ fn discovery_message(d: &Discovered) -> LocalizedText {
     }
 }
 
+/// Ошибка транспорта — до ответа API-сервера дело не дошло (TLS, DNS, соединение, таймаут,
+/// сеть). Различаем по ключу, а не по коду: `k8s::errors` отдаёт те же коды и для HTTP-ответов
+/// (429 — `Timeout`, 5xx — `ConnectionFailed`, прочие 4xx — `Internal`), а ответ сервера
+/// доказывает, что TLS-рукопожатие прошло.
+fn is_transport_failure(e: &AppError) -> bool {
+    e.code == ErrorCode::TlsError
+        || matches!(
+            e.key.as_str(),
+            "errors.k8s.dns" | "errors.k8s.connect" | "errors.k8s.timeout" | "errors.k8s.transport"
+        )
+}
+
 /// Шаги после TCP на готовом клиенте: TLS и вход (одним запросом «кто я»), discovery, проекты.
 pub async fn check_cluster(
     steps: &mut Vec<TestStep>,
@@ -175,13 +187,8 @@ pub async fn check_cluster(
                 ),
             ));
         }
-        // Ошибка транспорта: до ответа сервера дело не дошло, значит, не прошёл TLS (или связь).
-        Err(e)
-            if matches!(
-                e.code,
-                ErrorCode::TlsError | ErrorCode::ConnectionFailed | ErrorCode::Timeout
-            ) || (e.code == ErrorCode::Internal && e.key != "errors.k8s.unexpectedResponse") =>
-        {
+        // Ошибка транспорта: ответа сервера не было, значит, не прошёл TLS (или связь).
+        Err(e) if is_transport_failure(&e) => {
             steps.push(failed_step("tls", e));
             return false;
         }
@@ -477,6 +484,27 @@ mod tests {
         }
     }
 
+    /// Коды ошибок `k8s::errors` переиспользуются для HTTP-ответов: 429 — это `Timeout`, 5xx —
+    /// `ConnectionFailed`, прочие 4xx — `Internal`. Но это ответы сервера, значит, TLS прошёл.
+    #[tokio::test]
+    async fn overloaded_and_unusual_server_answers_fail_auth_not_tls() {
+        for (code, expected, key) in [
+            (429, ErrorCode::Timeout, "errors.k8s.tooManyRequests"),
+            (503, ErrorCode::ConnectionFailed, "errors.k8s.serverError"),
+            (405, ErrorCode::Internal, "errors.k8s.apiError"),
+        ] {
+            let (ok, steps) = steps_for_answer(
+                status(code, "Failure", "server says no"),
+                &sample_profile("a"),
+            )
+            .await;
+            assert!(!ok);
+            assert_eq!(names(&steps), [("tls", true), ("auth", false)], "{code}");
+            let e = steps[1].error.as_ref().unwrap();
+            assert_eq!((e.code, e.key.as_str()), (expected, key), "{code}");
+        }
+    }
+
     /// Ответ не от API-сервера (например, HTML-страница): соединение и TLS в порядке.
     #[tokio::test]
     async fn unexpected_response_fails_auth_not_tls() {
@@ -518,23 +546,39 @@ mod tests {
     /// Ошибки транспорта (до ответа сервера) по-прежнему относятся к шагу `tls`.
     #[tokio::test]
     async fn transport_errors_fail_tls() {
-        for (text, code) in [
+        for (text, code, key) in [
             (
                 "invalid peer certificate: UnknownIssuer",
                 ErrorCode::TlsError,
+                "errors.k8s.caUntrusted",
+            ),
+            (
+                "dns error: failed to lookup address information",
+                ErrorCode::ConnectionFailed,
+                "errors.k8s.dns",
             ),
             (
                 "tcp connect error: connection refused",
                 ErrorCode::ConnectionFailed,
+                "errors.k8s.connect",
             ),
-            ("operation timed out", ErrorCode::Timeout),
-            ("something odd happened", ErrorCode::Internal),
+            (
+                "operation timed out",
+                ErrorCode::Timeout,
+                "errors.k8s.timeout",
+            ),
+            (
+                "something odd happened",
+                ErrorCode::Internal,
+                "errors.k8s.transport",
+            ),
         ] {
             let client = failing_client(text);
             let mut steps = Vec::new();
             assert!(!check_cluster(&mut steps, &client, &sample_profile("a")).await);
             assert_eq!(names(&steps), [("tls", false)], "{text}");
-            assert_eq!(steps[0].error.as_ref().unwrap().code, code, "{text}");
+            let e = steps[0].error.as_ref().unwrap();
+            assert_eq!((e.code, e.key.as_str()), (code, key), "{text}");
         }
     }
 
