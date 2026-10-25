@@ -3,8 +3,10 @@
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
+use tokio::task::JoinSet;
+use tokio::time::timeout;
 
 use crate::error::{AppError, AppResult, ErrorCode};
 
@@ -64,6 +66,12 @@ const DENIED_PAGE: &str = "<!doctype html><html><head><meta charset=\"utf-8\"><t
 <body style=\"font-family:sans-serif;padding:32px\"><h2>Glafira for Kubernetes</h2>\
 <p>Sign-in failed — see the Glafira window for details.</p></body></html>";
 
+/// Сколько ждать заголовок запроса от одного соединения. Браузеры открывают соединения заранее
+/// (preconnect) и ничего по ним не шлют: такое соединение закрываем, остальные это не задерживает.
+const HEADER_TIMEOUT: Duration = Duration::from_secs(5);
+/// Пауза после сбоя `accept` (например, нехватка дескрипторов), чтобы не крутиться вхолостую.
+const ACCEPT_RETRY_PAUSE: Duration = Duration::from_millis(50);
+
 pub struct CallbackServer {
     listener: TcpListener,
     pub redirect_uri: String,
@@ -80,67 +88,46 @@ impl CallbackServer {
         })
     }
 
-    /// Ждёт redirect с `expected_state` не дольше `limit`; `cancel` прерывает ожидание.
+    /// Ждёт redirect с `expected_state` не дольше `limit`.
+    ///
+    /// `cancel` прерывает ожидание: и `send(())`, и сброс (drop) отправителя — приёмник `oneshot`
+    /// завершается в обоих случаях, поэтому вызывающий держит отправитель, пока вход не закончен.
+    ///
+    /// Каждое соединение обслуживается отдельной задачей: молчащее или оборванное соединение,
+    /// чужой путь и ответ с чужим `state` (другая вкладка, стороннее приложение) вход не
+    /// прерывают — ожидание продолжается до настоящего redirect, отказа, отмены или `limit`.
     pub async fn wait(
         self,
         expected_state: &str,
         limit: Duration,
         cancel: oneshot::Receiver<()>,
     ) -> AppResult<String> {
-        let accept = async {
+        let serve = async {
+            // Незавершённые задачи отменяются вместе с `JoinSet`, когда ожидание закончено.
+            let mut connections = JoinSet::new();
             loop {
-                let (mut stream, _) = self.listener.accept().await?;
-                let mut buf = vec![0u8; 8192];
-                let mut len = 0;
-                // Достаточно первой строки; ждём конец заголовков, но не больше 8 КБ.
-                while len < buf.len() {
-                    let n = stream.read(&mut buf[len..]).await?;
-                    if n == 0 {
-                        break;
+                tokio::select! {
+                    accepted = self.listener.accept() => match accepted {
+                        Ok((stream, _)) => {
+                            connections.spawn(serve_connection(
+                                stream,
+                                expected_state.to_owned(),
+                                HEADER_TIMEOUT,
+                            ));
+                        }
+                        // Сброшенное до `accept` соединение — не повод прерывать вход.
+                        Err(_) => tokio::time::sleep(ACCEPT_RETRY_PAUSE).await,
+                    },
+                    Some(finished) = connections.join_next() => {
+                        if let Ok(Some(result)) = finished {
+                            return result;
+                        }
                     }
-                    len += n;
-                    if buf[..len].windows(4).any(|w| w == b"\r\n\r\n") {
-                        break;
-                    }
-                }
-                let head = String::from_utf8_lossy(&buf[..len]);
-                let line = head.lines().next().unwrap_or("");
-                let (status, page, result) = match parse_request_line(line) {
-                    Callback::Other => ("404 Not Found", "", None),
-                    Callback::Denied { error } => (
-                        "200 OK",
-                        DENIED_PAGE,
-                        Some(Err(app_err!(
-                            ErrorCode::AuthFailed,
-                            "errors.oauth.denied",
-                            "Sign-in was not completed: {{error}}",
-                            error = error
-                        ))),
-                    ),
-                    Callback::Code { state, .. } if state != expected_state => (
-                        "200 OK",
-                        DENIED_PAGE,
-                        Some(Err(app_err!(
-                            ErrorCode::AuthFailed,
-                            "errors.oauth.stateMismatch",
-                            "The sign-in response does not match the request — try again"
-                        ))),
-                    ),
-                    Callback::Code { code, .. } => ("200 OK", PAGE, Some(Ok(code))),
-                };
-                let response = format!(
-                    "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}",
-                    page.len()
-                );
-                let _ = stream.write_all(response.as_bytes()).await;
-                let _ = stream.shutdown().await;
-                if let Some(r) = result {
-                    return r;
                 }
             }
         };
         tokio::select! {
-            r = accept => r,
+            r = serve => r,
             _ = cancel => Err(cancelled()),
             _ = tokio::time::sleep(limit) => Err(app_err!(
                 ErrorCode::Timeout,
@@ -149,6 +136,67 @@ impl CallbackServer {
             )),
         }
     }
+}
+
+/// Читает заголовок запроса (до пустой строки, не больше 8 КБ) и возвращает его первую строку.
+/// Заголовок читается целиком, иначе закрытие сокета с непрочитанными данными сбросит соединение
+/// (RST), и браузер не получит страницу.
+async fn read_request_line(stream: &mut TcpStream) -> std::io::Result<String> {
+    let mut buf = vec![0u8; 8192];
+    let mut len = 0;
+    while len < buf.len() {
+        let n = stream.read(&mut buf[len..]).await?;
+        if n == 0 {
+            break;
+        }
+        len += n;
+        if buf[..len].windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+    }
+    let head = String::from_utf8_lossy(&buf[..len]);
+    Ok(head.lines().next().unwrap_or("").to_owned())
+}
+
+/// Одно соединение: читает запрос (не дольше `header_timeout`), отвечает страницей и возвращает
+/// итог, если запрос завершает вход. `None` — соединение лишнее (молчание, обрыв, ошибка чтения,
+/// чужой путь, чужой `state`), ожидание продолжается.
+async fn serve_connection(
+    mut stream: TcpStream,
+    expected_state: String,
+    header_timeout: Duration,
+) -> Option<AppResult<String>> {
+    let line = timeout(header_timeout, read_request_line(&mut stream))
+        .await
+        .ok()?
+        .ok()?;
+    if line.is_empty() {
+        return None;
+    }
+    let (status, page, result) = match parse_request_line(&line) {
+        Callback::Other => ("404 Not Found", "", None),
+        Callback::Denied { error } => (
+            "200 OK",
+            DENIED_PAGE,
+            Some(Err(app_err!(
+                ErrorCode::AuthFailed,
+                "errors.oauth.denied",
+                "Sign-in was not completed: {{error}}",
+                error = error
+            ))),
+        ),
+        // Ответ не на наш запрос: показываем страницу ошибки, но вход не прерываем — настоящий
+        // redirect ещё может прийти.
+        Callback::Code { state, .. } if state != expected_state => ("200 OK", DENIED_PAGE, None),
+        Callback::Code { code, .. } => ("200 OK", PAGE, Some(Ok(code))),
+    };
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}",
+        page.len()
+    );
+    let _ = stream.write_all(response.as_bytes()).await;
+    let _ = stream.shutdown().await;
+    result
 }
 
 pub fn cancelled() -> AppError {
@@ -196,8 +244,17 @@ mod tests {
 
     async fn get(url: &str) -> (u16, String) {
         crate::tls::ensure_crypto_provider();
-        let r = reqwest::Client::new().get(url).send().await.unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let r = client.get(url).send().await.unwrap();
         (r.status().as_u16(), r.text().await.unwrap())
+    }
+
+    /// Порт сервера из его `redirect_uri`.
+    fn port_of(server: &CallbackServer) -> u16 {
+        url::Url::parse(&server.redirect_uri)
+            .unwrap()
+            .port()
+            .unwrap()
     }
 
     #[tokio::test]
@@ -217,20 +274,101 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wrong_state_and_denial_are_errors() {
-        for (query, key) in [
-            ("code=c&state=other", "errors.oauth.stateMismatch"),
-            ("error=access_denied", "errors.oauth.denied"),
-        ] {
-            let server = CallbackServer::bind().await.unwrap();
-            let url = format!("{}?{query}", server.redirect_uri);
-            let (_tx, rx) = oneshot::channel();
-            let wait =
-                tokio::spawn(async move { server.wait("s1", Duration::from_secs(10), rx).await });
-            let (_, page) = get(&url).await;
-            assert!(page.contains("Sign-in failed"));
-            assert_eq!(wait.await.unwrap().unwrap_err().key, key);
+    async fn silent_connection_does_not_block_the_callback() {
+        let server = CallbackServer::bind().await.unwrap();
+        let url = format!("{}?code=c-1&state=s1", server.redirect_uri);
+        // Браузер открыл соединение заранее (preconnect) и ничего не шлёт.
+        let _silent = tokio::net::TcpStream::connect(("127.0.0.1", port_of(&server)))
+            .await
+            .unwrap();
+        let started = std::time::Instant::now();
+        let (_tx, rx) = oneshot::channel();
+        let wait = tokio::spawn(async move { server.wait("s1", Duration::from_secs(3), rx).await });
+        let request = tokio::spawn(async move { get(&url).await });
+        assert_eq!(wait.await.unwrap().unwrap(), "c-1");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "ответ ждал молчащее соединение: {:?}",
+            started.elapsed()
+        );
+        let (status, page) = request.await.unwrap();
+        assert_eq!(status, 200);
+        assert!(page.contains("Signed in"));
+    }
+
+    #[tokio::test]
+    async fn stalled_connection_is_dropped_after_the_header_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        for sent in [&b""[..], &b"GET /callback?code=c-1&sta"[..]] {
+            let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+            client.write_all(sent).await.unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
+            let started = std::time::Instant::now();
+            let result = serve_connection(stream, "s1".into(), Duration::from_millis(100)).await;
+            assert!(result.is_none());
+            assert!(started.elapsed() < Duration::from_secs(2));
+            // Сервер закрыл соединение: клиент видит конец потока и не получил страницу.
+            let mut rest = Vec::new();
+            client.read_to_end(&mut rest).await.unwrap();
+            assert!(rest.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn closed_and_reset_connections_do_not_end_the_login() {
+        let server = CallbackServer::bind().await.unwrap();
+        let url = format!("{}?code=c-1&state=s1", server.redirect_uri);
+        let port = port_of(&server);
+        // Закрытое сразу соединение и сброшенное (RST).
+        drop(
+            tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap(),
+        );
+        let reset = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        reset.set_zero_linger().unwrap();
+        drop(reset);
+        let (_tx, rx) = oneshot::channel();
+        let wait =
+            tokio::spawn(async move { server.wait("s1", Duration::from_secs(10), rx).await });
+        let (status, _) = get(&url).await;
+        assert_eq!(status, 200);
+        assert_eq!(wait.await.unwrap().unwrap(), "c-1");
+    }
+
+    #[tokio::test]
+    async fn wrong_state_gets_failure_page_and_waiting_goes_on() {
+        let server = CallbackServer::bind().await.unwrap();
+        let redirect = server.redirect_uri.clone();
+        let (_tx, rx) = oneshot::channel();
+        let wait =
+            tokio::spawn(async move { server.wait("s1", Duration::from_secs(10), rx).await });
+        let (status, page) = get(&format!("{redirect}?code=forged&state=other")).await;
+        assert_eq!(status, 200);
+        assert!(page.contains("Sign-in failed"));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!wait.is_finished(), "чужой state не должен завершать вход");
+        let (status, page) = get(&format!("{redirect}?code=c-2&state=s1")).await;
+        assert_eq!(status, 200);
+        assert!(page.contains("Signed in"));
+        assert_eq!(wait.await.unwrap().unwrap(), "c-2");
+    }
+
+    #[tokio::test]
+    async fn denial_is_an_error() {
+        let server = CallbackServer::bind().await.unwrap();
+        let url = format!("{}?error=access_denied", server.redirect_uri);
+        let (_tx, rx) = oneshot::channel();
+        let wait =
+            tokio::spawn(async move { server.wait("s1", Duration::from_secs(10), rx).await });
+        let (_, page) = get(&url).await;
+        assert!(page.contains("Sign-in failed"));
+        let e = wait.await.unwrap().unwrap_err();
+        assert_eq!(e.key, "errors.oauth.denied");
+        assert_eq!(e.params["error"], "access_denied");
     }
 
     #[tokio::test]
@@ -239,6 +377,16 @@ mod tests {
         let (tx, rx) = oneshot::channel();
         let wait = tokio::spawn(async move { server.wait("s", Duration::from_secs(10), rx).await });
         tx.send(()).unwrap();
+        assert_eq!(
+            wait.await.unwrap().unwrap_err().key,
+            "errors.oauth.cancelled"
+        );
+
+        // Сброс отправителя тоже отменяет ожидание.
+        let server = CallbackServer::bind().await.unwrap();
+        let (tx, rx) = oneshot::channel::<()>();
+        let wait = tokio::spawn(async move { server.wait("s", Duration::from_secs(10), rx).await });
+        drop(tx);
         assert_eq!(
             wait.await.unwrap().unwrap_err().key,
             "errors.oauth.cancelled"
