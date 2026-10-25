@@ -1,11 +1,30 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useIsFetching, useMutation, useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api } from "../../api/client";
-import type { ConnectionProfile } from "../../api/types";
+import { api, toAppError } from "../../api/client";
+import type { ConnectionInfo, ConnectionProfile } from "../../api/types";
 import { useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
+
+/** Ожидание входа в браузере или exec-плагина с кнопкой «Отменить»; кладётся в строку `.toolbar`. */
+export function LoginWait({ connectionId, label }: { connectionId: string; label: string }) {
+  const { t } = useTranslation();
+  return (
+    <>
+      <span className="muted">{label}</span>
+      <button
+        type="button"
+        onClick={() => {
+          // Сбой отмены не показываем: ожидание закончится само (входом, ошибкой или по таймауту), а кнопка остаётся для повторной отмены.
+          api.cancelOauthLogin(connectionId).catch(() => undefined);
+        }}
+      >
+        {t("cluster.session.cancelLogin")}
+      </button>
+    </>
+  );
+}
 
 /**
  * Что сделать, если сессия истекла или токена нет: войти через браузер, вставить токен
@@ -18,7 +37,9 @@ export function SessionActions({ profile }: { profile: ConnectionProfile }) {
   const open = useWorkspace((s) => s.open);
   const [token, setToken] = useState("");
   const id = profile.id;
-  const done = (info: unknown) => queryClient.setQueryData(["connection", id], info);
+  const done = (info: ConnectionInfo) => queryClient.setQueryData(["connection", id], info);
+  // Подключение этой вкладки (в том числе «Подключиться заново» на панели) тоже может запускать exec-плагин.
+  const connecting = useIsFetching({ queryKey: ["connection", id] }) > 0;
 
   const login = useMutation({ mutationFn: () => api.startOauthLogin(id), onSuccess: done });
   // Exec-плагин: подключение заново запускает его снова.
@@ -52,13 +73,8 @@ export function SessionActions({ profile }: { profile: ConnectionProfile }) {
     return (
       <div className="panel">
         <div className="toolbar">
-          {rerun.isPending ? (
-            <>
-              <span className="muted">{t("cluster.session.waitingExec")}</span>
-              <button type="button" onClick={() => void api.cancelOauthLogin(id)}>
-                {t("cluster.session.cancelLogin")}
-              </button>
-            </>
+          {rerun.isPending || connecting ? (
+            <LoginWait connectionId={id} label={t("cluster.session.waitingExec")} />
           ) : (
             <button type="button" className="primary" onClick={() => rerun.mutate()}>
               {t("cluster.session.loginExec")}
@@ -77,12 +93,7 @@ export function SessionActions({ profile }: { profile: ConnectionProfile }) {
       {profile.auth.method === "browser" && (
         <div className="toolbar">
           {login.isPending ? (
-            <>
-              <span className="muted">{t("cluster.session.waitingBrowser")}</span>
-              <button type="button" onClick={() => void api.cancelOauthLogin(id)}>
-                {t("cluster.session.cancelLogin")}
-              </button>
-            </>
+            <LoginWait connectionId={id} label={t("cluster.session.waitingBrowser")} />
           ) : (
             <button type="button" className="primary" onClick={() => login.mutate()}>
               {t("cluster.session.loginBrowser")}
@@ -90,7 +101,8 @@ export function SessionActions({ profile }: { profile: ConnectionProfile }) {
           )}
         </div>
       )}
-      {login.error && <ErrorBanner error={login.error} />}
+      {/* Отмена входа самим пользователем — не сбой. */}
+      {login.error && toAppError(login.error).key !== "errors.oauth.cancelled" && <ErrorBanner error={login.error} />}
       <div className="toolbar">
         <label htmlFor={`token-${id}`}>{t("cluster.session.pasteToken")}</label>
         <input

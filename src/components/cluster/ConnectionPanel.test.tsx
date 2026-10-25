@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderWithClient } from "../../test/render";
@@ -46,8 +46,21 @@ const profile = (auth: ConnectionProfile["auth"]): ConnectionProfile => ({
 
 const EXPIRED = { code: "SESSION_EXPIRED", key: "errors.k8s.unauthorized", message: "x", retryable: false };
 
+const EXEC: ConnectionProfile["auth"] = {
+  method: "exec",
+  command: "/opt/homebrew/bin/kubelogin",
+  args: ["get-token"],
+  env: [],
+  apiVersion: "client.authentication.k8s.io/v1",
+  provideClusterInfo: false,
+  approved: "fp",
+};
+
+const EXEC_FAILED = { code: "AUTH_FAILED", key: "errors.exec.failed", params: { command: "kubelogin", code: "1" }, message: "x", retryable: false };
+
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(api.cancelOauthLogin).mockResolvedValue(true);
   useWorkspace.setState({ tabs: [], activeId: null });
 });
 
@@ -81,16 +94,7 @@ describe("ConnectionPanel", () => {
   });
 
   it("exec-плагин: ожидание с отменой, ошибка плагина и запуск снова", async () => {
-    const exec: ConnectionProfile["auth"] = {
-      method: "exec",
-      command: "/opt/homebrew/bin/kubelogin",
-      args: ["get-token"],
-      env: [],
-      apiVersion: "client.authentication.k8s.io/v1",
-      provideClusterInfo: false,
-      approved: "fp",
-    };
-    vi.mocked(api.listConnections).mockResolvedValue([profile(exec)]);
+    vi.mocked(api.listConnections).mockResolvedValue([profile(EXEC)]);
     let fail: (e: unknown) => void = () => {};
     vi.mocked(api.connect).mockReturnValueOnce(new Promise((_, reject) => (fail = reject)));
     const user = userEvent.setup();
@@ -98,11 +102,54 @@ describe("ConnectionPanel", () => {
     expect(await screen.findByText(/Ожидание exec-плагина/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Отменить" }));
     expect(api.cancelOauthLogin).toHaveBeenCalledWith("c1");
-    fail({ code: "AUTH_FAILED", key: "errors.exec.failed", params: { command: "kubelogin", code: "1" }, message: "x", retryable: false });
+    fail(EXEC_FAILED);
     vi.mocked(api.connect).mockResolvedValue(INFO);
     await user.click(await screen.findByRole("button", { name: "Запустить exec-плагин снова" }));
     expect(api.connect).toHaveBeenLastCalledWith("c1", true);
     expect(await screen.findByText("dev1")).toBeInTheDocument();
+  });
+
+  it("exec-плагин: «Подключиться заново» показывает ожидание с отменой", async () => {
+    vi.mocked(api.listConnections).mockResolvedValue([profile(EXEC)]);
+    vi.mocked(api.connect).mockResolvedValueOnce(INFO);
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionPanel connectionId="c1" />);
+    expect(await screen.findByText("dev1")).toBeInTheDocument();
+    expect(screen.queryByText(/Ожидание exec-плагина/)).toBeNull();
+
+    let finish: (i: ConnectionInfo) => void = () => {};
+    vi.mocked(api.connect).mockReturnValueOnce(new Promise((r) => (finish = r)));
+    await user.click(screen.getByRole("button", { name: "Подключиться заново" }));
+    expect(api.connect).toHaveBeenLastCalledWith("c1", true);
+    expect(await screen.findByText(/Ожидание exec-плагина/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Отменить" }));
+    expect(api.cancelOauthLogin).toHaveBeenCalledWith("c1");
+
+    finish(INFO);
+    await waitFor(() => expect(screen.queryByText(/Ожидание exec-плагина/)).toBeNull());
+  });
+
+  it("exec-плагин: после ошибки повторного запуска ожидание показывается один раз", async () => {
+    vi.mocked(api.listConnections).mockResolvedValue([profile(EXEC)]);
+    vi.mocked(api.connect).mockResolvedValueOnce(INFO).mockRejectedValueOnce(EXEC_FAILED);
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionPanel connectionId="c1" />);
+    expect(await screen.findByText("dev1")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Подключиться заново" }));
+    // Прежние сведения остаются, рядом с ошибкой — действия входа.
+    expect(await screen.findByRole("button", { name: "Запустить exec-плагин снова" })).toBeInTheDocument();
+
+    let finish: (i: ConnectionInfo) => void = () => {};
+    vi.mocked(api.connect).mockReturnValueOnce(new Promise((r) => (finish = r)));
+    await user.click(screen.getByRole("button", { name: "Подключиться заново" }));
+    expect(await screen.findByText(/Ожидание exec-плагина/)).toBeInTheDocument();
+    expect(screen.getAllByText(/Ожидание exec-плагина/)).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Отменить" })).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Запустить exec-плагин снова" })).toBeNull();
+
+    finish(INFO);
+    await waitFor(() => expect(screen.queryByText(/Ожидание exec-плагина/)).toBeNull());
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("истёкшая сессия у входа через браузер: вход и успешное подключение", async () => {
@@ -121,14 +168,31 @@ describe("ConnectionPanel", () => {
     expect(await screen.findByText("dev1")).toBeInTheDocument();
   });
 
+  it("отмена входа через браузер не выглядит ошибкой", async () => {
+    vi.mocked(api.listConnections).mockResolvedValue([profile({ method: "browser" })]);
+    vi.mocked(api.connect).mockRejectedValue(EXPIRED);
+    let cancelled: (e: unknown) => void = () => {};
+    vi.mocked(api.startOauthLogin).mockReturnValue(new Promise((_, reject) => (cancelled = reject)));
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionPanel connectionId="c1" />);
+    await user.click(await screen.findByRole("button", { name: "Войти через браузер" }));
+    await user.click(screen.getByRole("button", { name: "Отменить" }));
+    cancelled({ code: "AUTH_FAILED", key: "errors.oauth.cancelled", message: "x", retryable: false });
+    expect(await screen.findByRole("button", { name: "Войти через браузер" })).toBeInTheDocument();
+    expect(screen.queryByText("Вход отменён")).toBeNull();
+    // Остался только баннер истёкшей сессии.
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+  });
+
   it("вставка токена сохраняет его и подключается заново", async () => {
     vi.mocked(api.listConnections).mockResolvedValue([profile({ method: "token" })]);
     vi.mocked(api.connect).mockRejectedValueOnce(EXPIRED).mockResolvedValue(INFO);
     vi.mocked(api.setConnectionToken).mockResolvedValue();
     const user = userEvent.setup();
     renderWithClient(<ConnectionPanel connectionId="c1" />);
+    const field = await screen.findByLabelText("Токен");
     expect(screen.queryByRole("button", { name: "Войти через браузер" })).toBeNull();
-    await user.type(await screen.findByLabelText("Токен"), "sha256~new");
+    await user.type(field, "sha256~new");
     await user.click(screen.getByRole("button", { name: "Сохранить токен" }));
     await waitFor(() => expect(api.setConnectionToken).toHaveBeenCalledWith("c1", "sha256~new"));
     expect(api.connect).toHaveBeenLastCalledWith("c1", true);
@@ -158,8 +222,10 @@ describe("ConnectionPanel", () => {
 
     vi.mocked(api.connect).mockRejectedValue({ code: "AUTH_FAILED", key: "errors.connections.clientKeyMissing", message: "x", retryable: false });
     renderWithClient(<ConnectionPanel connectionId="c1" />);
-    const buttons = await screen.findAllByRole("button", { name: "Изменить подключение" });
-    await user.click(buttons[buttons.length - 1]);
+    // Две кнопки «Изменить подключение»: на панели инструментов и в блоке входа — нажимаем вторую, когда блок уже показан.
+    const heading = await screen.findByRole("heading", { name: "Войдите снова" });
+    expect(screen.getAllByRole("button", { name: "Изменить подключение" })).toHaveLength(2);
+    await user.click(within(heading.nextElementSibling as HTMLElement).getByRole("button", { name: "Изменить подключение" }));
     expect(useWorkspace.getState().activeId).toBe("connection-form:c1");
   });
 });

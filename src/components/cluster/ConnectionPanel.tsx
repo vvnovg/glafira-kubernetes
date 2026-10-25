@@ -5,7 +5,7 @@ import type { ApiGroups, AppError, Capabilities, ConnectionInfo, ConnectionProfi
 import { useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Hint } from "../common/Hint";
-import { SessionActions } from "./SessionActions";
+import { LoginWait, SessionActions } from "./SessionActions";
 
 /** Ошибки, которые лечатся входом заново или новым токеном. */
 const SIGN_IN_KEYS = new Set(["errors.connections.tokenMissing", "errors.connections.loginRequired", "errors.connections.clientKeyMissing"]);
@@ -36,11 +36,15 @@ export function ConnectionPanel({ connectionId }: { connectionId: string }) {
   const connections = useQuery({ queryKey: ["connections"], queryFn: api.listConnections });
   const q = useQuery({ queryKey: ["connection", connectionId], queryFn: () => api.connect(connectionId, false) });
   const profile = connections.data?.find((c) => c.id === connectionId);
+  const error = q.error ? toAppError(q.error) : null;
 
   // Подключение заново: свежие сведения и права (после смены токена или прав в кластере).
   const reconnect = () => queryClient.fetchQuery({ queryKey: ["connection", connectionId], queryFn: () => api.connect(connectionId, true) });
 
   if (!profile) return <p className="empty">{connections.isPending ? t("common.loading") : t("connections.form.deleted")}</p>;
+
+  const exec = profile.auth.method === "exec";
+  const signIn = error !== null && needsSignIn(error, profile);
 
   return (
     <div className="page">
@@ -54,31 +58,24 @@ export function ConnectionPanel({ connectionId }: { connectionId: string }) {
           {t("cluster.connection.edit")}
         </button>
       </div>
-      {q.isPending &&
-        (profile.auth.method === "exec" ? (
-          // Exec-плагин может ждать входа в браузере до 5 минут.
-          <div className="toolbar">
-            <span className="muted">{t("cluster.session.waitingExec")}</span>
-            <button type="button" onClick={() => void api.cancelOauthLogin(connectionId)}>
-              {t("cluster.session.cancelLogin")}
-            </button>
-          </div>
-        ) : (
-          <p className="muted">{t("cluster.connection.connecting")}</p>
-        ))}
-      {q.error && <ConnectionError error={q.error} onRetry={() => void q.refetch()} profile={profile} />}
+      {/* Exec-плагин может ждать входа в браузере до 5 минут, и при первом подключении, и при повторе. Рядом с ошибкой входа то же ожидание показывает SessionActions. */}
+      {exec && q.isFetching && !signIn && (
+        <div className="toolbar">
+          <LoginWait connectionId={connectionId} label={t("cluster.session.waitingExec")} />
+        </div>
+      )}
+      {!exec && q.isPending && <p className="muted">{t("cluster.connection.connecting")}</p>}
+      {error && <ConnectionError error={error} signIn={signIn} onRetry={() => void q.refetch()} profile={profile} />}
       {q.data && <ConnectionSummary info={q.data} />}
     </div>
   );
 }
 
-function ConnectionError({ error, onRetry, profile }: { error: unknown; onRetry: () => void; profile: ConnectionProfile }) {
+function ConnectionError({ error, signIn, onRetry, profile }: { error: AppError; signIn: boolean; onRetry: () => void; profile: ConnectionProfile }) {
   const { t } = useTranslation();
-  const e = toAppError(error);
-  const signIn = needsSignIn(e, profile);
   return (
     <>
-      <ErrorBanner error={e} onRetry={signIn ? undefined : onRetry} />
+      <ErrorBanner error={error} onRetry={signIn ? undefined : onRetry} />
       {signIn && (
         <>
           <h3>{t("cluster.session.title")}</h3>
