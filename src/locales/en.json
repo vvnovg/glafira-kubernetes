@@ -170,6 +170,9 @@
     "cluster": {
       "platform": "Detected from the API groups and the version: OpenShift, or Kubernetes with its distribution (EKS, GKE, AKS, Rancher, Deckhouse, k3s, RKE2).",
       "apiGroups": "What the cluster offers beyond plain Kubernetes: Route, projects and DeploymentConfig (OpenShift), Gateway API. They decide which objects are shown."
+    },
+    "kubeconfig": {
+      "target": "New connections go to this folder; connections that already exist keep their place, name, environment and color."
     }
   },
   "connections": {
@@ -318,5 +321,26 @@
   "support": {
     "title": "Support the project",
     "hint": "Glafira is free and open source; donations keep it going."
+  },
+  "kubeconfig": {
+    "title": "Import from kubeconfig",
+    "chooseFile": "Choose file…",
+    "noContexts": "There are no contexts in this file.",
+    "current": "current context",
+    "insecure": "without certificate verification",
+    "updatesExisting": "updates an existing connection",
+    "allowExec": "Allow Glafira to run this command",
+    "confirmExec": "Allow the launch lines of the selected exec plugins to import them",
+    "target": "Folder for new connections",
+    "auth": {
+      "token": "token",
+      "clientCert": "client certificate",
+      "browser": "sign-in via browser",
+      "exec": "exec plugin"
+    },
+    "apply_one": "Import {{count}} context",
+    "apply_other": "Import {{count}} contexts",
+    "imported_one": "Imported {{count}} connection",
+    "imported_other": "Imported {{count}} connections"
   }
 }
