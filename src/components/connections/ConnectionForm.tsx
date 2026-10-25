@@ -7,7 +7,7 @@ import { tr } from "../../i18n/text";
 import { useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Hint } from "../common/Hint";
-import { formatArgs, formatEnv, launchLine, needsExecConfirmation, newExec, parseArgs, parseEnv } from "./exec";
+import { formatArgs, formatEnv, launchKey, launchLine, needsExecConfirmation, newExec, parseArgs, parseEnv } from "./exec";
 import { formatNamespaces, parseNamespaces, withAuthMethod, withCaMode, withProxyMode } from "./profile";
 import { folderPaths } from "./tree/folderTree";
 
@@ -33,7 +33,8 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
   const [lastExec, setLastExec] = useState(initialExec);
   const [execArgs, setExecArgs] = useState(formatArgs(initialExec.args));
   const [execEnv, setExecEnv] = useState(formatEnv(initialExec.env));
-  const [confirmExec, setConfirmExec] = useState(false);
+  // Подтверждение привязано к строке: хранится ключ подтверждённой строки, любая правка строки или смена способа его обнуляет.
+  const [confirmedExec, setConfirmedExec] = useState<string | null>(null);
   const [report, setReport] = useState<TestReport | null>(null);
   const [error, setError] = useState<AppError | null>(null);
   const [busy, setBusy] = useState(false);
@@ -73,6 +74,8 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
     clientKey: profile.auth.method === "clientCert" && clientKey.trim() ? clientKey : null,
   });
   // Строку запуска подтверждает человек: новая, изменённая или неподтверждённая требует галочки.
+  const execKey = profile.auth.method === "exec" ? launchKey(currentAuth() as ExecAuth) : null;
+  const confirmExec = execKey !== null && execKey === confirmedExec;
   const execNeedsConfirm = needsExecConfirmation(initial.auth, currentAuth());
   const execBlocked = profile.auth.method === "exec" && (execForbidden || (execNeedsConfirm && !confirmExec));
 
@@ -206,6 +209,7 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
           onChange={(e) => {
             if (auth.method === "clientCert") setLastCert(auth.certificatePem);
             if (auth.method === "exec") setLastExec(currentAuth() as ExecAuth);
+            setConfirmedExec(null);
             update({ auth: withAuthMethod(auth, e.target.value as AuthMethod, lastCert, lastExec) });
           }}
         >
@@ -274,7 +278,7 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
             <pre aria-label={t("connections.form.exec.line")}>{launchLine(currentAuth() as ExecAuth)}</pre>
             {execNeedsConfirm ? (
               <label className="inline full">
-                <input type="checkbox" checked={confirmExec} disabled={execForbidden} onChange={(e) => setConfirmExec(e.target.checked)} />
+                <input type="checkbox" checked={confirmExec} disabled={execForbidden} onChange={(e) => setConfirmedExec(e.target.checked ? execKey : null)} />
                 {t("connections.form.exec.confirm")}
               </label>
             ) : (

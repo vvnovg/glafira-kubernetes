@@ -62,7 +62,8 @@ function maskedArgs(args: string[]): string[] {
     if (!secret) {
       out.push(quote(a));
     } else if (eq >= 0) {
-      out.push(a.length > eq + 1 ? `${a.slice(0, eq + 1)}••••` : quote(a));
+      // Имя с пробелом (`--client secret=x`) квотируется вместе с маской, как и открытый аргумент.
+      out.push(a.length > eq + 1 ? quote(`${a.slice(0, eq + 1)}••••`) : quote(a));
     } else if (i + 1 < args.length) {
       const value = args[++i];
       out.push(quote(a), value ? "••••" : quote(value));
@@ -79,9 +80,16 @@ export function launchLine(e: ExecAuth): string {
   return [...env, quote(e.command), ...maskedArgs(e.args)].join(" ");
 }
 
+/**
+ * Ключ строки запуска: те же поля, что в отпечатке Rust (`fingerprint`). Подтверждение
+ * действует, пока ключ строки совпадает с ключом подтверждённой.
+ */
+export function launchKey(e: ExecAuth): string {
+  return JSON.stringify([e.command, e.args, e.env.map((v) => [v.name, v.value]), e.apiVersion, e.provideClusterInfo]);
+}
+
 function sameLaunch(a: ExecAuth, b: ExecAuth): boolean {
-  const key = (e: ExecAuth) => JSON.stringify([e.command, e.args, e.env.map((v) => [v.name, v.value]), e.apiVersion, e.provideClusterInfo]);
-  return key(a) === key(b);
+  return launchKey(a) === launchKey(b);
 }
 
 /**

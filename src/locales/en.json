@@ -159,7 +159,7 @@
       "token": "Saved in the system secret store, not in a file. Tokens from OpenShift OAuth usually expire after 24 hours.",
       "clientCert": "Certificate and key in PEM format. The key is saved in the system secret store.",
       "exec": "Only allowed commands: aws, aws-iam-authenticator, gke-gcloud-auth-plugin, kubelogin, kubectl oidc-login, oc, yc, rancher. Run without a shell; may open the browser.",
-      "execLine": "Exactly what Glafira will run. Values of variables that look like secrets are hidden. Any change to the line needs a new confirmation.",
+      "execLine": "Exactly what Glafira will run. Values of variables and options that look like secrets are hidden. Any change to the line needs a new confirmation.",
       "ca": "System store — the CAs trusted by your computer. Certificates — only the listed ones, like <code>certificate-authority</code> in kubeconfig.",
       "tlsServerName": "Only if the certificate is issued for another name than the address host. Usually empty.",
       "proxy": "System — the <code>HTTPS_PROXY</code> and <code>NO_PROXY</code> variables. Or an explicit address like <code>http://proxy:3128</code>.",

@@ -199,6 +199,50 @@ describe("ConnectionForm", () => {
     );
   });
 
+  it("exec-плагин: правка строки после галочки снимает подтверждение", async () => {
+    vi.mocked(api.testConnection).mockResolvedValue({ ok: true, steps: [] });
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionForm initial={newProfile()} tabId="t" />);
+    await user.selectOptions(screen.getByLabelText("Способ входа"), "exec");
+    await user.type(screen.getByLabelText("Команда"), "/usr/local/bin/aws");
+    await user.type(screen.getByLabelText("Аргументы (по одному в строке)"), "eks");
+    const confirm = screen.getByLabelText("Разрешаю Glafira запускать эту команду");
+    const test = screen.getByRole("button", { name: "Проверить подключение" });
+    await user.click(confirm);
+    expect(confirm).toBeChecked();
+    expect(test).toBeEnabled();
+
+    await user.type(screen.getByLabelText("Аргументы (по одному в строке)"), "{Enter}get-token");
+    expect(confirm).not.toBeChecked();
+    expect(test).toBeDisabled();
+    expect(api.testConnection).not.toHaveBeenCalled();
+
+    // Новая галочка относится к новой строке.
+    await user.click(confirm);
+    await user.click(test);
+    expect(api.testConnection).toHaveBeenCalledWith(
+      expect.objectContaining({ auth: expect.objectContaining({ args: ["eks", "get-token"] }) }),
+      { token: null, clientKey: null },
+      true,
+    );
+  });
+
+  it("exec-плагин: после смены способа туда и обратно подтверждение нужно снова", async () => {
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionForm initial={newProfile()} tabId="t" />);
+    await user.selectOptions(screen.getByLabelText("Способ входа"), "exec");
+    await user.type(screen.getByLabelText("Команда"), "/usr/local/bin/aws");
+    await user.click(screen.getByLabelText("Разрешаю Glafira запускать эту команду"));
+    expect(screen.getByRole("button", { name: "Проверить подключение" })).toBeEnabled();
+
+    await user.selectOptions(screen.getByLabelText("Способ входа"), "token");
+    await user.selectOptions(screen.getByLabelText("Способ входа"), "exec");
+    // Строка вернулась та же, но подтверждение сбросилось.
+    expect(screen.getByLabelText("Команда")).toHaveValue("/usr/local/bin/aws");
+    expect(screen.getByLabelText("Разрешаю Glafira запускать эту команду")).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "Проверить подключение" })).toBeDisabled();
+  });
+
   it("exec-плагин: подтверждённая строка не требует галочки, политика запрещает способ", async () => {
     const approved: ConnectionProfile = {
       ...newProfile(),

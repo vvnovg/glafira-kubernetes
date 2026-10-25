@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AuthConfig } from "../../api/types";
-import { formatArgs, formatEnv, isSecretName, launchLine, needsExecConfirmation, newExec, parseArgs, parseEnv } from "./exec";
+import { formatArgs, formatEnv, isSecretName, launchKey, launchLine, needsExecConfirmation, newExec, parseArgs, parseEnv } from "./exec";
 
 const exec = (patch: Partial<ReturnType<typeof newExec>> = {}): AuthConfig => ({
   method: "exec",
@@ -51,6 +51,22 @@ describe("exec", () => {
     expect(line(["-token=x"])).toBe("plugin -token=••••");
     expect(line(["--client-secret", "--next"])).toBe("plugin --client-secret ••••");
     expect(line(["--cluster-name", "my cluster"])).toBe("plugin --cluster-name 'my cluster'");
+    // Имя с пробелом квотируется и в замаскированном `--имя=значение`, как в открытом аргументе.
+    expect(line(["--client secret=abc"])).toBe("plugin '--client secret=••••'");
+  });
+
+  it("ключ строки запуска меняется с командой, аргументами, переменными и версией, но не с отпечатком", () => {
+    const key = (patch: Partial<ReturnType<typeof newExec>> = {}) => launchKey({ ...newExec(), command: "plugin", ...patch });
+    expect(key({ approved: "fp" })).toBe(key());
+    for (const patch of [
+      { command: "other" },
+      { args: ["get-token"] },
+      { env: [{ name: "A", value: "1" }] },
+      { apiVersion: "client.authentication.k8s.io/v1beta1" },
+      { provideClusterInfo: true },
+    ]) {
+      expect(key(patch), JSON.stringify(patch)).not.toBe(key());
+    }
   });
 
   it("строка запуска: ключ без значения и пустое значение ничего не скрывают", () => {
