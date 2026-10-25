@@ -120,8 +120,10 @@
       "timeout": "The exec plugin {{command}} did not finish in {{seconds}} s",
       "failed": "The exec plugin {{command}} failed (exit code {{code}})",
       "badOutput": "The exec plugin {{command}} returned no credentials",
-      "argsNotAllowedWithOptions": "The exec plugin “{{command}}” may run only as “{{expected}} …”: before “{{subcommand}}”, write options with a value as --option=value",
-      "envForbidden": "“{{name}}” is not allowed in the exec plugin environment: the variable can make the command load or run other code"
+      "envForbidden": "“{{name}}” is not allowed in the exec plugin environment: the variable can make the command load or run other code",
+      "optionBeforePlugin": "“{{command}}” starts the plugin “{{subcommand}}” only without options before it: put “{{option}}” after “{{expected}}” or remove it",
+      "flagWithValue": "The option “{{option}}” of “{{command}}” before “{{subcommand}}” is a flag: write it without “=”",
+      "unknownOption": "Glafira does not know the option “{{option}}” of “{{command}}” before “{{subcommand}}”: put it after “{{expected}}” or remove it"
     },
     "kubeconfig": {
       "unreadable": "Cannot read kubeconfig {{path}}: {{error}}",

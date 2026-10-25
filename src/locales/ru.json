@@ -120,8 +120,10 @@
       "timeout": "Exec-плагин {{command}} не завершился за {{seconds}} с",
       "failed": "Exec-плагин {{command}} завершился с ошибкой (код выхода {{code}})",
       "badOutput": "Exec-плагин {{command}} не выдал учётных данных",
-      "argsNotAllowedWithOptions": "Exec-плагин «{{command}}» можно запускать только как «{{expected}} …»: ключи со значением перед «{{subcommand}}» пишите как --ключ=значение",
-      "envForbidden": "«{{name}}» нельзя задавать в окружении exec-плагина: переменная может заставить команду загрузить или запустить другой код"
+      "envForbidden": "«{{name}}» нельзя задавать в окружении exec-плагина: переменная может заставить команду загрузить или запустить другой код",
+      "optionBeforePlugin": "«{{command}}» запускает плагин «{{subcommand}}», только если перед ним нет ключей: перенесите «{{option}}» после «{{expected}}» или удалите его",
+      "flagWithValue": "Ключ «{{option}}» команды «{{command}}» перед «{{subcommand}}» — флаг: пишите его без «=»",
+      "unknownOption": "Glafira не знает ключ «{{option}}» команды «{{command}}» перед «{{subcommand}}»: перенесите его после «{{expected}}» или удалите"
     },
     "kubeconfig": {
       "unreadable": "Не удалось прочитать kubeconfig {{path}}: {{error}}",

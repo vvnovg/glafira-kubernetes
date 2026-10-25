@@ -355,6 +355,16 @@ impl ConnectionStore {
         self.cache.read_safe().clone()
     }
 
+    /// Держит ли кто-то блокировку записи хранилища: тест проверяет, что keychain под ней
+    /// не читается.
+    #[cfg(test)]
+    pub(crate) fn is_write_locked(&self) -> bool {
+        matches!(
+            self.cache.try_read(),
+            Err(std::sync::TryLockError::WouldBlock)
+        )
+    }
+
     /// Изменяет данные одной транзакцией: `f` работает с копией, затем проверяются
     /// инварианты дерева и пишется файл; кэш заменяется только после успешной записи.
     pub(crate) fn update<R>(&self, f: impl FnOnce(&mut StoreData) -> AppResult<R>) -> AppResult<R> {

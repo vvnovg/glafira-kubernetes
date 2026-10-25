@@ -666,7 +666,7 @@ mod tests {
                 }),
             ),
             (
-                "errors.exec.argsNotAllowedWithOptions",
+                "errors.exec.optionBeforePlugin",
                 Box::new(|e| {
                     e.args = [
                         "--insecure-skip-tls-verify",

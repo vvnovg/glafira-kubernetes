@@ -421,15 +421,65 @@ fn same_settings(local: &ConnectionProfile, incoming: &ConnectionProfile) -> boo
     strip(local) == strip(&incoming)
 }
 
-/// Уходят ли учётные данные подключения на сервер: токен или ключ в keychain либо подтверждённая
-/// строка запуска exec-плагина. Сбой keychain считается «есть»: лишнее предупреждение лучше пропущенного.
-fn has_credentials(secrets: &dyn SecretStore, p: &ConnectionProfile) -> bool {
+/// Меняется ли то, куда уходят учётные данные подключения: адрес, прокси, CA или имя для
+/// проверки сертификата.
+fn destination_changes(local: &ConnectionProfile, new: &ConnectionProfile) -> bool {
+    local.api_url != new.api_url
+        || local.proxy != new.proxy
+        || local.ca != new.ca
+        || local.tls_server_name != new.tls_server_name
+}
+
+/// Сохранены ли в keychain токен или ключ подключений, которые импорт обновит с новым
+/// направлением (`destination_changes`). Читается до `ConnectionStore::update`: запрос доступа
+/// к keychain (на macOS — окно с паролем) не должен ждать под блокировкой записи хранилища, иначе
+/// ждали бы и `list_connections` на главном потоке, и `connections.get`.
+#[derive(Debug, Default)]
+pub(crate) struct StoredSecrets {
+    /// id подключения → есть ли сохранённый секрет, который использует профиль из файла.
+    by_id: HashMap<String, bool>,
+}
+
+impl StoredSecrets {
+    /// Читает только нужное: подключения, которые есть и в `data`, и в файле, у которых
+    /// направление в файле другое, и только тот секрет, который использует профиль из файла.
+    /// Сбой keychain считается «есть»: лишнее предупреждение лучше пропущенного.
+    pub(crate) fn read(
+        secrets: &dyn SecretStore,
+        data: &StoreData,
+        parsed: &ParsedExchange,
+    ) -> Self {
+        let by_id = parsed
+            .connections
+            .iter()
+            .filter(|(incoming, _)| !matches!(incoming.auth, AuthConfig::Exec(_)))
+            .filter(|(incoming, _)| {
+                data.connections
+                    .iter()
+                    .any(|local| local.id == incoming.id && destination_changes(local, incoming))
+            })
+            .map(|(incoming, _)| {
+                let stored =
+                    needs_secret(secrets, incoming).map_or(true, |n| n.token || n.client_key);
+                (incoming.id.clone(), stored)
+            })
+            .collect();
+        Self { by_id }
+    }
+
+    /// Сохранён ли секрет подключения `id`. Не прочитанное заранее (хранилище изменилось между
+    /// чтением и записью) считается сохранённым.
+    fn has(&self, id: &str) -> bool {
+        self.by_id.get(id).copied().unwrap_or(true)
+    }
+}
+
+/// Уходят ли учётные данные подключения на сервер: токен или ключ в keychain (`StoredSecrets`)
+/// либо подтверждённая строка запуска exec-плагина.
+fn has_credentials(stored: &StoredSecrets, p: &ConnectionProfile) -> bool {
     match &p.auth {
         AuthConfig::Exec(e) => crate::auth::exec::is_approved(e),
-        _ => match needs_secret(secrets, p) {
-            Ok(n) => n.token || n.client_key,
-            Err(_) => true,
-        },
+        _ => stored.has(&p.id),
     }
 }
 
@@ -437,14 +487,14 @@ fn has_credentials(secrets: &dyn SecretStore, p: &ConnectionProfile) -> bool {
 /// учётные данные: адрес, прокси, CA или имя для проверки сертификата. `new` — профиль после
 /// обновления (подтверждение exec-плагина в нём уже сброшено, если изменилась строка запуска).
 fn destination_warnings(
-    secrets: &dyn SecretStore,
+    stored: &StoredSecrets,
     local: &ConnectionProfile,
     new: &ConnectionProfile,
 ) -> Vec<LocalizedText> {
     let address = local.api_url != new.api_url;
     let proxy = local.proxy != new.proxy;
     let tls = local.ca != new.ca || local.tls_server_name != new.tls_server_name;
-    if !(address || proxy || tls) || !has_credentials(secrets, new) {
+    if !destination_changes(local, new) || !has_credentials(stored, new) {
         return Vec::new();
     }
     let name = &new.name;
@@ -476,13 +526,13 @@ fn destination_warnings(
 }
 
 /// Строит новое состояние хранилища и предпросмотр импорта. Функция чистая: разрешение
-/// политики приходит в `opts`, а `secrets` только читается — для предупреждений об обновлении
-/// подключения с сохранёнными учётными данными.
+/// политики приходит в `opts`, а сохранённые секреты — в `stored` (`StoredSecrets::read`, до
+/// блокировки хранилища), для предупреждений об обновлении подключения с учётными данными.
 pub(crate) fn plan_import(
     data: &StoreData,
     parsed: &ParsedExchange,
     opts: &ImportOptions,
-    secrets: &dyn SecretStore,
+    stored: &StoredSecrets,
 ) -> AppResult<ImportPlan> {
     let target = opts.target.map(str::to_string);
     if let Some(t) = &target
@@ -585,7 +635,7 @@ pub(crate) fn plan_import(
             // из чужих рук отправил бы их на другой сервер, и человек должен это увидеть.
             preview
                 .warnings
-                .extend(destination_warnings(secrets, slot, &profile));
+                .extend(destination_warnings(stored, slot, &profile));
             updated.push((TreeItemKind::Connection, profile.id.clone()));
             *slot = profile;
             continue;
@@ -877,7 +927,17 @@ mod tests {
 
     fn plan(data: &StoreData, bytes: &[u8], o: &ImportOptions) -> ImportPlan {
         let parsed = parse_exchange(bytes).unwrap();
-        plan_import(data, &parsed, o, &MemoryStore::default()).unwrap()
+        plan_with(data, &parsed, o, &MemoryStore::default()).unwrap()
+    }
+
+    /// План импорта, как в приложении: сохранённые секреты читаются до плана.
+    fn plan_with(
+        data: &StoreData,
+        parsed: &ParsedExchange,
+        o: &ImportOptions,
+        secrets: &dyn SecretStore,
+    ) -> AppResult<ImportPlan> {
+        plan_import(data, parsed, o, &StoredSecrets::read(secrets, data, parsed))
     }
 
     fn conn<'a>(data: &'a StoreData, id: &str) -> &'a ConnectionProfile {
@@ -931,7 +991,7 @@ mod tests {
     #[test]
     fn unknown_target_is_an_error() {
         let parsed = parse_exchange(&file(vec![], vec![])).unwrap();
-        let err = plan_import(
+        let err = plan_with(
             &StoreData::default(),
             &parsed,
             &opts(Some("nope")),
@@ -988,7 +1048,7 @@ mod tests {
     /// Локальное хранилище с подключением `a` и план импорта файла, где `a` изменено `edit`.
     fn plan_update(
         local: ConnectionProfile,
-        secrets: &MemoryStore,
+        secrets: &dyn SecretStore,
         edit: impl FnOnce(&mut serde_json::Value),
     ) -> ImportPreview {
         let data = StoreData {
@@ -998,7 +1058,7 @@ mod tests {
         let mut changed = conn_json("a", "conn-a", None);
         edit(&mut changed);
         let parsed = parse_exchange(&file(vec![], vec![changed])).unwrap();
-        let p = plan_import(&data, &parsed, &opts(None), secrets).unwrap();
+        let p = plan_with(&data, &parsed, &opts(None), secrets).unwrap();
         assert_eq!(preview_ids(&p.preview.updated), ["a"]);
         p.preview
     }
@@ -1024,6 +1084,69 @@ mod tests {
         assert_eq!(w.params["from"], "https://api.dev.example.com:6443");
         assert_eq!(w.params["to"], "https://api.other:6443");
         assert!(w.text.contains("conn-a") && w.text.contains("https://api.other:6443"));
+    }
+
+    /// Хранилище секретов, которое не читается (keychain заблокирован или отказал) и
+    /// записывает, какие ключи у него спрашивали.
+    #[derive(Default)]
+    struct FailingStore {
+        asked: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl SecretStore for FailingStore {
+        fn get(&self, key: &str) -> AppResult<Option<String>> {
+            self.asked.lock().unwrap().push(key.to_string());
+            Err(crate::error::AppError::internal_with("keychain is locked"))
+        }
+        fn set(&self, _: &str, _: &str) -> AppResult<()> {
+            Err(crate::error::AppError::internal_with("keychain is locked"))
+        }
+        fn delete(&self, _: &str) -> AppResult<()> {
+            Err(crate::error::AppError::internal_with("keychain is locked"))
+        }
+    }
+
+    /// Сбой keychain считается «учётные данные есть»: лишнее предупреждение лучше пропущенного.
+    #[test]
+    fn keychain_error_counts_as_stored_credentials() {
+        let secrets = FailingStore::default();
+        let p = plan_update(sample_profile("a"), &secrets, |c| {
+            c["apiUrl"] = "https://api.other:6443".into();
+        });
+        assert_eq!(warning_keys(&p), ["messages.import.addressChanged"]);
+        assert_eq!(*secrets.asked.lock().unwrap(), [secret_key("a", TOKEN)]);
+    }
+
+    /// Секреты читаются только у подключений, которые обновятся с новым направлением, и только
+    /// тот, который использует профиль из файла; то, чего не прочитали заранее, считается
+    /// сохранённым.
+    #[test]
+    fn stored_secrets_are_read_only_where_a_warning_is_possible() {
+        let mut exec = sample_profile("e");
+        exec.auth = AuthConfig::Exec(crate::storage::profile::sample_exec());
+        let data = StoreData {
+            connections: vec![sample_profile("a"), sample_profile("same"), exec.clone()],
+            ..Default::default()
+        };
+        let moved = |id: &str| {
+            let mut c = conn_json(id, &format!("conn-{id}"), None);
+            c["apiUrl"] = "https://api.other:6443".into();
+            c
+        };
+        let mut e = moved("e");
+        e["auth"] = serde_json::to_value(&exec.auth).unwrap();
+        let mut same = conn_json("same", "conn-same", None);
+        same["readOnly"] = true.into();
+        let parsed =
+            parse_exchange(&file(vec![], vec![moved("a"), same, e, moved("new")])).unwrap();
+        let secrets = FailingStore::default();
+        let stored = StoredSecrets::read(&secrets, &data, &parsed);
+        assert_eq!(*secrets.asked.lock().unwrap(), [secret_key("a", TOKEN)]);
+        assert!(stored.has("a"), "сбой keychain — «есть»");
+        assert!(stored.has("not-read"), "не прочитанное заранее — «есть»");
+        let p = plan_import(&data, &parsed, &opts(None), &stored).unwrap();
+        assert_eq!(preview_ids(&p.preview.updated), ["a", "same", "e"]);
+        assert_eq!(warning_keys(&p.preview), ["messages.import.addressChanged"]);
     }
 
     #[test]
@@ -1155,7 +1278,7 @@ mod tests {
         c["apiUrl"] = "https://api.other:6443".into();
         let bytes = file(vec![], vec![c.clone()]);
         let parsed = parse_exchange(&bytes).unwrap();
-        let p = plan_import(&data, &parsed, &opts(None), &with_token()).unwrap();
+        let p = plan_with(&data, &parsed, &opts(None), &with_token()).unwrap();
         assert_eq!(preview_ids(&p.preview.added), ["a"]);
         assert!(p.preview.warnings.is_empty());
         // Без «Обновлять существующие» подключение остаётся как было.
@@ -1167,7 +1290,7 @@ mod tests {
             update_existing: false,
             ..opts(None)
         };
-        let p = plan_import(&data, &parsed, &off, &with_token()).unwrap();
+        let p = plan_with(&data, &parsed, &off, &with_token()).unwrap();
         assert_eq!(preview_ids(&p.preview.unchanged), ["a"]);
         assert!(p.preview.warnings.is_empty());
     }
@@ -1307,7 +1430,7 @@ mod tests {
             imported.approved, None,
             "подтверждение из файла не принимается"
         );
-        let p = plan_import(
+        let p = plan_with(
             &StoreData::default(),
             &parsed,
             &opts(None),
@@ -1319,7 +1442,7 @@ mod tests {
             allow_exec_auth: false,
             ..opts(None)
         };
-        let p = plan_import(
+        let p = plan_with(
             &StoreData::default(),
             &parsed,
             &forbid,
@@ -1372,7 +1495,7 @@ mod tests {
             skipped,
             [
                 ("Preload", "errors.exec.envForbidden"),
-                ("Hidden", "errors.exec.argsNotAllowedWithOptions"),
+                ("Hidden", "errors.exec.optionBeforePlugin"),
             ]
         );
         assert_eq!(parsed.skipped[0].reason.params["name"], "LD_PRELOAD");
@@ -1511,7 +1634,7 @@ mod tests {
         insecure["ca"] = serde_json::json!({"mode": "insecure"});
         let bytes = file(vec![], vec![insecure, conn_json("ok", "OK", None)]);
         let parsed = parse_exchange(&bytes).unwrap();
-        let p = plan_import(
+        let p = plan_with(
             &StoreData::default(),
             &parsed,
             &opts(None),
@@ -1523,7 +1646,7 @@ mod tests {
             allow_insecure_tls: false,
             ..opts(None)
         };
-        let p = plan_import(
+        let p = plan_with(
             &StoreData::default(),
             &parsed,
             &forbid,
@@ -1583,7 +1706,7 @@ mod tests {
             "errors.connections.httpsRequired"
         );
 
-        let p = plan_import(
+        let p = plan_with(
             &StoreData::default(),
             &parsed,
             &opts(None),
@@ -1624,7 +1747,7 @@ mod tests {
         assert_eq!(p.api_url, "https://api.c:6443");
         assert_eq!(p.favorite_namespaces, ["team-a", "b"]);
         assert_eq!(p.manual_namespaces, ["team-c"]);
-        let plan = plan_import(
+        let plan = plan_with(
             &StoreData::default(),
             &parsed,
             &opts(None),
@@ -1661,7 +1784,7 @@ mod tests {
 
         let parsed = parse_exchange(&bytes).unwrap();
         assert!(parsed.skipped.is_empty());
-        let p = plan_import(
+        let p = plan_with(
             &StoreData::default(),
             &parsed,
             &opts(None),

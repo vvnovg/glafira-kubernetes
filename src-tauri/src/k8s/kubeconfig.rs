@@ -647,10 +647,7 @@ contexts:
             ("tty", "errors.kubeconfig.execInteractive"),
             ("legacy", "errors.kubeconfig.authProvider"),
             ("preload", "errors.exec.envForbidden"),
-            (
-                "flag-hides-subcommand",
-                "errors.exec.argsNotAllowedWithOptions",
-            ),
+            ("flag-hides-subcommand", "errors.exec.optionBeforePlugin"),
         ] {
             let c = by(name);
             assert_eq!(c.unsupported.unwrap().key, key, "{name}");

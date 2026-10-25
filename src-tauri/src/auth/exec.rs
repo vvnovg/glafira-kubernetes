@@ -25,22 +25,51 @@ pub struct AllowedCommand {
     pub name: &'static str,
     /// Первые позиционные аргументы; пустой список — любые аргументы.
     pub args: &'static [&'static str],
-    /// Ведущие ключи (до `args`), которые берут значение следующим элементом: `--ключ значение`.
-    /// Любой другой ведущий ключ — флаг без значения; `--ключ=значение` — всегда один элемент.
-    /// Здесь только глобальные ключи утилиты, которые точно берут значение: флаг, записанный
-    /// сюда по ошибке, спрятал бы подкоманду (`kubectl --insecure-skip-tls-verify exec …`).
-    /// Ключ со значением, которого здесь нет, пишется как `--ключ=значение`.
-    pub value_options: &'static [&'static str],
+    /// Ключи, допустимые перед `args`; `None` — ключей перед `args` нет вовсе.
+    pub leading: Option<LeadingOptions>,
+}
+
+/// Ведущие ключи разрешённой команды (перед её первыми аргументами). Ключ из `values` берёт
+/// значение следующим элементом (`--ключ значение`) или после `=`; ключ из `flags` — флаг без
+/// значения и без `=`. Любой другой ведущий ключ — отказ, в том числе `--`, `-` и сокращения
+/// argparse (`aws --reg`): подкоманда, которую запустит утилита, не должна зависеть от того,
+/// как утилита разбирает незнакомый ключ. Здесь только документированные глобальные ключи:
+/// ключа нет — редкая строка получает отказ с его именем.
+pub struct LeadingOptions {
+    pub values: &'static [&'static str],
+    pub flags: &'static [&'static str],
     /// `_` в имени ключа — то же, что `-` (`--request_timeout` = `--request-timeout`): так
-    /// kubectl и oc разбирают ключи (cobra с `WordSepNormalizeFunc`).
+    /// разбирает ключи oc (cobra с `WordSepNormalizeFunc`).
     pub underscore_is_dash: bool,
 }
 
-/// Глобальные ключи kubectl и oc со значением (`kubectl options`, `oc options`). `--loglevel`
-/// есть только у oc, `--config` — у старых oc (прежнее имя `--kubeconfig`), `--kuberc` — у kubectl
-/// 1.33+: незнакомый ключ без `=` cobra тоже считает ключом со значением, так что лишний ключ
-/// здесь не расходится с утилитой.
-const KUBECTL_VALUE_OPTIONS: &[&str] = &[
+/// Вид ведущего ключа.
+#[derive(Clone, Copy)]
+enum Leading {
+    Value,
+    Flag,
+}
+
+impl LeadingOptions {
+    /// Вид ключа по имени (без `=значение`); `None` — ключ незнаком.
+    fn kind(&self, option: &str) -> Option<Leading> {
+        let option = if self.underscore_is_dash {
+            option.replace('_', "-")
+        } else {
+            option.to_string()
+        };
+        if self.values.contains(&option.as_str()) {
+            Some(Leading::Value)
+        } else if self.flags.contains(&option.as_str()) {
+            Some(Leading::Flag)
+        } else {
+            None
+        }
+    }
+}
+
+/// Глобальные ключи oc со значением (`oc options`).
+const OC_VALUES: &[&str] = &[
     "--as",
     "--as-group",
     "--as-uid",
@@ -49,15 +78,12 @@ const KUBECTL_VALUE_OPTIONS: &[&str] = &[
     "--client-certificate",
     "--client-key",
     "--cluster",
-    "--config",
     "--context",
     "--kubeconfig",
-    "--kuberc",
     "--log-flush-frequency",
     "--loglevel",
     "-n",
     "--namespace",
-    "--password",
     "--profile",
     "--profile-output",
     "--request-timeout",
@@ -66,113 +92,127 @@ const KUBECTL_VALUE_OPTIONS: &[&str] = &[
     "--tls-server-name",
     "--token",
     "--user",
-    "--username",
     "-v",
     "--v",
     "--vmodule",
 ];
 
-/// Разрешённые команды: имя исполняемого файла, первые позиционные аргументы и ведущие ключи
-/// со значением.
+/// Глобальные флаги oc (`oc options`).
+const OC_FLAGS: &[&str] = &[
+    "--disable-compression",
+    "--insecure-skip-tls-verify",
+    "--match-server-version",
+    "--warnings-as-errors",
+];
+
+/// Разрешённые команды: имя исполняемого файла, первые позиционные аргументы и ключи перед ними.
 pub const ALLOWED: &[AllowedCommand] = &[
-    // EKS. Global Options из `aws help`: со значением — эти, остальные (`--debug`,
-    // `--no-verify-ssl`, `--no-paginate`, `--no-sign-request`, `--no-cli-pager`…) — флаги.
+    // EKS. Ведущие ключи — Global Options из `aws help`.
     AllowedCommand {
         name: "aws",
         args: &["eks", "get-token"],
-        value_options: &[
-            "--ca-bundle",
-            "--cli-binary-format",
-            "--cli-connect-timeout",
-            "--cli-read-timeout",
-            "--color",
-            "--endpoint-url",
-            "--output",
-            "--profile",
-            "--query",
-            "--region",
-        ],
-        underscore_is_dash: false,
+        leading: Some(LeadingOptions {
+            values: &[
+                "--ca-bundle",
+                "--cli-binary-format",
+                "--cli-connect-timeout",
+                "--cli-read-timeout",
+                "--color",
+                "--endpoint-url",
+                "--output",
+                "--profile",
+                "--query",
+                "--region",
+            ],
+            flags: &[
+                "--cli-auto-prompt",
+                "--debug",
+                "--no-cli-auto-prompt",
+                "--no-cli-pager",
+                "--no-paginate",
+                "--no-sign-request",
+                "--no-verify-ssl",
+            ],
+            underscore_is_dash: false,
+        }),
     },
-    // EKS, старые kubeconfig. Глобальные ключи со значением: `-c/--config`, `-i/--cluster-id`,
+    // EKS, старые kubeconfig. Глобальные ключи корневой команды: `-c/--config`, `-i/--cluster-id`,
     // `-l/--log-format`.
     AllowedCommand {
         name: "aws-iam-authenticator",
         args: &["token"],
-        value_options: &["-c", "--config", "-i", "--cluster-id", "-l", "--log-format"],
-        underscore_is_dash: false,
+        leading: Some(LeadingOptions {
+            values: &["-c", "--config", "-i", "--cluster-id", "-l", "--log-format"],
+            flags: &[],
+            underscore_is_dash: false,
+        }),
     },
     // GKE: любые аргументы.
     AllowedCommand {
         name: "gke-gcloud-auth-plugin",
         args: &[],
-        value_options: &[],
-        underscore_is_dash: false,
+        leading: None,
     },
-    // AKS (Azure kubelogin) и OIDC (int128/kubelogin). Глобальный ключ со значением у обоих —
-    // уровень журнала `-v/--v`.
+    // AKS (Azure kubelogin) и OIDC (int128/kubelogin). Глобальный ключ у обоих — уровень журнала
+    // `-v/--v`.
     AllowedCommand {
         name: "kubelogin",
         args: &["get-token"],
-        value_options: &["-v", "--v"],
-        underscore_is_dash: false,
+        leading: Some(LeadingOptions {
+            values: &["-v", "--v"],
+            flags: &[],
+            underscore_is_dash: false,
+        }),
     },
-    // OIDC: Keycloak, Dex (в том числе Deckhouse).
+    // OIDC: Keycloak, Dex (в том числе Deckhouse). Ключей перед `oidc-login` нет: с ними kubectl
+    // плагин не запускает («flags cannot be placed before plugin name»), а флаг перед встроенной
+    // командой запустил бы её (`kubectl --insecure-skip-tls-verify exec …`).
     AllowedCommand {
         name: "kubectl",
         args: &["oidc-login", "get-token"],
-        value_options: KUBECTL_VALUE_OPTIONS,
-        underscore_is_dash: true,
+        leading: None,
     },
     // OpenShift с внешним OIDC (ROSA HCP с external auth).
     AllowedCommand {
         name: "oc",
         args: &["get-token"],
-        value_options: KUBECTL_VALUE_OPTIONS,
-        underscore_is_dash: true,
+        leading: Some(LeadingOptions {
+            values: OC_VALUES,
+            flags: OC_FLAGS,
+            underscore_is_dash: true,
+        }),
     },
-    // Yandex Managed Kubernetes. Global Flags из `yc --help`: со значением — эти, остальные
-    // (`--debug`, `--no-user-output`, `--no-browser`…) — флаги.
+    // Yandex Managed Kubernetes. Ведущие ключи — Global Flags из `yc --help`.
     AllowedCommand {
         name: "yc",
         args: &["k8s", "create-token"],
-        value_options: &[
-            "--cloud-id",
-            "--endpoint",
-            "--folder-id",
-            "--folder-name",
-            "--format",
-            "--profile",
-            "--retry",
-            "--token",
-        ],
-        underscore_is_dash: false,
+        leading: Some(LeadingOptions {
+            values: &[
+                "--cloud-id",
+                "--endpoint",
+                "--folder-id",
+                "--folder-name",
+                "--format",
+                "--profile",
+                "--retry",
+                "--token",
+            ],
+            flags: &["--debug", "--no-user-output"],
+            underscore_is_dash: false,
+        }),
     },
-    // Rancher без генерации токенов в kubeconfig. Глобальный ключ со значением — `--config, -c`
-    // (`--debug`, `--help`, `--version` — флаги); ключи разбирает Go `flag`, где один и два
-    // дефиса равны.
+    // Rancher без генерации токенов в kubeconfig. Глобальные ключи: `--config, -c` и `--debug`;
+    // ключи разбирает Go `flag`, где один и два дефиса равны.
     AllowedCommand {
         name: "rancher",
         args: &["token"],
-        value_options: &["-c", "--c", "-config", "--config"],
-        underscore_is_dash: false,
+        leading: Some(LeadingOptions {
+            values: &["-c", "--c", "-config", "--config"],
+            flags: &["-debug", "--debug"],
+            underscore_is_dash: false,
+        }),
     },
 ];
-
-impl AllowedCommand {
-    /// Берёт ли ведущий ключ значение следующим элементом.
-    fn takes_value(&self, option: &str) -> bool {
-        if option.contains('=') {
-            return false;
-        }
-        if self.underscore_is_dash {
-            self.value_options
-                .contains(&option.replace('_', "-").as_str())
-        } else {
-            self.value_options.contains(&option)
-        }
-    }
-}
 
 /// Имя исполняемого файла без каталога и `.exe`; на Windows — без учёта регистра.
 pub fn command_name(command: &str) -> String {
@@ -193,23 +233,9 @@ pub fn command_name(command: &str) -> String {
     }
 }
 
-/// Позиционные аргументы после ведущих ключей команды: ключ из `value_options` без `=` пропускается
-/// вместе со следующим элементом, любой другой ключ — один (`aws eks update-kubeconfig` пишет
-/// `--region eu-west-1` перед `eks get-token`). На `--` и `-` разбор останавливается: позиционные
-/// после них утилиты понимают по-разному (cobra подкоманду после `--` не ищет, Go `flag` и argparse
-/// ищут), и такая строка не совпадёт с разрешёнными аргументами.
-fn positional<'a>(cmd: &AllowedCommand, args: &'a [String]) -> &'a [String] {
-    let mut i = 0;
-    while let Some(a) = args.get(i) {
-        if a == "--" || a == "-" || !a.starts_with('-') {
-            break;
-        }
-        i += if cmd.takes_value(a) { 2 } else { 1 };
-    }
-    &args[i.min(args.len())..]
-}
-
-/// Разрешена ли команда: имя файла и первые позиционные аргументы из `ALLOWED`.
+/// Разрешена ли команда: имя файла из `ALLOWED`, перед первыми аргументами — только ключи
+/// из таблицы команды (`LeadingOptions`), затем сами аргументы. В тексте отказа — имя ключа без
+/// значения: значение после `=` бывает секретом.
 pub fn check_allowed(command: &str, args: &[String]) -> Result<(), LocalizedText> {
     let name = command_name(command);
     let Some(cmd) = ALLOWED.iter().find(|c| c.name == name) else {
@@ -219,25 +245,57 @@ pub fn check_allowed(command: &str, args: &[String]) -> Result<(), LocalizedText
             command = name
         ));
     };
-    let pos = positional(cmd, args);
     let prefix = cmd.args;
-    let matches = pos.len() >= prefix.len() && prefix.iter().zip(pos).all(|(p, a)| p == a);
-    if matches {
+    let Some(&subcommand) = prefix.first() else {
         return Ok(());
-    }
+    };
     let expected = std::iter::once(name.as_str())
         .chain(prefix.iter().copied())
         .collect::<Vec<_>>()
         .join(" ");
-    // Перед аргументами были ключи: вероятнее всего, ключ со значением не из таблицы команды.
-    if pos.len() < args.len() {
-        return Err(ltext!(
-            "errors.exec.argsNotAllowedWithOptions",
-            "The exec plugin “{{command}}” may run only as “{{expected}} …”: before “{{subcommand}}”, write options with a value as --option=value",
-            command = name,
-            expected = expected,
-            subcommand = prefix[0]
-        ));
+    let mut i = 0;
+    while let Some(a) = args.get(i).filter(|a| a.starts_with('-')) {
+        let (option, inline) = match a.split_once('=') {
+            Some((option, _)) => (option, true),
+            None => (a.as_str(), false),
+        };
+        let Some(leading) = &cmd.leading else {
+            return Err(ltext!(
+                "errors.exec.optionBeforePlugin",
+                "“{{command}}” starts the plugin “{{subcommand}}” only without options before it: put “{{option}}” after “{{expected}}” or remove it",
+                command = name,
+                subcommand = subcommand,
+                option = option,
+                expected = expected
+            ));
+        };
+        i += match (leading.kind(option), inline) {
+            (Some(Leading::Value), false) => 2,
+            (Some(Leading::Value), true) | (Some(Leading::Flag), false) => 1,
+            (Some(Leading::Flag), true) => {
+                return Err(ltext!(
+                    "errors.exec.flagWithValue",
+                    "The option “{{option}}” of “{{command}}” before “{{subcommand}}” is a flag: write it without “=”",
+                    option = option,
+                    command = name,
+                    subcommand = subcommand
+                ));
+            }
+            (None, _) => {
+                return Err(ltext!(
+                    "errors.exec.unknownOption",
+                    "Glafira does not know the option “{{option}}” of “{{command}}” before “{{subcommand}}”: put it after “{{expected}}” or remove it",
+                    option = option,
+                    command = name,
+                    subcommand = subcommand,
+                    expected = expected
+                ));
+            }
+        };
+    }
+    let pos = &args[i.min(args.len())..];
+    if pos.len() >= prefix.len() && prefix.iter().zip(pos).all(|(p, a)| p == a) {
+        return Ok(());
     }
     Err(ltext!(
         "errors.exec.argsNotAllowed",
@@ -269,6 +327,10 @@ const FORBIDDEN_ENV: &[&str] = &[
     "JAVA_TOOL_OPTIONS",
     "_JAVA_OPTIONS",
     "JDK_JAVA_OPTIONS",
+    // Windows: по PATHEXT ищутся обёртки `.cmd` в цепочке плагина (`gcloud` у
+    // gke-gcloud-auth-plugin), COMSPEC их запускает.
+    "PATHEXT",
+    "COMSPEC",
 ];
 
 /// Начала имён запрещённых переменных: загрузчики Linux и macOS, все переменные Python (`python -E`
@@ -988,8 +1050,8 @@ mod tests {
         assert_eq!(e.params["expected"], "kubectl oidc-login get-token");
     }
 
-    /// Ведущие ключи: значение следующим элементом берут только ключи из таблицы команды,
-    /// остальные — флаги; `--ключ=значение` — один элемент.
+    /// Ведущие ключи — только из таблицы команды: ключ со значением (`--ключ значение` или
+    /// `--ключ=значение`) или флаг без `=`; любой другой — отказ с именем ключа.
     #[test]
     fn leading_options_follow_the_table_of_the_command() {
         let accepted = [
@@ -997,6 +1059,7 @@ mod tests {
                 "/usr/local/bin/aws",
                 &["--no-verify-ssl", "eks", "get-token"][..],
             ),
+            ("/usr/local/bin/aws", &["--debug", "eks", "get-token"][..]),
             (
                 "/usr/local/bin/aws",
                 &["--region", "eu-west-1", "eks", "get-token"][..],
@@ -1011,34 +1074,26 @@ mod tests {
                     "--debug",
                     "--profile",
                     "dev",
-                    "--output",
-                    "json",
-                    "--unknown=x",
+                    "--output=json",
+                    "--no-cli-pager",
                     "eks",
                     "get-token",
                     "--cluster-name",
                     "c",
-                ][..],
-            ),
-            (
-                "/usr/local/bin/kubectl",
-                &["--kubeconfig", "/x", "oidc-login", "get-token"][..],
-            ),
-            (
-                "/usr/local/bin/kubectl",
-                &[
-                    "-n",
-                    "team-a",
-                    "--insecure-skip-tls-verify",
-                    "-v",
-                    "9",
-                    "oidc-login",
-                    "get-token",
+                    "--unknown-after-the-subcommand",
                 ][..],
             ),
             (
                 "/usr/local/bin/oc",
-                &["--request_timeout", "5s", "--loglevel", "8", "get-token"][..],
+                &[
+                    "--request_timeout",
+                    "5s",
+                    "--loglevel=8",
+                    "-n",
+                    "team-a",
+                    "--insecure-skip-tls-verify",
+                    "get-token",
+                ][..],
             ),
             (
                 "/usr/local/bin/yc",
@@ -1047,12 +1102,16 @@ mod tests {
                     "prod",
                     "--folder-id",
                     "b1g",
+                    "--debug",
                     "k8s",
                     "create-token",
                 ][..],
             ),
             ("/usr/local/bin/rancher", &["-c", "/r", "token"][..]),
-            ("/usr/local/bin/rancher", &["--config", "/r", "token"][..]),
+            (
+                "/usr/local/bin/rancher",
+                &["--config", "/r", "-debug", "token"][..],
+            ),
             (
                 "/usr/local/bin/aws-iam-authenticator",
                 &["-i", "c", "token"][..],
@@ -1063,64 +1122,156 @@ mod tests {
         for (cmd, a) in accepted {
             assert_eq!(check_allowed(cmd, &args(a)), Ok(()), "{cmd} {a:?}");
         }
-        let rejected = [
-            // Флаг не берёт значение: на деле это `kubectl exec`.
+        // Незнакомый ведущий ключ — отказ в любой записи: от того, берёт ли он значение,
+        // зависит, какую подкоманду запустит утилита.
+        let unknown = [
+            // На деле — плагин `oc-evil` или встроенная команда.
             (
-                "/usr/local/bin/kubectl",
+                "/usr/local/bin/oc",
+                &["--x", "evil", "get-token"][..],
+                "--x",
+            ),
+            ("/usr/local/bin/oc", &["--x", "get-token"][..], "--x"),
+            (
+                "/usr/local/bin/aws",
+                &["--unknown-opt", "value", "eks", "get-token"][..],
+                "--unknown-opt",
+            ),
+            (
+                "/usr/local/bin/aws",
+                &["--unknown=x", "eks", "get-token"][..],
+                "--unknown",
+            ),
+            // Сокращение argparse — тоже незнакомый ключ.
+            (
+                "/usr/local/bin/aws",
+                &["--reg", "eu-west-1", "eks", "get-token"][..],
+                "--reg",
+            ),
+            // `_` вместо `-` понимает только oc.
+            (
+                "/usr/local/bin/aws",
+                &["--endpoint_url", "http://x", "eks", "get-token"][..],
+                "--endpoint_url",
+            ),
+            // Короткие ключи слитно (`-nteam`) и `--`, `-` перед подкомандой.
+            ("/usr/local/bin/oc", &["-nteam", "get-token"][..], "-nteam"),
+            (
+                "/usr/local/bin/aws",
+                &["--debug", "--", "eks", "get-token"][..],
+                "--",
+            ),
+            ("/usr/local/bin/oc", &["-", "get-token"][..], "-"),
+            (
+                "/usr/local/bin/kubelogin",
+                &["--logtostderr", "get-token"][..],
+                "--logtostderr",
+            ),
+        ];
+        for (cmd, a, option) in unknown {
+            let e = check_allowed(cmd, &args(a)).unwrap_err();
+            assert_eq!(
+                (e.key.as_str(), e.params["option"].as_str()),
+                ("errors.exec.unknownOption", option),
+                "{cmd} {a:?}"
+            );
+        }
+        let e =
+            check_allowed("/usr/local/bin/oc", &args(&["--x", "evil", "get-token"])).unwrap_err();
+        assert_eq!(
+            (
+                e.params["command"].as_str(),
+                e.params["subcommand"].as_str(),
+                e.params["expected"].as_str()
+            ),
+            ("oc", "get-token", "oc get-token")
+        );
+        // Значение после `=` в текст отказа не попадает.
+        let e = check_allowed(
+            "/usr/local/bin/aws",
+            &args(&["--client-secret=s3cr3t", "eks", "get-token"]),
+        )
+        .unwrap_err();
+        assert_eq!(e.params["option"], "--client-secret");
+        assert!(!e.text.contains("s3cr3t"), "{}", e.text);
+
+        // Флаг со значением через `=`.
+        for (cmd, a, option) in [
+            (
+                "/usr/local/bin/aws",
+                &["--debug=true", "eks", "get-token"][..],
+                "--debug",
+            ),
+            (
+                "/usr/local/bin/oc",
+                &["--insecure-skip-tls-verify=true", "get-token"][..],
+                "--insecure-skip-tls-verify",
+            ),
+        ] {
+            let e = check_allowed(cmd, &args(a)).unwrap_err();
+            assert_eq!(
+                (e.key.as_str(), e.params["option"].as_str()),
+                ("errors.exec.flagWithValue", option),
+                "{cmd} {a:?}"
+            );
+        }
+
+        // Ключи в порядке, не та подкоманда — обычный отказ.
+        for (cmd, a) in [
+            (
+                "/usr/local/bin/aws",
+                &["--region", "eu-west-1", "s3", "ls"][..],
+            ),
+            // Значение ключа — не подкоманда: здесь подкоманда — `get-token`.
+            ("/usr/local/bin/aws", &["--region", "eks", "get-token"][..]),
+            ("/usr/local/bin/aws", &["--region"][..]),
+            (
+                "/usr/local/bin/oc",
+                &["--insecure-skip-tls-verify", "exec"][..],
+            ),
+        ] {
+            let e = check_allowed(cmd, &args(a)).unwrap_err();
+            assert_eq!(e.key, "errors.exec.argsNotAllowed", "{cmd} {a:?}");
+        }
+    }
+
+    /// kubectl запускает плагин, только если перед его именем нет ключей, поэтому ведущих ключей
+    /// у `kubectl oidc-login` нет вовсе: флаг перед встроенной командой запустил бы её.
+    #[test]
+    fn kubectl_takes_no_options_before_the_plugin() {
+        for (a, option) in [
+            (
                 &[
                     "--insecure-skip-tls-verify",
                     "exec",
                     "oidc-login",
                     "get-token",
                 ][..],
+                "--insecure-skip-tls-verify",
             ),
             (
-                "/usr/local/bin/kubectl",
-                &["-x", "exec", "oidc-login", "get-token"][..],
+                &["--kubeconfig", "/x", "oidc-login", "get-token"][..],
+                "--kubeconfig",
             ),
-            // Незнакомый ключ — флаг: подкоманда — `evil` (плагин `oc-evil`).
-            ("/usr/local/bin/oc", &["--x", "evil", "get-token"][..]),
-            // Ключ со значением не из таблицы — только как `--ключ=значение`.
-            (
-                "/usr/local/bin/aws",
-                &["--unknown-opt", "value", "eks", "get-token"][..],
-            ),
-            // `_` вместо `-` понимают только kubectl и oc.
-            (
-                "/usr/local/bin/aws",
-                &["--endpoint_url", "http://x", "eks", "get-token"][..],
-            ),
-            // Значение ключа — не подкоманда: здесь подкоманда — `get-token`.
-            ("/usr/local/bin/aws", &["--region", "eks", "get-token"][..]),
-            ("/usr/local/bin/aws", &["--region"][..]),
-            (
-                "/usr/local/bin/aws",
-                &["--debug", "--", "eks", "get-token"][..],
-            ),
-        ];
-        for (cmd, a) in rejected {
-            let e = check_allowed(cmd, &args(a)).unwrap_err();
-            assert_eq!(
-                e.key, "errors.exec.argsNotAllowedWithOptions",
-                "{cmd} {a:?}"
-            );
-        }
-        // `--` и `-` перед подкомандой — не ключи: на них разбор останавливается.
-        for (cmd, a) in [
-            ("/usr/local/bin/aws", &["--", "eks", "get-token"][..]),
-            ("/usr/local/bin/oc", &["-", "get-token"][..]),
+            (&["--token=abc", "oidc-login", "get-token"][..], "--token"),
+            (&["-v", "9", "oidc-login", "get-token"][..], "-v"),
+            (&["--", "oidc-login", "get-token"][..], "--"),
         ] {
-            let e = check_allowed(cmd, &args(a)).unwrap_err();
-            assert_eq!(e.key, "errors.exec.argsNotAllowed", "{cmd} {a:?}");
+            let e = check_allowed("/usr/local/bin/kubectl", &args(a)).unwrap_err();
+            assert_eq!(
+                (e.key.as_str(), e.params["option"].as_str()),
+                ("errors.exec.optionBeforePlugin", option),
+                "{a:?}"
+            );
+            assert!(!e.text.contains("abc"), "{}", e.text);
         }
-        let e =
-            check_allowed("/usr/local/bin/oc", &args(&["--x", "evil", "get-token"])).unwrap_err();
         assert_eq!(
-            (
-                e.params["expected"].as_str(),
-                e.params["subcommand"].as_str()
+            check_allowed(
+                "/usr/local/bin/kubectl",
+                &args(&["oidc-login", "get-token", "--kubeconfig", "/x", "-v", "9"])
             ),
-            ("oc get-token", "get-token")
+            Ok(()),
+            "ключи после имени плагина — его ключи"
         );
     }
 
@@ -1152,6 +1303,8 @@ mod tests {
             "_JAVA_OPTIONS",
             "JDK_JAVA_OPTIONS",
             "GCONV_PATH",
+            "PATHEXT",
+            "COMSPEC",
         ] {
             assert!(is_forbidden_env(name), "{name}");
         }
@@ -1174,7 +1327,15 @@ mod tests {
         }
         // На Windows регистр в именах не различается: `Path` — это `PATH`; в unix это другая
         // переменная.
-        for name in ["Path", "path", "ld_preload", "Node_Options", "PythonPath"] {
+        for name in [
+            "Path",
+            "path",
+            "PathExt",
+            "ComSpec",
+            "ld_preload",
+            "Node_Options",
+            "PythonPath",
+        ] {
             assert_eq!(is_forbidden_env(name), cfg!(windows), "{name}");
         }
 
@@ -1817,7 +1978,7 @@ esac
             e.args.insert(0, "--insecure-skip-tls-verify".into());
             e.args.insert(1, "exec".into());
             let err = go(&e, Duration::from_secs(10)).await.unwrap_err();
-            assert_eq!(err.key, "errors.exec.argsNotAllowedWithOptions");
+            assert_eq!(err.key, "errors.exec.optionBeforePlugin");
             assert!(!marker.exists(), "плагин запущен");
             // Та же строка без лишнего — запускается: проверка выше не случайна.
             let mut e = plugin(dir.path(), "info");

@@ -8,7 +8,8 @@ use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use crate::storage::connections::ConnectionFolder;
 use crate::storage::exchange::{
-    ExportSummary, ImportOptions, ImportPreview, build_export, parse_exchange, plan_import,
+    ExportSummary, ImportOptions, ImportPreview, StoredSecrets, build_export, parse_exchange,
+    plan_import,
 };
 use crate::storage::fs::write_json;
 use crate::storage::tree::TreeItemRef;
@@ -152,17 +153,15 @@ fn import_from_file(
         allow_insecure_tls: st.policy.status.allow_insecure_tls,
         allow_exec_auth: st.policy.status.allow_exec_auth,
     };
+    let snapshot = st.connections.snapshot();
+    // Keychain читается до `update`: запрос доступа (на macOS — окно с паролем) не держит
+    // блокировку записи хранилища, под которой ждали бы `list_connections` и `connections.get`.
+    let stored = StoredSecrets::read(st.secrets.as_ref(), &snapshot, &parsed);
     if !apply {
-        let plan = plan_import(
-            &st.connections.snapshot(),
-            &parsed,
-            &opts,
-            st.secrets.as_ref(),
-        )?;
-        return Ok(plan.preview);
+        return Ok(plan_import(&snapshot, &parsed, &opts, &stored)?.preview);
     }
     let preview = st.connections.update(|data| {
-        let plan = plan_import(data, &parsed, &opts, st.secrets.as_ref())?;
+        let plan = plan_import(data, &parsed, &opts, &stored)?;
         *data = plan.next;
         Ok(plan.preview)
     })?;
@@ -286,6 +285,52 @@ mod tests {
                 .as_deref(),
             Some("sha256~t")
         );
+    }
+
+    /// Keychain, который запоминает для каждого чтения, держал ли кто-то в этот момент
+    /// блокировку записи хранилища подключений.
+    #[derive(Default)]
+    struct LockProbe {
+        inner: MemoryStore,
+        store: std::sync::OnceLock<Arc<crate::storage::connections::ConnectionStore>>,
+        reads: std::sync::Mutex<Vec<bool>>,
+    }
+
+    impl SecretStore for LockProbe {
+        fn get(&self, key: &str) -> AppResult<Option<String>> {
+            let locked = self.store.get().is_some_and(|s| s.is_write_locked());
+            self.reads.lock().unwrap().push(locked);
+            self.inner.get(key)
+        }
+        fn set(&self, key: &str, value: &str) -> AppResult<()> {
+            self.inner.set(key, value)
+        }
+        fn delete(&self, key: &str) -> AppResult<()> {
+            self.inner.delete(key)
+        }
+    }
+
+    /// Применение импорта читает keychain до блокировки записи хранилища: запрос доступа к
+    /// keychain не задерживает `list_connections` и `connections.get`.
+    #[test]
+    fn import_reads_the_keychain_outside_the_store_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = Arc::new(LockProbe::default());
+        probe
+            .inner
+            .set(&secret_key("a", crate::secrets::TOKEN), "sha256~t")
+            .unwrap();
+        let st = AppState::new(dir.path(), probe.clone()).unwrap();
+        assert!(probe.store.set(st.connections.clone()).is_ok());
+        st.connections.upsert(sample_profile("a")).unwrap();
+        probe.reads.lock().unwrap().clear();
+        let path = write_file(dir.path(), "https://api.changed:6443");
+
+        let applied = import_from_file(&st, &path, None, true, true).unwrap();
+        assert_eq!(applied.warnings[0].key, "messages.import.addressChanged");
+        let reads = probe.reads.lock().unwrap().clone();
+        assert!(!reads.is_empty(), "токен прочитан");
+        assert!(reads.iter().all(|locked| !locked), "{reads:?}");
     }
 
     #[cfg(unix)]
