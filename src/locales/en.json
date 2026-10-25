@@ -150,6 +150,92 @@
     }
   },
   "hints": {
-    "label": "Hint: {{name}}"
+    "label": "Hint: {{name}}",
+    "connections": {
+      "environment": "Color and protection: a new <code>prod</code> connection is read-only, and every change on it asks you to type the connection name.",
+      "readOnly": "Glafira will not change anything in the cluster through this connection, whatever your rights are.",
+      "apiUrl": "The API server, as in <code>oc login</code> or kubeconfig: usually <code>https://api.cluster:6443</code>; a path is allowed (Rancher proxy). Not the web console.",
+      "authMethod": "Browser — OpenShift OAuth, like <code>oc login --web</code>. Token — <code>oc whoami -t</code> or a service account token. Certificate — PEM. Exec plugin — a command from kubeconfig.",
+      "token": "Saved in the system secret store, not in a file. Tokens from OpenShift OAuth usually expire after 24 hours.",
+      "clientCert": "Certificate and key in PEM format. The key is saved in the system secret store.",
+      "exec": "Only allowed commands: aws, aws-iam-authenticator, gke-gcloud-auth-plugin, kubelogin, kubectl oidc-login, oc, yc, rancher. Run without a shell; may open the browser.",
+      "execLine": "Exactly what Glafira will run. Values of variables that look like secrets are hidden. Any change to the line needs a new confirmation.",
+      "ca": "System store — the CAs trusted by your computer. Certificates — only the listed ones, like <code>certificate-authority</code> in kubeconfig.",
+      "tlsServerName": "Only if the certificate is issued for another name than the address host. Usually empty.",
+      "proxy": "System — the <code>HTTPS_PROXY</code> and <code>NO_PROXY</code> variables. Or an explicit address like <code>http://proxy:3128</code>.",
+      "favorites": "Shown first in the tree. Separate with commas.",
+      "manualNamespaces": "If the cluster does not let you list projects, list the ones you work with here.",
+      "test": "Checks step by step: address, TLS, sign-in, platform and projects. Unsaved fields are tested too."
+    }
+  },
+  "connections": {
+    "form": {
+      "titleNew": "New connection",
+      "titleEdit": "Connection “{{name}}”",
+      "name": "Name",
+      "folder": "Folder",
+      "folderRoot": "(root)",
+      "environment": "Environment",
+      "color": "Color",
+      "apiUrl": "API server address",
+      "authMethod": "Sign-in method",
+      "auth": {
+        "browser": "Browser (OpenShift OAuth)",
+        "token": "Token",
+        "clientCert": "Client certificate",
+        "exec": "Exec plugin"
+      },
+      "browserNote": "After saving, sign in on the connection tab with “Sign in via browser”.",
+      "token": "Token",
+      "certificate": "Certificate (PEM)",
+      "clientKey": "Key (PEM)",
+      "exec": {
+        "command": "Command",
+        "find": "Find",
+        "args": "Arguments (one per line)",
+        "env": "Environment variables (NAME=value, one per line)",
+        "line": "Launch line",
+        "confirm": "I allow Glafira to run this command",
+        "approved": "Launch line confirmed",
+        "forbidden": "Connections with exec plugins are forbidden by your organization."
+      },
+      "secretKeep": "leave empty to keep unchanged",
+      "ca": "Trusted CA",
+      "caMode": {
+        "system": "System certificate store",
+        "pem": "Certificates (PEM)",
+        "insecure": "Do not verify (insecure)"
+      },
+      "caPem": "CA certificates (PEM)",
+      "insecureWarning": "The server certificate will not be verified: anyone on the network path can impersonate the cluster.",
+      "insecureForbidden": "Connections without certificate verification are forbidden by your organization.",
+      "tlsServerName": "TLS server name",
+      "proxy": "Proxy",
+      "proxyMode": {
+        "system": "System (HTTPS_PROXY)",
+        "none": "No proxy",
+        "url": "Proxy address"
+      },
+      "proxyUrl": "Proxy address",
+      "favorites": "Favorite projects",
+      "manualNamespaces": "Projects (if the list is not available)",
+      "requestTimeout": "Request timeout, ms",
+      "connectTimeout": "Connect timeout, ms",
+      "test": "Test connection",
+      "deleteGroup": "Delete confirmation",
+      "deleteConfirm": "Delete connection “{{name}}”?",
+      "deleteYes": "Yes, delete",
+      "busy": "Working…",
+      "deleted": "The connection was deleted.",
+      "step": {
+        "config": "Configuration",
+        "tcp": "DNS / TCP",
+        "exec": "Exec plugin",
+        "tls": "TLS",
+        "auth": "Sign-in",
+        "discovery": "Platform",
+        "projects": "Projects"
+      }
+    }
   }
 }

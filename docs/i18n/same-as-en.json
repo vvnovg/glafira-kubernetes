@@ -1,3 +1,6 @@
 {
-  "ru": []
+  "ru": [
+    "connections.form.step.tcp",
+    "connections.form.step.tls"
+  ]
 }

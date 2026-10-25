@@ -85,3 +85,9 @@
 | `src/api/types.ts` | `src/api/types.ts` | `8bbd0bd` | адаптирован: типы Kubernetes |
 | `scripts/i18n-check.mjs` | `scripts/i18n-check.mjs` | `8bbd0bd` | адаптирован: главы руководства O1 |
 | `scripts/i18n-check.test.mjs` | `scripts/i18n-check.test.mjs` | `8bbd0bd` | как есть |
+| `src/components/connections/tree/folderTree.ts` | `src/components/connections/tree/folderTree.ts` | `8bbd0bd` | как есть |
+| `src/components/connections/tree/folderTree.test.ts` | `src/components/connections/tree/folderTree.test.ts` | `8bbd0bd` | как есть |
+| `src/components/connections/ConnectionFormTab.tsx` | `src/components/connections/ConnectionFormTab.tsx` | `8bbd0bd` | как есть |
+| `src/state/workspace.ts` | `src/state/workspace.ts` | `8bbd0bd` | адаптирован: вкладки O1 |
+| `src/components/connections/profile.ts` | `src/components/connections/profile.ts` | `8bbd0bd` | адаптирован: профиль Kubernetes |
+| `src/components/connections/ConnectionForm.tsx` | `src/components/connections/ConnectionForm.tsx` | `8bbd0bd` | адаптирован: поля Kubernetes, секреты, проверка по шагам |
