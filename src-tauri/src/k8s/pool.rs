@@ -133,6 +133,19 @@ impl ClientPool {
         *inner.generations.entry(id.to_string()).or_default() += 1;
         inner.clients.remove(id).is_some()
     }
+
+    /// Убирает из пула `used`, если там всё ещё он: ошибка запроса, ушедшего прежним клиентом,
+    /// не выбивает клиент, к которому уже подключились заново. Поколение не растёт — профиль
+    /// не сбрасывали, и подключение, начатое раньше (истекающие учётные данные exec-плагина),
+    /// попадёт в пул, а его ошибку получат те, кто его ждал. `true` — клиент убран.
+    pub fn evict_if_same(&self, id: &str, used: &Arc<Connected>) -> bool {
+        let mut inner = self.inner.lock_safe();
+        if !inner.clients.get(id).is_some_and(|c| Arc::ptr_eq(c, used)) {
+            return false;
+        }
+        inner.clients.remove(id);
+        true
+    }
 }
 
 /// Новое подключение: клиент из профиля (keychain — на blocking-потоке), учётные данные
@@ -203,6 +216,20 @@ mod tests {
         );
         assert!(!pool.evict("a"), "клиента уже нет");
         assert!(pool.insert_if_current("a", pool.generation("a"), connected()));
+    }
+
+    #[tokio::test]
+    async fn evict_if_same_drops_only_the_client_that_failed() {
+        let pool = ClientPool::default();
+        let (old, new) = (connected(), connected());
+        assert!(!pool.evict_if_same("a", &old), "клиента нет");
+        assert!(pool.insert_if_current("a", pool.generation("a"), new.clone()));
+        let g = pool.generation("a");
+        assert!(!pool.evict_if_same("a", &old), "в пуле уже другой клиент");
+        assert!(Arc::ptr_eq(&pool.get("a").unwrap(), &new));
+        assert!(pool.evict_if_same("a", &new));
+        assert!(pool.get("a").is_none());
+        assert_eq!(pool.generation("a"), g, "профиль не сбрасывали");
     }
 
     #[test]

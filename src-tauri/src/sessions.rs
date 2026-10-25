@@ -64,6 +64,17 @@ impl Sessions {
         ids.len()
     }
 
+    /// Останавливает все сессии: страница окна загружается заново (перезагрузка, полная
+    /// перезагрузка HMR), и каналы прежней страницы никто не читает. Возвращает их число.
+    pub fn stop_all(&self) -> usize {
+        let mut inner = self.inner.lock_safe();
+        let n = inner.len();
+        for (_, e) in inner.drain() {
+            e.cancel.cancel();
+        }
+        n
+    }
+
     /// Снимает с учёта сессию, которая завершилась сама.
     pub fn remove(&self, id: &str) {
         self.inner.lock_safe().remove(id);
@@ -90,8 +101,12 @@ impl Drop for SessionGuard {
     }
 }
 
-/// Куда сессия отправляет данные: канал Tauri или, в тестах, вектор. `false` — получателя
-/// больше нет (окно закрыто), сессия завершается.
+/// Куда сессия отправляет данные: канал Tauri или, в тестах, вектор. `false` — данные не
+/// отправлены (окно закрыто), сессия завершается. Канал Tauri замечает не всё: после
+/// перезагрузки страницы отправка проходит (скрипт выполняется, хотя обработчика канала уже
+/// нет), а после закрытия окна проходит отправка JSON от 8 КБ. Такие сессии останавливает
+/// `Sessions::stop_all` в начале загрузки страницы (`lib.rs`), а отключение и удаление
+/// подключения — `stop_for`.
 pub trait Sink<T>: Send + Sync + 'static {
     fn send(&self, item: T) -> bool;
 }
@@ -202,6 +217,17 @@ mod tests {
         assert!(!b.is_cancelled());
         assert_eq!(s.len(), 1);
         assert_eq!(s.stop_for("missing"), 0);
+    }
+
+    #[test]
+    fn page_reload_stops_every_session() {
+        let s = Sessions::default();
+        let (_, a) = s.register("a");
+        let (_, b) = s.register("b");
+        assert_eq!(s.stop_all(), 2);
+        assert!(a.is_cancelled() && b.is_cancelled());
+        assert!(s.is_empty());
+        assert_eq!(s.stop_all(), 0);
     }
 
     #[test]

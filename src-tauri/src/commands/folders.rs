@@ -171,8 +171,10 @@ fn import_from_file(
         *data = plan.next;
         Ok(plan.preview)
     })?;
-    // Обновлённые подключения переподключатся с новым профилем — как при сохранении формы.
+    // Обновлённые подключения переподключатся с новым профилем, их сессии на прежнем клиенте
+    // останавливаются — как при сохранении формы.
     for item in &preview.updated {
+        st.sessions.stop_for(&item.id);
         st.evict_connection(&item.id);
     }
     Ok(preview)
@@ -248,15 +250,21 @@ mod tests {
         let conns = dir.path().join("connections.json");
         let before = std::fs::read(&conns).unwrap();
 
+        let (_, watch) = st.sessions.register("a");
         let preview = import_from_file(&st, &path, None, true, false).unwrap();
         assert_eq!(preview.updated.len(), 1);
         assert_eq!(preview.added.len(), 1);
         // prod-подключение импортируется как в файле: без принудительного read-only.
         assert!(preview.warnings.is_empty());
         assert_eq!(std::fs::read(&conns).unwrap(), before);
+        assert!(!watch.is_cancelled(), "предпросмотр ничего не меняет");
 
         let applied = import_from_file(&st, &path, None, true, true).unwrap();
         assert_eq!(applied, preview);
+        assert!(
+            watch.is_cancelled(),
+            "сессии обновлённого подключения остановлены"
+        );
         assert_eq!(
             st.connections.get("a").unwrap().api_url,
             "https://api.changed:6443"

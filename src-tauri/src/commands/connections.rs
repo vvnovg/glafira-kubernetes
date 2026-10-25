@@ -162,8 +162,10 @@ pub fn save_connection_blocking(
             tracing::error!("failed to roll back profile {}: {r}", saved.id);
         }
     }
-    // Клиент работает со старыми адресом и учётными данными: следующий вызов подключится заново.
-    // Сбрасывается и после отката: клиент, открытый на промежуточном профиле, не нужен.
+    // Клиент работает со старыми адресом и учётными данными: следующий вызов подключится заново,
+    // а сессии на нём останавливаются. Сбрасывается и после отката: клиент, открытый на
+    // промежуточном профиле, не нужен.
+    st.sessions.stop_for(&saved.id);
     st.evict_connection(&saved.id);
     result.map(|()| saved)
 }
@@ -277,6 +279,7 @@ pub fn set_token_blocking(st: &AppState, id: &str, token: &str) -> AppResult<()>
         return Err(token_not_used());
     }
     st.secrets.set(&secret_key(id, TOKEN), token.trim())?;
+    st.sessions.stop_for(id);
     st.evict_connection(id);
     Ok(())
 }
@@ -504,6 +507,23 @@ mod tests {
             set_token_blocking(&st, "c", "t").unwrap_err().key,
             "errors.connections.tokenNotUsed"
         );
+    }
+
+    /// Сохранение профиля и новый токен сбрасывают клиент — и сессии, которые шли на нём.
+    #[test]
+    fn saving_or_replacing_the_token_stops_the_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = state(dir.path());
+        let saved =
+            save_connection_blocking(&st, input(sample_profile("a"), Some("t"), None)).unwrap();
+        let (_, other) = st.sessions.register("b");
+        let (_, watch) = st.sessions.register("a");
+        save_connection_blocking(&st, input(saved, None, None)).unwrap();
+        assert!(watch.is_cancelled(), "профиль сохранён");
+        let (_, logs) = st.sessions.register("a");
+        set_token_blocking(&st, "a", "sha256~new").unwrap();
+        assert!(logs.is_cancelled(), "токен заменён");
+        assert!(!other.is_cancelled(), "сессии другого подключения идут");
     }
     /// Хранилище, которое не принимает одну запись (`Set` по этому ключу).
     struct RejectsKey {

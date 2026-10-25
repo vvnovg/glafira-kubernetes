@@ -43,6 +43,15 @@ pub fn run() {
             app.manage(st);
             Ok(())
         })
+        // Окно одно, и его каналы сессий живут, пока жива страница. Перезагрузка (Cmd+R, полная
+        // перезагрузка HMR) рвёт их все, а `Channel::send` этого не замечает (`sessions::Sink`).
+        .on_page_load(|webview, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Started
+                && let Some(st) = webview.try_state::<AppState>()
+            {
+                st.sessions.stop_all();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::app::get_app_info,
             commands::connections::list_connections,

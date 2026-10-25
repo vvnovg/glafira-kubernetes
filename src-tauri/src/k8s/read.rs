@@ -18,6 +18,9 @@ use crate::k8s::cluster::timed;
 
 /// Сколько объектов на странице списка.
 pub const PAGE_SIZE: u32 = 500;
+/// Сверх страниц, которых хватило бы на весь список, читается не больше стольких: сервер,
+/// который отдаёт `continue` с пустыми или неполными страницами, не зациклит чтение.
+const EXTRA_PAGES: usize = 5;
 /// Больше стольких объектов один список не читает: остальное — `truncated`.
 pub const MAX_ITEMS: usize = 10_000;
 
@@ -104,14 +107,16 @@ impl ReadClient {
         }
     }
 
-    /// Страницы по `PAGE_SIZE`, пока сервер отдаёт `continue` и не набрано `max` объектов.
+    /// Страницы по `PAGE_SIZE`, пока сервер отдаёт `continue` и не набрано `max` объектов, —
+    /// но не больше, чем нужно на `max` объектов, и `EXTRA_PAGES` сверх того: дальше список
+    /// `truncated`.
     async fn pages<K>(&self, api: &Api<K>, params: &ListParams, max: usize) -> AppResult<Listed<K>>
     where
         K: Resource + Clone + DeserializeOwned + Debug,
     {
         let mut items = Vec::new();
         let mut token: Option<String> = None;
-        loop {
+        for _ in 0..max.div_ceil(PAGE_SIZE as usize) + EXTRA_PAGES {
             let mut page = params.clone().limit(PAGE_SIZE);
             if let Some(t) = &token {
                 page = page.continue_token(t);
@@ -131,6 +136,11 @@ impl ReadClient {
                 });
             }
         }
+        // Страниц прочитано с запасом, а сервер всё ещё отдаёт `continue`.
+        Ok(Listed {
+            items,
+            truncated: true,
+        })
     }
 
     pub async fn get<K>(&self, namespace: &str, name: &str) -> AppResult<K>
@@ -313,6 +323,23 @@ mod tests {
             .await
             .unwrap();
         assert!(!l.truncated, "ровно столько, сколько можно");
+    }
+
+    #[tokio::test]
+    async fn endless_continue_stops_after_spare_pages() {
+        let (client, server) = mock_client(|_| pods(&[], Some("again")));
+        let (r, params) = (reader(client), ListParams::default());
+        let l = tokio::time::timeout(Duration::from_secs(10), r.list::<Pod>(None, &params))
+            .await
+            .expect("чтение списка остановилось")
+            .unwrap();
+        drop(r);
+        assert!(l.items.is_empty());
+        assert!(l.truncated, "прочитано не всё");
+        assert_eq!(
+            server.await.unwrap().len(),
+            MAX_ITEMS / PAGE_SIZE as usize + EXTRA_PAGES
+        );
     }
 
     #[tokio::test]

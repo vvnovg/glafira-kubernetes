@@ -84,19 +84,20 @@ impl AppState {
     }
 
     /// Чтение кластера для команды: клиент из пула (или новое подключение) и `f` с ним. Ошибка
-    /// учётных данных или TLS от `f` сбрасывает клиент (`evict_if_broken`): следующее чтение
-    /// подключится заново. Ошибка самого подключения клиент не сбрасывает: неудачная попытка в
-    /// пул не попадает, а сброс сменил бы поколение, и ожидавшие очереди не получили бы её итог —
-    /// каждое чтение снова запустило бы exec-плагин или вход.
+    /// учётных данных или TLS от `f` сбрасывает этот клиент (`evict_if_broken_client`), если
+    /// он всё ещё в пуле: следующее чтение подключится заново. Ошибка самого подключения клиент
+    /// не сбрасывает: неудачная попытка в пул не попадает, а сброс сменил бы поколение, и
+    /// ожидавшие очереди не получили бы её итог — каждое чтение снова запустило бы exec-плагин
+    /// или вход.
     pub async fn read<T, F, Fut>(&self, id: &str, f: F) -> AppResult<T>
     where
         F: FnOnce(Arc<Connected>) -> Fut,
         Fut: Future<Output = AppResult<T>>,
     {
         let c = self.connected(id, false).await?;
-        let result = f(c).await;
+        let result = f(c.clone()).await;
         if let Err(e) = &result {
-            self.evict_if_broken(id, e);
+            self.evict_if_broken_client(id, &c, e);
         }
         result
     }
@@ -130,6 +131,22 @@ impl AppState {
         self.evict_connection(id);
         Ok(())
     }
+
+    /// Сбрасывает клиент `used` после ошибки запроса им, если с этими учётными данными или TLS
+    /// он работать не будет, — и только пока в пуле он сам (`ClientPool::evict_if_same`): ответ
+    /// на запрос, ушедший прежним клиентом, не выбивает клиент, к которому уже подключились
+    /// заново. `true` — клиент сброшен.
+    pub fn evict_if_broken_client(&self, id: &str, used: &Arc<Connected>, e: &AppError) -> bool {
+        breaks_client(e) && self.pool.evict_if_same(id, used)
+    }
+}
+
+/// С этими учётными данными или TLS клиент работать не будет (как в `evict_if_broken`).
+fn breaks_client(e: &AppError) -> bool {
+    matches!(
+        e.code,
+        ErrorCode::SessionExpired | ErrorCode::AuthFailed | ErrorCode::TlsError
+    )
 }
 
 #[cfg(test)]
@@ -339,21 +356,27 @@ mod tests {
         }
     }
 
+    /// Клиент для пула: мок API-сервера OpenShift; сведения о подключении — из `probe`, без
+    /// литерала структуры. Каждый вызов — новый клиент.
+    async fn pooled_client() -> Arc<Connected> {
+        let (client, _) =
+            crate::k8s::testing::mock_client(crate::k8s::cluster::fixtures::openshift);
+        let timeout = std::time::Duration::from_secs(1);
+        let info = crate::k8s::cluster::probe(&client, timeout).await.unwrap();
+        Arc::new(Connected {
+            client,
+            info,
+            timeout,
+            expires_at: None,
+        })
+    }
+
     /// Ошибка учётных данных или TLS от клиента из пула сбрасывает его, другие ошибки — нет.
     #[tokio::test]
     async fn credential_error_of_the_pooled_client_evicts_it() {
         let dir = tempfile::tempdir().unwrap();
         let st = state(dir.path());
-        let (client, _) =
-            crate::k8s::testing::mock_client(crate::k8s::cluster::fixtures::openshift);
-        let timeout = std::time::Duration::from_secs(1);
-        let info = crate::k8s::cluster::probe(&client, timeout).await.unwrap();
-        let pooled = Arc::new(Connected {
-            client,
-            info,
-            timeout,
-            expires_at: None,
-        });
+        let pooled = pooled_client().await;
         for (code, evicts) in [
             (ErrorCode::Forbidden, false),
             (ErrorCode::Timeout, false),
@@ -376,6 +399,32 @@ mod tests {
             assert_eq!(e.code, code);
             assert_eq!(st.pool.get("a").is_none(), evicts, "{code:?}");
         }
+    }
+
+    /// Ошибка запроса прежним клиентом не выбивает новый: пока запрос шёл, клиент сбросили и
+    /// подключились заново.
+    #[tokio::test]
+    async fn stale_error_of_a_replaced_client_keeps_the_new_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = state(dir.path());
+        let (old, new) = (pooled_client().await, pooled_client().await);
+        assert!(st.pool.insert_if_current("a", st.pool.generation("a"), old));
+        let pool = st.pool.clone();
+        let replacement = new.clone();
+        let e = st
+            .read("a", move |_| async move {
+                pool.evict("a");
+                assert!(pool.insert_if_current("a", pool.generation("a"), replacement));
+                Err::<(), _>(AppError::localized(
+                    ErrorCode::SessionExpired,
+                    LocalizedText::raw("x"),
+                ))
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::SessionExpired);
+        let kept = st.pool.get("a").expect("новый клиент остался в пуле");
+        assert!(Arc::ptr_eq(&kept, &new));
     }
 
     #[tokio::test]
@@ -410,6 +459,11 @@ mod tests {
         ] {
             let before = st.pool.generation("a");
             let e = AppError::localized(code, LocalizedText::raw("x"));
+            assert_eq!(
+                breaks_client(&e),
+                evicts,
+                "{code:?}: тот же список, что у чтения"
+            );
             assert_eq!(st.evict_if_broken("a", &e), evicts, "{code:?}");
             assert_eq!(st.pool.generation("a") > before, evicts, "{code:?}");
         }
