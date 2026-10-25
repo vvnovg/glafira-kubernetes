@@ -84,7 +84,8 @@ fn token(p: &ConnectionProfile, secrets: &dyn SecretStore) -> AppResult<String> 
 }
 
 /// `kube::Config` профиля. Таймаут ответа не задаётся: он оборвал бы долгие потоки (логи, watch);
-/// таймаут запроса ставит вызывающий код (`request_timeout`).
+/// таймаут запроса ставит вызывающий код (`request_timeout`). У exec-плагина учётных данных здесь
+/// нет: их выдаёт запуск плагина (задача следующего шага), конфигурация — без них.
 pub fn build_kube_config(
     p: &ConnectionProfile,
     secrets: &dyn SecretStore,
@@ -138,6 +139,7 @@ pub fn build_kube_config(
         })
         .transpose()?;
     c.auth_info = match &p.auth {
+        AuthConfig::Exec(_) => AuthInfo::default(),
         AuthConfig::Token | AuthConfig::Browser => AuthInfo {
             token: Some(SecretString::from(token(p, secrets)?)),
             ..Default::default()

@@ -68,6 +68,19 @@ fn needs_secret(secrets: &dyn SecretStore, p: &ConnectionProfile) -> AppResult<N
     })
 }
 
+/// Exec-плагин в файле обмена: строка запуска переносится, но её подтверждение — нет
+/// (получатель подтверждает её заново), значения переменных, похожих на секреты, не пишутся.
+fn strip_exec_for_export(p: &mut ConnectionProfile) {
+    if let AuthConfig::Exec(e) = &mut p.auth {
+        e.approved = None;
+        for v in &mut e.env {
+            if crate::auth::exec::is_secret_name(&v.name) {
+                v.value.clear();
+            }
+        }
+    }
+}
+
 /// Собирает файл экспорта: всё дерево или поддерево `root` (сама папка становится корнем).
 /// Секреты keychain не попадают в файл; неизвестные локальные поля (`extra`) не выносятся.
 pub fn build_export(
@@ -123,6 +136,7 @@ pub fn build_export(
         .filter(|p| in_scope(p.folder_id.as_deref()))
         .map(|mut profile| {
             profile.extra.clear();
+            strip_exec_for_export(&mut profile);
             let needs_secret = needs_secret(secrets, &profile)?;
             Ok(ExportedConnection {
                 profile,
@@ -258,8 +272,12 @@ pub fn parse_exchange(bytes: &[u8]) -> AppResult<ParsedExchange> {
                 continue;
             }
         };
-        // Неизвестные поля файла не переносятся в хранилище.
+        // Неизвестные поля файла не переносятся в хранилище; строку запуска exec-плагина
+        // из чужого файла человек подтверждает заново (спец. §5.2).
         c.profile.extra.clear();
+        if let AuthConfig::Exec(e) = &mut c.profile.auth {
+            e.approved = None;
+        }
         if let Err(e) = validate_profile(&c.profile) {
             skipped.push(Skipped {
                 name,
@@ -292,6 +310,8 @@ pub struct ImportOptions<'a> {
     pub update_existing: bool,
     /// `false` — политика запрещает подключения без проверки сертификата (спец. §12).
     pub allow_insecure_tls: bool,
+    /// `false` — политика запрещает exec-плагины (спец. §5.2).
+    pub allow_exec_auth: bool,
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -456,6 +476,16 @@ pub(crate) fn plan_import(
                 reason: ltext!(
                     "errors.import.insecureForbidden",
                     "Connections without TLS certificate verification are forbidden by your organization"
+                ),
+            });
+            continue;
+        }
+        if !opts.allow_exec_auth && matches!(incoming.auth, AuthConfig::Exec(_)) {
+            preview.skipped.push(Skipped {
+                name: incoming.name.clone(),
+                reason: ltext!(
+                    "errors.import.execForbidden",
+                    "Connections with exec plugins are forbidden by your organization"
                 ),
             });
             continue;
@@ -755,6 +785,7 @@ mod tests {
             target,
             update_existing: true,
             allow_insecure_tls: true,
+            allow_exec_auth: true,
         }
     }
 
@@ -958,6 +989,58 @@ mod tests {
         assert_eq!(parsed.skipped.len(), 1);
         assert_eq!(parsed.skipped[0].name, "Second");
         assert_eq!(parsed.skipped[0].reason.key, "errors.import.duplicateId");
+    }
+
+    #[test]
+    fn exec_launch_line_is_exported_without_approval_and_secret_values() {
+        let (_d, s) = store();
+        let mut p = sample_profile("e");
+        let mut exec = crate::storage::profile::sample_exec();
+        exec.env.push(crate::storage::profile::ExecEnv {
+            name: "AWS_SECRET_ACCESS_KEY".into(),
+            value: "s3cr3t".into(),
+        });
+        exec.approved = Some(crate::auth::exec::fingerprint(&exec));
+        p.auth = AuthConfig::Exec(exec);
+        s.upsert(p).unwrap();
+        let out = build_export(&s, &MemoryStore::default(), None, "1", "now").unwrap();
+        let v = serde_json::to_value(&out).unwrap();
+        let auth = &v["connections"][0]["auth"];
+        assert_eq!(auth["method"], "exec");
+        assert_eq!(auth["args"][1], "get-token");
+        assert_eq!(auth["approved"], serde_json::Value::Null);
+        assert_eq!(auth["env"][0]["value"], "http://proxy:3128");
+        assert_eq!(auth["env"][1]["value"], "", "секрет не пишется");
+        assert!(!serde_json::to_string(&v).unwrap().contains("s3cr3t"));
+    }
+
+    #[test]
+    fn exec_import_needs_new_confirmation_and_respects_policy() {
+        let mut exec = crate::storage::profile::sample_exec();
+        exec.approved = Some(crate::auth::exec::fingerprint(&exec));
+        let mut e = conn_json("e", "Exec", None);
+        e["auth"] = serde_json::to_value(AuthConfig::Exec(exec)).unwrap();
+        let bytes = file(vec![], vec![e, conn_json("ok", "OK", None)]);
+        let parsed = parse_exchange(&bytes).unwrap();
+        let AuthConfig::Exec(imported) = &parsed.connections[0].0.auth else {
+            panic!("exec")
+        };
+        assert_eq!(
+            imported.approved, None,
+            "подтверждение из файла не принимается"
+        );
+        let p = plan_import(&StoreData::default(), &parsed, &opts(None)).unwrap();
+        assert_eq!(preview_ids(&p.preview.added), ["e", "ok"]);
+        let forbid = ImportOptions {
+            allow_exec_auth: false,
+            ..opts(None)
+        };
+        let p = plan_import(&StoreData::default(), &parsed, &forbid).unwrap();
+        assert_eq!(preview_ids(&p.preview.added), ["ok"]);
+        assert_eq!(
+            p.preview.skipped[0].reason.key,
+            "errors.import.execForbidden"
+        );
     }
 
     #[test]

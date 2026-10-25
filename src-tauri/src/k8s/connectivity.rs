@@ -13,7 +13,7 @@ use crate::k8s::config::{build_kube_config, process_env, request_timeout};
 use crate::k8s::errors::from_kube;
 use crate::policy::PolicyStatus;
 use crate::secrets::SecretStore;
-use crate::storage::profile::{CaConfig, ConnectionProfile};
+use crate::storage::profile::{AuthConfig, CaConfig, ConnectionProfile};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,6 +57,13 @@ pub fn ensure_allowed(p: &ConnectionProfile, policy: &PolicyStatus) -> AppResult
             ErrorCode::InvalidInput,
             "errors.connections.insecureForbidden",
             "Connections without TLS certificate verification are forbidden by your organization"
+        ));
+    }
+    if matches!(p.auth, AuthConfig::Exec(_)) && !policy.allow_exec_auth {
+        return Err(app_err!(
+            ErrorCode::InvalidInput,
+            "errors.connections.execForbidden",
+            "Connections with exec plugins are forbidden by your organization"
         ));
     }
     Ok(())
@@ -605,6 +612,23 @@ mod tests {
         assert_eq!(tcp_target(&c), ("proxy".into(), 3128, true));
         let c = kube::Config::new("https://api.c".parse().unwrap());
         assert_eq!(tcp_target(&c).1, 443);
+    }
+
+    #[test]
+    fn policy_forbids_insecure_tls_and_exec_plugins() {
+        let open = PolicyStatus::default();
+        let mut p = sample_profile("a");
+        p.auth = AuthConfig::Exec(crate::storage::profile::sample_exec());
+        assert!(ensure_allowed(&p, &open).is_ok());
+        let strict = PolicyStatus {
+            allow_exec_auth: false,
+            ..PolicyStatus::default()
+        };
+        assert_eq!(
+            ensure_allowed(&p, &strict).unwrap_err().key,
+            "errors.connections.execForbidden"
+        );
+        assert!(ensure_allowed(&sample_profile("b"), &strict).is_ok());
     }
 
     #[tokio::test]

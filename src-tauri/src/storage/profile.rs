@@ -26,6 +26,48 @@ pub enum AuthConfig {
     /// Клиентский сертификат: сертификат (PEM) — в профиле, ключ — в keychain.
     #[serde(rename_all = "camelCase")]
     ClientCert { certificate_pem: String },
+    /// Exec-плагин kubeconfig из списка разрешённых (спец. §5.2); учётные данные выдаёт плагин,
+    /// в keychain ничего не хранится.
+    Exec(ExecAuth),
+}
+
+/// Exec-плагин: что и как запускать. Секретов здесь нет (как и в kubeconfig, откуда он обычно
+/// приходит); значения переменных с именами, похожими на секреты, интерфейс скрывает,
+/// а экспорт не пишет.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecAuth {
+    /// Абсолютный путь к команде: имя из kubeconfig разрешается при импорте или кнопкой «Найти»
+    /// в форме — у приложения из Dock нет PATH оболочки.
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: Vec<ExecEnv>,
+    /// `client.authentication.k8s.io/v1` или `v1beta1`.
+    #[serde(default = "default_exec_api_version")]
+    pub api_version: String,
+    /// Передать плагину адрес и CA кластера (`provideClusterInfo` в kubeconfig).
+    #[serde(default)]
+    pub provide_cluster_info: bool,
+    /// Отпечаток строки запуска, которую подтвердил человек (`auth::exec::fingerprint`);
+    /// изменённая строка требует нового подтверждения. Ставят только сохранение из формы
+    /// и импорт kubeconfig по явному согласию; импорт файла обмена его сбрасывает.
+    #[serde(default)]
+    pub approved: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecEnv {
+    pub name: String,
+    pub value: String,
+}
+
+pub const EXEC_API_V1: &str = "client.authentication.k8s.io/v1";
+pub const EXEC_API_V1BETA1: &str = "client.authentication.k8s.io/v1beta1";
+
+fn default_exec_api_version() -> String {
+    EXEC_API_V1.to_string()
 }
 
 impl AuthConfig {
@@ -300,6 +342,9 @@ pub fn validate_profile(p: &ConnectionProfile) -> AppResult<()> {
             "The CA certificate must be in PEM format (-----BEGIN CERTIFICATE-----)"
         )));
     }
+    if let AuthConfig::Exec(e) = &p.auth {
+        validate_exec(e)?;
+    }
     if let ProxyConfig::Url { url } = &p.proxy {
         let ok = url::Url::parse(url.trim())
             .is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.host_str().is_some());
@@ -336,6 +381,69 @@ pub fn validate_profile(p: &ConnectionProfile) -> AppResult<()> {
         )));
     }
     Ok(())
+}
+
+/// Exec-плагин: абсолютный путь, команда из списка разрешённых, известная версия API,
+/// корректные имена переменных окружения.
+fn validate_exec(e: &ExecAuth) -> AppResult<()> {
+    if e.command.trim().is_empty() {
+        return Err(invalid(ltext!(
+            "errors.exec.commandMissing",
+            "Specify the exec plugin command"
+        )));
+    }
+    if !std::path::Path::new(&e.command).is_absolute() {
+        return Err(invalid(ltext!(
+            "errors.exec.commandNotAbsolute",
+            "Specify the full path to “{{command}}” — use “Find”",
+            command = e.command
+        )));
+    }
+    crate::auth::exec::check_allowed(&e.command, &e.args).map_err(invalid)?;
+    if e.api_version != EXEC_API_V1 && e.api_version != EXEC_API_V1BETA1 {
+        return Err(invalid(ltext!(
+            "errors.exec.badApiVersion",
+            "Unsupported exec plugin API version “{{version}}”: use {{expected}}",
+            version = e.api_version,
+            expected = EXEC_API_V1
+        )));
+    }
+    if let Some(v) = e
+        .env
+        .iter()
+        .find(|v| v.name.trim().is_empty() || v.name.contains('=') || v.name.contains('\0'))
+    {
+        return Err(invalid(ltext!(
+            "errors.exec.badEnvName",
+            "Invalid environment variable name “{{name}}”",
+            name = v.name
+        )));
+    }
+    Ok(())
+}
+
+/// Exec-плагин для тестов: `kubectl oidc-login get-token` по абсолютному пути.
+#[cfg(test)]
+pub fn sample_exec() -> ExecAuth {
+    ExecAuth {
+        command: if cfg!(windows) {
+            r"C:\tools\kubectl.exe".into()
+        } else {
+            "/usr/local/bin/kubectl".into()
+        },
+        args: vec![
+            "oidc-login".into(),
+            "get-token".into(),
+            "--oidc-issuer-url=https://sso.corp/realms/k8s".into(),
+        ],
+        env: vec![ExecEnv {
+            name: "HTTPS_PROXY".into(),
+            value: "http://proxy:3128".into(),
+        }],
+        api_version: EXEC_API_V1.into(),
+        provide_cluster_info: false,
+        approved: None,
+    }
 }
 
 #[cfg(test)]
@@ -395,6 +503,87 @@ mod tests {
         assert_eq!(v["connectTimeoutMs"], 10_000);
         let back: ConnectionProfile = serde_json::from_value(v).unwrap();
         assert_eq!(back, p);
+    }
+
+    #[test]
+    fn exec_json_shape() {
+        let mut p = sample_profile("x");
+        p.auth = AuthConfig::Exec(sample_exec());
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["auth"]["method"], "exec");
+        assert_eq!(v["auth"]["args"][0], "oidc-login");
+        assert_eq!(
+            v["auth"]["env"][0],
+            serde_json::json!({"name": "HTTPS_PROXY", "value": "http://proxy:3128"})
+        );
+        assert_eq!(v["auth"]["apiVersion"], EXEC_API_V1);
+        assert_eq!(v["auth"]["approved"], serde_json::Value::Null);
+        assert!(!p.auth.uses_token());
+        let back: ConnectionProfile = serde_json::from_value(v).unwrap();
+        assert_eq!(back, p);
+        // Минимальный exec из более старого файла: версия API по умолчанию.
+        let a: AuthConfig =
+            serde_json::from_value(serde_json::json!({"method": "exec", "command": "/bin/oc"}))
+                .unwrap();
+        let AuthConfig::Exec(e) = a else {
+            panic!("exec")
+        };
+        assert_eq!((e.api_version.as_str(), e.args.len()), (EXEC_API_V1, 0));
+    }
+
+    type ExecChange = Box<dyn Fn(&mut ExecAuth)>;
+
+    #[test]
+    fn exec_validation() {
+        let ok = |e: ExecAuth| {
+            let mut p = sample_profile("a");
+            p.auth = AuthConfig::Exec(e);
+            validate_profile(&p)
+        };
+        assert!(ok(sample_exec()).is_ok());
+        let cases: Vec<(&str, ExecChange)> = vec![
+            (
+                "errors.exec.commandMissing",
+                Box::new(|e| e.command = " ".into()),
+            ),
+            (
+                "errors.exec.commandNotAbsolute",
+                Box::new(|e| e.command = "kubectl".into()),
+            ),
+            (
+                "errors.exec.argsNotAllowed",
+                Box::new(|e| e.args = vec!["get".into(), "pods".into()]),
+            ),
+            (
+                "errors.exec.notAllowed",
+                Box::new(|e| {
+                    e.command = if cfg!(windows) {
+                        r"C:\Windows\cmd.exe".into()
+                    } else {
+                        "/bin/sh".into()
+                    }
+                }),
+            ),
+            (
+                "errors.exec.badApiVersion",
+                Box::new(|e| e.api_version = "client.authentication.k8s.io/v1alpha1".into()),
+            ),
+            (
+                "errors.exec.badEnvName",
+                Box::new(|e| {
+                    e.env = vec![ExecEnv {
+                        name: "A=B".into(),
+                        value: "x".into(),
+                    }]
+                }),
+            ),
+        ];
+        for (key, change) in cases {
+            let mut e = sample_exec();
+            change(&mut e);
+            let err = ok(e).unwrap_err();
+            assert_eq!((err.code, err.key.as_str()), (ErrorCode::InvalidInput, key));
+        }
     }
 
     #[test]

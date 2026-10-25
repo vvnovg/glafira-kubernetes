@@ -150,6 +150,7 @@ fn import_from_file(
         target,
         update_existing,
         allow_insecure_tls: st.policy.status.allow_insecure_tls,
+        allow_exec_auth: st.policy.status.allow_exec_auth,
     };
     if !apply {
         return Ok(plan_import(&st.connections.snapshot(), &parsed, &opts)?.preview);
