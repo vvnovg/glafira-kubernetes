@@ -124,3 +124,6 @@
 | `src/components/Sidebar.tsx` | `src/components/Sidebar.tsx` | `8bbd0bd` | адаптирован: без индикатора MCP |
 | `src/components/Sidebar.test.tsx` | `src/components/Sidebar.test.tsx` | `8bbd0bd` | адаптирован: пункты подключения O1 |
 | `src/components/TabContent.tsx` | `src/components/TabContent.tsx` | `8bbd0bd` | адаптирован: вкладки O1 |
+| `deny.toml` | `deny.toml` | `8bbd0bd` | адаптирован: без C-библиотек librdkafka и OpenSSL |
+| `.github/FUNDING.yml` | `.github/FUNDING.yml` | `8bbd0bd` | адаптирован: адрес поддержки |
+| `.github/workflows/ci.yml` | `.github/workflows/ci.yml` | `8bbd0bd` | адаптирован: без Kafka и MCP-крейта, стенд kind |

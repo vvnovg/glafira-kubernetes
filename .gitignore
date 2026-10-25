@@ -26,3 +26,6 @@ dist-ssr
 
 # Экспорты подключений (без паролей, но с адресами реальных кластеров)
 *.glafira-kubernetes-connections.json
+
+# Стенд kind: kubeconfig с ключом администратора и токеном
+dev/kind/out/
