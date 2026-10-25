@@ -1,6 +1,7 @@
 //! YAML объекта только для чтения (спец. §6.4–6.5): объект из API без `metadata.managedFields`,
 //! записанный в YAML. Свой вывод JSON → YAML вместо крейта: нужно только записывать, а
-//! `serde_yaml` больше не поддерживается. Secret сюда не попадает — его вида нет в `YamlKind`.
+//! `serde_yaml` больше не поддерживается. Secret сюда не попадает — его вида нет в `YamlKind`;
+//! ключ `spec.tls.key` Route и аннотации с копией объекта вырезаются до вывода (`redact`).
 
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::batch::v1::{CronJob, Job};
@@ -57,7 +58,37 @@ impl YamlKind {
     }
 }
 
-/// YAML объекта без `managedFields`.
+/// Аннотации с копией всего объекта. Они повторяют YAML и унесли бы мимо `redact` то, что из него
+/// вырезано (`spec.tls.key` Route, созданного `oc apply`): `kubectl apply` и `oc apply` (и всё, что
+/// ими применяет, например Argo CD), kapp (Carvel), apply из wrangler (Rancher, Fleet, k3s; копия
+/// сжата), ReplicationController'ы DeploymentConfig.
+const OBJECT_COPIES: &[&str] = &[
+    "kubectl.kubernetes.io/last-applied-configuration",
+    "kapp.k14s.io/original",
+    "objectset.rio.cattle.io/applied",
+    "openshift.io/encoded-deployment-config",
+];
+
+/// Объект для показа: без `managedFields` и аннотаций-копий, у Route — без закрытого ключа
+/// `spec.tls.key` (спец. §10.2: «никогда, на любом уровне»). Через неё проходит каждый YAML.
+fn redact(kind: YamlKind, v: &mut serde_json::Value) {
+    if let Some(meta) = v.get_mut("metadata").and_then(|m| m.as_object_mut()) {
+        meta.remove("managedFields");
+        if let Some(a) = meta.get_mut("annotations").and_then(|a| a.as_object_mut()) {
+            a.retain(|k, _| !OBJECT_COPIES.contains(&k.as_str()));
+            if a.is_empty() {
+                meta.remove("annotations");
+            }
+        }
+    }
+    if kind == YamlKind::Route
+        && let Some(tls) = v.pointer_mut("/spec/tls").and_then(|t| t.as_object_mut())
+    {
+        tls.remove("key");
+    }
+}
+
+/// YAML объекта без `managedFields`, аннотаций-копий и ключа TLS Route.
 pub async fn object_yaml(
     r: &ReadClient,
     namespace: &str,
@@ -68,58 +99,82 @@ pub async fn object_yaml(
         .get_dynamic(&kind.resource(), Some(namespace), object)
         .await?;
     let mut v = serde_json::to_value(&o)?;
-    if let Some(meta) = v.get_mut("metadata").and_then(|m| m.as_object_mut()) {
-        meta.remove("managedFields");
-    }
+    redact(kind, &mut v);
     Ok(to_yaml(&v))
 }
 
-/// Строку можно записать без кавычек: она не похожа на число, `true`, `null` и не содержит
-/// символов, которые YAML понял бы иначе.
+/// Знак можно записать как есть: печатаемый по YAML 1.2 (`c-printable`), кроме таба и переводов
+/// строки, и не перевод строки YAML 1.1 (U+0085, U+2028, U+2029); BOM — только в начале потока.
+fn safe(c: char) -> bool {
+    matches!(c, ' '..='~' | '\u{A0}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..)
+        && !matches!(c, '\u{2028}' | '\u{2029}' | '\u{FEFF}')
+}
+
+/// Строку можно записать без кавычек: это простой скаляр YAML 1.2 в блоке, и ни YAML 1.2, ни
+/// YAML 1.1 (его до сих пор читают PyYAML, SnakeYAML, go-yaml v2) не поймут её как другой тип.
 fn plain(s: &str) -> bool {
+    // Булевы и null YAML 1.1 и 1.2, ключ слияния `<<` и `=` (тип value YAML 1.1, PyYAML на нём
+    // падает).
     const RESERVED: &[&str] = &[
-        "true", "false", "yes", "no", "on", "off", "y", "n", "null", "~",
+        "true", "false", "yes", "no", "on", "off", "y", "n", "null", "~", "<<", "=",
     ];
     let Some(first) = s.chars().next() else {
         return false;
     };
-    let number_like = s
-        .trim_start_matches(['+', '-'])
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_digit() || c == '.');
-    // `-`, `?` и `:` — знаки YAML, только если за ними пробел (`--port` — обычная строка).
+    // Числа YAML 1.2 и 1.1 (`0x1f`, `0o17`, `017`, `1e3`, `1_000`, `1:30`, `.inf`) и даты YAML 1.1
+    // начинаются с цифры или точки после знака; go-yaml v2 перед разбором убирает `_` (`-_1` —
+    // число), а `inf` и `nan` без точки — числа для `strconv.ParseFloat` Go.
+    let unsigned = s.trim_start_matches(['+', '-', '_']);
+    let number_like = unsigned.starts_with(|c: char| c.is_ascii_digit() || c == '.')
+        || ["inf", "infinity", "nan"].contains(&unsigned.to_ascii_lowercase().as_str());
+    // `-` — знак YAML, только если за ним пробел (`--port` — обычная строка); `?` и `:` в начале
+    // в кавычках всегда (`:x` — символ Ruby).
     let indicator = match first {
-        '-' | '?' | ':' => s.chars().nth(1).is_none_or(|c| c == ' '),
-        c => ",[]{}#&*!|>'\"%@`".contains(c),
+        '-' => s[1..].chars().next().is_none_or(|c| c == ' '),
+        c => "?:,[]{}#&*!|>'\"%@`".contains(c),
     };
     !RESERVED.contains(&s.to_lowercase().as_str())
         && !number_like
         && !indicator
+        // Начало и конец документа: в начале строки `---` и `...` — разметка, а не текст.
+        && !s.starts_with("---")
+        && !s.starts_with("...")
         && !s.starts_with(' ')
         && !s.ends_with(' ')
         && !s.ends_with(':')
         && !s.contains(": ")
         && !s.contains(" #")
-        && !s.chars().any(|c| c.is_control())
+        && s.chars().all(safe)
+}
+
+/// Строка в двойных кавычках: экранированы `"`, `\` и всё, что YAML не разрешает записать как есть.
+fn quoted(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if safe(c) => out.push(c),
+            // Всё остальное, что не `safe`, — не выше U+FFFF.
+            c => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn scalar(s: &str) -> String {
-    if plain(s) {
-        s.to_string()
-    } else {
-        // Строка JSON — допустимая строка YAML в двойных кавычках.
-        serde_json::to_string(s).unwrap_or_default()
-    }
+    if plain(s) { s.to_string() } else { quoted(s) }
 }
 
 /// Многострочный текст — блоком `|`: `|-` без перевода строки в конце, `|+`, если их несколько.
 fn block(s: &str, indent: usize, out: &mut String) -> bool {
     // Первая строка задаёт отступ блока: она не может быть пустой или начинаться с пробела.
-    if !s.contains('\n')
-        || s.starts_with(['\n', ' ', '\t'])
-        || s.chars().any(|c| c.is_control() && c != '\n')
-    {
+    if !s.contains('\n') || s.starts_with(['\n', ' ']) || !s.chars().all(|c| safe(c) || c == '\n') {
         return false;
     }
     let body = s.trim_end_matches('\n');
@@ -219,8 +274,11 @@ pub fn to_yaml(v: &serde_json::Value) -> String {
         serde_json::Value::Object(m) if !m.is_empty() => value(v, 0, &mut out),
         serde_json::Value::Array(a) if !a.is_empty() => value(v, 0, &mut out),
         _ => {
-            inline(v, 0, &mut out);
-            return out.trim_start().to_string();
+            // Блок `|` в корне — с отступом: PyYAML и libyaml не читают его текст с нулевой
+            // колонки, а `---` там был бы началом документа.
+            inline(v, 2, &mut out);
+            // `inline` начинает с пробела, как после `ключ:`; `trim_start` срезал бы и U+00A0.
+            return out.strip_prefix(' ').unwrap_or(&out).to_string();
         }
     }
     out.trim_start_matches('\n').to_string()
@@ -276,6 +334,201 @@ mod tests {
             "a: |\n  line 1\n  line 2\nb: |-\n  x\n\n  y\nc: |+\n  keep\n\n"
         );
         assert_eq!(to_yaml(&serde_json::json!("x")), "x\n");
+    }
+
+    /// Простые скаляры по правилам YAML 1.2 и то, что YAML 1.1 прочитал бы не строкой; ключи — так же.
+    #[test]
+    fn plain_scalars_by_the_rules_of_yaml() {
+        // Знаки YAML в начале, `: ` и ` #`, разметка документа.
+        let indicators = [
+            "-", "- x", "?", "? x", "?x", ":", ":x", ",x", "[x", "]x", "{x", "}x", "#x", "&a",
+            "*a", "!tag", "|x", ">x", "'x", "\"x", "%x", "@x", "`x", "a: b", "a:", "x #y", "---",
+            "--- x", "...", "...x",
+        ];
+        // Булевы и null YAML 1.1, ключ слияния `<<` и `=`.
+        let yaml11 = [
+            "yes", "No", "ON", "off", "y", "N", "True", "~", "null", "NULL", "<<", "=",
+        ];
+        // Числа YAML 1.2 и 1.1, даты YAML 1.1.
+        let numbers = [
+            "0x1F",
+            "0o17",
+            "017",
+            "1e3",
+            "-2E-3",
+            "1_000",
+            "-_1",
+            "1:30",
+            "190:20:30.15",
+            ".inf",
+            "-.inf",
+            "+.INF",
+            ".nan",
+            "+1",
+            "-1.5",
+            "inf",
+            "-Infinity",
+            "NaN",
+            "2026-10-26",
+            "2026-10-26T10:00:00Z",
+        ];
+        // Пробелы по краям и пустая строка (U+00A0 для YAML — не пробел).
+        let spaces = ["", " ", " lead", "trail ", "  both  "];
+        assert_eq!(to_yaml(&serde_json::json!("\u{a0}a")), "\u{a0}a\n");
+        for s in indicators
+            .iter()
+            .chain(&yaml11)
+            .chain(&numbers)
+            .chain(&spaces)
+        {
+            let want = format!("\"{}\"", s.replace('"', "\\\""));
+            assert_eq!(scalar(s), want, "{s:?}");
+            assert_eq!(
+                to_yaml(&serde_json::json!({ *s: 1 })),
+                format!("{want}: 1\n"),
+                "ключ {s:?}"
+            );
+        }
+        for s in [
+            "--port",
+            "-x",
+            "a:b",
+            "a#b",
+            "http://x/y?z=1#f",
+            "<<x",
+            "a=b",
+            "yesterday",
+            "~x",
+            "_x",
+            "infra",
+            "registry/app:1.2",
+            "say \"hi\"",
+            "C:\\dir",
+            "x.y",
+            "Привет",
+        ] {
+            assert_eq!(scalar(s), s, "{s:?}");
+            assert_eq!(
+                to_yaml(&serde_json::json!({ s: 1 })),
+                format!("{s}: 1\n"),
+                "ключ {s:?}"
+            );
+        }
+    }
+
+    /// В кавычках экранировано всё, что YAML не разрешает записать как есть (иначе PyYAML падает
+    /// на U+007F, а YAML 1.1 считает U+0085, U+2028 и U+2029 переводом строки).
+    #[test]
+    fn quoted_strings_escape_what_yaml_cannot_hold() {
+        for (s, yaml) in [
+            ("\u{0}", "\"\\u0000\""),
+            ("\u{1b}[0m", "\"\\u001b[0m\""),
+            ("cr\rlf", "\"cr\\rlf\""),
+            ("\u{7f}", "\"\\u007f\""),
+            ("a\u{85}b", "\"a\\u0085b\""),
+            ("a\u{2028}b", "\"a\\u2028b\""),
+            ("\u{feff}x", "\"\\ufeffx\""),
+            ("\u{ffff}", "\"\\uffff\""),
+            ("\"q\" \\", "\"\\\"q\\\" \\\\\""),
+            ("- é", "\"- é\""),
+        ] {
+            assert_eq!(scalar(s), yaml, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn multi_line_strings_as_blocks() {
+        let v = serde_json::json!({
+            "blank": "a\n  \n",
+            "indented": "a\n  b\n",
+            "lead": " a\nb",
+            "markers": "---\n...\n# text\n",
+            "separator": "a\u{2028}\nb",
+            "tab": "a\n\tb",
+        });
+        assert_eq!(
+            to_yaml(&v),
+            "blank: |\n  a\n    \nindented: |\n  a\n    b\nlead: \" a\\nb\"\nmarkers: |\n  ---\n  ...\n  # text\nseparator: \"a\\u2028\\nb\"\ntab: \"a\\n\\tb\"\n"
+        );
+        // Блок в корне — с отступом, иначе `---` в нём начал бы документ.
+        assert_eq!(to_yaml(&serde_json::json!("---\nx\n")), "|\n  ---\n  x\n");
+        assert_eq!(
+            to_yaml(&serde_json::json!([{"k": "a\nb"}, "c\nd"])),
+            "- k: |-\n    a\n    b\n- |-\n  c\n  d\n"
+        );
+    }
+
+    /// Закрытый ключ Route не уходит ни полем `spec.tls.key`, ни копией объекта в
+    /// `last-applied-configuration` (Route, созданный `oc apply`).
+    #[tokio::test]
+    async fn route_yaml_without_tls_key_and_applied_copy() {
+        const KEY: &str =
+            "-----BEGIN PRIVATE KEY-----\nMIIEvQk3yS3cr3t\n-----END PRIVATE KEY-----\n";
+        let spec = serde_json::json!({"host": "web.apps.example.com",
+            "to": {"kind": "Service", "name": "web"},
+            "tls": {"termination": "edge", "key": KEY,
+                "certificate": "-----BEGIN CERTIFICATE-----\nMIIBcert\n-----END CERTIFICATE-----\n"}});
+        let applied = serde_json::json!({"apiVersion": "route.openshift.io/v1", "kind": "Route",
+            "metadata": {"name": "web", "namespace": "team-a"}, "spec": spec});
+        let route = serde_json::json!({"apiVersion": "route.openshift.io/v1", "kind": "Route",
+            "metadata": {"name": "web", "namespace": "team-a", "annotations": {
+                "kubectl.kubernetes.io/last-applied-configuration": applied.to_string()}},
+            "spec": spec});
+        let (client, server) = mock_client(move |_| (200, route.clone()));
+        let r = ReadClient::new(client, Duration::from_secs(5));
+        let y = object_yaml(&r, "team-a", YamlKind::Route, "web")
+            .await
+            .unwrap();
+        assert!(
+            !y.contains("MIIEvQk3yS3cr3t") && !y.contains("PRIVATE KEY"),
+            "{y}"
+        );
+        assert!(
+            !y.contains("last-applied-configuration") && !y.contains("annotations"),
+            "{y}"
+        );
+        assert!(
+            y.contains("  tls:\n    certificate: |\n      -----BEGIN CERTIFICATE-----\n")
+                && y.contains("    termination: edge\n"),
+            "{y}"
+        );
+        assert!(!y.contains("    key:"), "{y}");
+        drop(r);
+        assert_eq!(
+            server.await.unwrap()[0].path(),
+            "/apis/route.openshift.io/v1/namespaces/team-a/routes/web"
+        );
+    }
+
+    /// Аннотации с копией объекта вырезаются у любого вида, остальные остаются.
+    #[tokio::test]
+    async fn yaml_without_annotations_that_copy_the_object() {
+        let (client, _server) = mock_client(|_| {
+            (
+                200,
+                serde_json::json!({"apiVersion": "apps/v1", "kind": "Deployment",
+                    "metadata": {"name": "web", "namespace": "team-a", "annotations": {
+                        "deployment.kubernetes.io/revision": "3",
+                        "kubectl.kubernetes.io/last-applied-configuration":
+                            "{\"apiVersion\":\"apps/v1\",\"kind\":\"Deployment\"}",
+                        "kapp.k14s.io/original": "{\"kind\":\"Deployment\"}",
+                        "objectset.rio.cattle.io/applied": "H4sIAAAAAAAA",
+                        "openshift.io/encoded-deployment-config": "{\"kind\":\"DeploymentConfig\"}"}},
+                    "spec": {"replicas": 2}}),
+            )
+        });
+        let r = ReadClient::new(client, Duration::from_secs(5));
+        let y = object_yaml(&r, "team-a", YamlKind::Deployment, "web")
+            .await
+            .unwrap();
+        assert!(
+            y.contains("metadata:\n  annotations:\n    deployment.kubernetes.io/revision: \"3\"\n  name: web\n"),
+            "{y}"
+        );
+        for copy in OBJECT_COPIES {
+            assert!(!y.contains(copy), "{copy}: {y}");
+        }
+        assert!(!y.contains("H4sI") && !y.contains("\\\"kind\\\""), "{y}");
     }
 
     #[tokio::test]
