@@ -10,7 +10,13 @@ vi.mock("../../../api/client", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../../../api/client")>();
   return {
     ...orig,
-    api: { listConnections: vi.fn(), listFolders: vi.fn(), previewKubeconfigImport: vi.fn(), applyKubeconfigImport: vi.fn() },
+    api: {
+      connect: vi.fn(),
+      listConnections: vi.fn(),
+      listFolders: vi.fn(),
+      previewKubeconfigImport: vi.fn(),
+      applyKubeconfigImport: vi.fn(),
+    },
   };
 });
 
@@ -68,6 +74,12 @@ const ALLOW = "Разрешить Glafira запускать эту команд
 function Mounted(props: ComponentProps<typeof KubeconfigImportDialog>) {
   useQuery({ queryKey: ["connections"], queryFn: api.listConnections });
   return <KubeconfigImportDialog {...props} />;
+}
+
+/** Открытая вкладка подключения «old»: её данные подписаны на ключ `["connection", id]`. */
+function OpenTab() {
+  const q = useQuery({ queryKey: ["connection", "old"], queryFn: () => api.connect("old", false) });
+  return <output aria-label="Вкладка">{q.data === undefined ? "…" : String(q.data)}</output>;
 }
 
 beforeEach(() => {
@@ -221,6 +233,26 @@ describe("KubeconfigImportDialog", () => {
     expect(cached).toEqual([undefined, undefined]);
     expect(rendered.client.getQueryData(["connection", "other"])).toEqual({ keep: true });
     expect(api.listConnections).toHaveBeenCalledTimes(2);
+    // Диалог закрывается: файл заново не читается.
+    expect(api.previewKubeconfigImport).toHaveBeenCalledTimes(1);
+  });
+
+  it("после импорта открытая вкладка подключения перезапрашивает данные", async () => {
+    vi.mocked(api.connect).mockResolvedValueOnce("сеанс истёк" as never).mockResolvedValue("подключено" as never);
+    vi.mocked(api.applyKubeconfigImport).mockResolvedValue([{ id: "old" }] as ConnectionProfile[]);
+    const user = userEvent.setup();
+    renderWithClient(
+      <>
+        <OpenTab />
+        <Mounted initialTargetId={null} onClose={() => {}} onImported={() => {}} />
+      </>,
+    );
+    await waitFor(() => expect(screen.getByLabelText("Вкладка")).toHaveTextContent("сеанс истёк"));
+    await user.click(await screen.findByRole("checkbox", { name: "lab" }));
+    await user.click(screen.getByRole("button", { name: "Импортировать 2 контекста" }));
+    // Подписчик ключа `["connection", "old"]` получает свежие данные без повторного открытия вкладки.
+    await waitFor(() => expect(screen.getByLabelText("Вкладка")).toHaveTextContent("подключено"));
+    expect(api.connect).toHaveBeenCalledTimes(2);
   });
 
   it("сбой сохранения: ошибка, диалог открыт, списки перечитаны", async () => {

@@ -37,7 +37,7 @@ export function KubeconfigImportDialog({ initialTargetId, onClose, onImported }:
   // файла строка изменилась, прежняя галочка к ней не относится.
   const [allowed, setAllowed] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
-  const [applyError, setApplyError] = useState<unknown>(null);
+  const [error, setError] = useState<unknown>(null);
 
   const foldersQ = useQuery({ queryKey: ["folders"], queryFn: api.listFolders });
   const previewQ = useQuery({
@@ -83,18 +83,18 @@ export function KubeconfigImportDialog({ initialTargetId, onClose, onImported }:
       if (typeof file === "string") {
         setSelected(null);
         setAllowed(new Set());
-        setApplyError(null);
+        setError(null);
         setPath(file);
       }
     } catch (err) {
-      setApplyError(err);
+      setError(err);
     }
   };
 
   const apply = async () => {
     if (!preview) return;
     setBusy(true);
-    setApplyError(null);
+    setError(null);
     const picked = preview.contexts.filter((c) => chosen.has(c.name));
     const names = picked.map((c) => c.name);
     // Подтверждение — отпечаток показанной строки запуска выбранного и разрешённого контекста.
@@ -106,15 +106,18 @@ export function KubeconfigImportDialog({ initialTargetId, onClose, onImported }:
       saved = await api.applyKubeconfigImport(preview.path, names, targetId, approveExec);
       for (const p of saved) touched.add(p.id);
     } catch (err) {
-      setApplyError(err);
+      setError(err);
     } finally {
-      // Контексты сохраняются по одному: после сбоя часть уже записана. Список подключений и
-      // пометки «обновит существующее подключение» нужно обновить в любом случае.
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["connections"] }),
-        queryClient.invalidateQueries({ queryKey: ["kubeconfig-preview", path] }),
-      ]);
-      queryClient.removeQueries({ predicate: (q) => typeof q.queryKey[1] === "string" && touched.has(q.queryKey[1]) });
+      // Контексты сохраняются по одному: после сбоя часть уже записана. Список подключений нужно
+      // обновить в любом случае; пометки «обновит существующее подключение» — только если диалог
+      // остался открытым (при успехе он закрывается, перечитывать файл незачем).
+      const refresh = [queryClient.invalidateQueries({ queryKey: ["connections"] })];
+      if (!saved) refresh.push(queryClient.invalidateQueries({ queryKey: ["kubeconfig-preview", path] }));
+      await Promise.all(refresh);
+      // Открытая вкладка подключения показывает прежние адрес и вход, а `removeQueries` не
+      // сообщает подписчикам о новом состоянии: сброс перезапрашивает данные у смонтированных
+      // запросов. Ответ не ждём — диалог не зависит от связи с кластером.
+      void queryClient.resetQueries({ predicate: (q) => typeof q.queryKey[1] === "string" && touched.has(q.queryKey[1]) });
       setBusy(false);
     }
     if (saved) onImported(saved);
@@ -188,7 +191,7 @@ export function KubeconfigImportDialog({ initialTargetId, onClose, onImported }:
             ))}
           </select>
         </div>
-        {applyError != null && <ErrorBanner error={applyError} />}
+        {error != null && <ErrorBanner error={error} />}
         {unconfirmed.length > 0 && <p className="muted">{t("kubeconfig.confirmExec")}</p>}
         <div className="toolbar">
           <button
