@@ -256,11 +256,7 @@ pub async fn check_cluster(
 /// Exec-плагин без подтверждённой строки запуска не запускается и при проверке.
 fn ensure_exec_approved(p: &ConnectionProfile) -> AppResult<()> {
     match &p.auth {
-        AuthConfig::Exec(e) if !crate::auth::exec::is_approved(e) => Err(app_err!(
-            ErrorCode::AuthFailed,
-            "errors.exec.notApproved",
-            "Confirm the exec plugin launch line in the connection settings"
-        )),
+        AuthConfig::Exec(e) => crate::auth::exec::require_approved(e),
         _ => Ok(()),
     }
 }

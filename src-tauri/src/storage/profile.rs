@@ -311,6 +311,22 @@ pub(crate) fn without_userinfo(u: &url::Url) -> String {
     clean.as_str().trim_end_matches('/').to_string()
 }
 
+/// Адрес для текста ошибки без имени и пароля: ни один адрес, который вводил человек или который
+/// читается из профиля и окружения, не показывается как есть. Если адрес не разбирается как URL
+/// с хостом (нет схемы, пробел в хосте, пустой хост), отбрасывается всё до последней «@».
+pub(crate) fn redact_url(raw: &str) -> String {
+    match url::Url::parse(raw) {
+        Ok(u) if u.host().is_some() => without_userinfo(&u),
+        _ => match raw.rsplit_once('@') {
+            Some((head, tail)) => match head.split_once("://") {
+                Some((scheme, _)) => format!("{scheme}://{tail}"),
+                None => tail.to_string(),
+            },
+            None => raw.to_string(),
+        },
+    }
+}
+
 /// Ошибка «учётные данные в адресе»; в тексте адрес показан без имени и пароля.
 fn credentials_in_url(u: &url::Url) -> AppError {
     invalid(ltext!(
@@ -333,19 +349,16 @@ pub fn validate_profile(p: &ConnectionProfile) -> AppResult<()> {
             "Connection name cannot be empty"
         )));
     }
-    let url = url::Url::parse(p.api_url.trim()).map_err(|_| {
+    let bad_api_url = || {
         invalid(ltext!(
             "errors.connections.badApiUrl",
             "Invalid API server address “{{url}}”",
-            url = p.api_url
+            url = redact_url(&p.api_url)
         ))
-    })?;
+    };
+    let url = url::Url::parse(p.api_url.trim()).map_err(|_| bad_api_url())?;
     if url.query().is_some() || url.fragment().is_some() {
-        return Err(invalid(ltext!(
-            "errors.connections.badApiUrl",
-            "Invalid API server address “{{url}}”",
-            url = p.api_url
-        )));
+        return Err(bad_api_url());
     }
     if url.scheme() != "https" || url.host_str().is_none_or(str::is_empty) {
         return Err(invalid(ltext!(
@@ -384,21 +397,19 @@ pub fn validate_profile(p: &ConnectionProfile) -> AppResult<()> {
         validate_exec(e)?;
     }
     if let ProxyConfig::Url { url } = &p.proxy {
-        let ok = url::Url::parse(url.trim())
-            .is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.host_str().is_some());
-        if !ok {
+        let proxy = url::Url::parse(url.trim())
+            .ok()
+            .filter(|u| matches!(u.scheme(), "http" | "https") && u.host_str().is_some());
+        let Some(proxy) = proxy else {
             return Err(invalid(ltext!(
                 "errors.connections.badProxyUrl",
                 "Invalid proxy address “{{url}}”: use http://host:port",
-                url = url
+                url = redact_url(url)
             )));
+        };
+        if has_userinfo(&proxy) {
+            return Err(credentials_in_url(&proxy));
         }
-    }
-    if let ProxyConfig::Url { url } = &p.proxy
-        && let Ok(u) = url::Url::parse(url.trim())
-        && has_userinfo(&u)
-    {
-        return Err(credentials_in_url(&u));
     }
     if let Some(ns) = p
         .favorite_namespaces
@@ -431,11 +442,7 @@ fn validate_exec(e: &ExecAuth) -> AppResult<()> {
         )));
     }
     if !std::path::Path::new(&e.command).is_absolute() {
-        return Err(invalid(ltext!(
-            "errors.exec.commandNotAbsolute",
-            "Specify the full path to “{{command}}” — use “Find”",
-            command = e.command
-        )));
+        return Err(invalid(crate::auth::exec::command_not_absolute(&e.command)));
     }
     crate::auth::exec::check_allowed(&e.command, &e.args).map_err(invalid)?;
     if e.api_version != EXEC_API_V1 && e.api_version != EXEC_API_V1BETA1 {
@@ -904,6 +911,59 @@ mod tests {
             url: "http://proxy.corp:3128".into(),
         };
         assert!(validate_profile(&p).is_ok());
+    }
+
+    /// Адрес, не прошедший проверку, показывается в ошибке без имени и пароля — для адреса API
+    /// и прокси, при любой причине отказа (не разбирается, запрос, чужая схема, нет хоста).
+    #[test]
+    fn invalid_addresses_are_reported_without_passwords() {
+        let api = [
+            (
+                "https://u:s3cr3t@api.c:6443/k8s?x=1",
+                "https://api.c:6443/k8s?x=1",
+            ),
+            (
+                "https://u:s3cr3t@api.c:6443/k8s#f",
+                "https://api.c:6443/k8s#f",
+            ),
+            ("https://u:s3cr3t@", "https://"),
+            ("https://u:s3cr3t@api c:6443", "https://api c:6443"),
+        ];
+        for (url, shown) in api {
+            let mut p = sample_profile("a");
+            p.api_url = url.into();
+            let e = assert_invalid(&p, "errors.connections.badApiUrl");
+            assert_eq!(e.params["url"], shown, "{url}");
+            let all = serde_json::to_string(&e).unwrap();
+            assert!(
+                !all.contains("s3cr3t") && !all.contains('@'),
+                "{url}: {all}"
+            );
+        }
+        let proxy = [
+            ("socks://u:s3cr3t@proxy:1080", "socks://proxy:1080"),
+            ("u:s3cr3t@proxy:1080", "proxy:1080"),
+            ("http://u:s3cr3t@pro xy:3128", "http://pro xy:3128"),
+            ("http://u:s3cr3t@", "http://"),
+        ];
+        for (url, shown) in proxy {
+            let mut p = sample_profile("a");
+            p.proxy = ProxyConfig::Url { url: url.into() };
+            let e = assert_invalid(&p, "errors.connections.badProxyUrl");
+            assert_eq!(e.params["url"], shown, "{url}");
+            let all = serde_json::to_string(&e).unwrap();
+            assert!(
+                !all.contains("s3cr3t") && !all.contains('@'),
+                "{url}: {all}"
+            );
+        }
+        // Без пароля адрес показывается как есть.
+        let mut p = sample_profile("a");
+        p.proxy = ProxyConfig::Url {
+            url: "socks://proxy:1080".into(),
+        };
+        let e = assert_invalid(&p, "errors.connections.badProxyUrl");
+        assert_eq!(e.params["url"], "socks://proxy:1080");
     }
 
     #[test]

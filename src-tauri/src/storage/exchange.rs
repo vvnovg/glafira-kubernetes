@@ -12,7 +12,7 @@ use crate::storage::connections::{
     ConnectionFolder, ConnectionProfile, ConnectionStore, StoreData, check_tree, folder_not_found,
     unique_name, validate_profile,
 };
-use crate::storage::profile::{AuthConfig, CaConfig, strip_private_keys};
+use crate::storage::profile::{AuthConfig, CaConfig, normalize_profile, strip_private_keys};
 use crate::storage::tree::TreeItemKind;
 
 pub const EXCHANGE_FORMAT: &str = "glafira-kubernetes-connections";
@@ -83,6 +83,18 @@ fn strip_exec_for_export(p: &mut ConnectionProfile) {
     }
 }
 
+/// Приватный ключ из PEM-полей в файл обмена не попадает, сертификаты остаются (спец. §5.1:
+/// секреты — только в keychain). Профили читаются с диска без повторной проверки (файл могли
+/// править руками), поэтому ключ вырезается и здесь.
+fn strip_pem_keys_for_export(p: &mut ConnectionProfile) {
+    if let AuthConfig::ClientCert { certificate_pem } = &mut p.auth {
+        *certificate_pem = strip_private_keys(certificate_pem);
+    }
+    if let CaConfig::Pem { pem } = &mut p.ca {
+        *pem = strip_private_keys(pem);
+    }
+}
+
 /// Собирает файл экспорта: всё дерево или поддерево `root` (сама папка становится корнем).
 /// Секреты keychain не попадают в файл; неизвестные локальные поля (`extra`) не выносятся.
 pub fn build_export(
@@ -139,6 +151,7 @@ pub fn build_export(
         .map(|mut profile| {
             profile.extra.clear();
             strip_exec_for_export(&mut profile);
+            strip_pem_keys_for_export(&mut profile);
             let needs_secret = needs_secret(secrets, &profile)?;
             Ok(ExportedConnection {
                 profile,
@@ -146,9 +159,6 @@ pub fn build_export(
             })
         })
         .collect::<AppResult<Vec<_>>>()?;
-    // Профили читаются с диска без повторной проверки (файл могли править руками): приватный
-    // ключ из PEM-полей в файл обмена не попадает, сертификаты остаются.
-    let connections = connections.into_iter().map(without_private_keys).collect();
 
     Ok(ExchangeFileOut {
         format: EXCHANGE_FORMAT,
@@ -158,17 +168,6 @@ pub fn build_export(
         folders,
         connections,
     })
-}
-
-/// Убирает блоки с приватным ключом из `certificate_pem` и `ca.pem` (спец. §5.1: секреты — только в keychain).
-fn without_private_keys(mut c: ExportedConnection) -> ExportedConnection {
-    if let AuthConfig::ClientCert { certificate_pem } = &mut c.profile.auth {
-        *certificate_pem = strip_private_keys(certificate_pem);
-    }
-    if let CaConfig::Pem { pem } = &mut c.profile.ca {
-        *pem = strip_private_keys(pem);
-    }
-    c
 }
 
 /// Подключение файла, которое не будет импортировано, и причина.
@@ -280,6 +279,8 @@ pub fn parse_exchange(bytes: &[u8]) -> AppResult<ParsedExchange> {
         if let AuthConfig::Exec(e) = &mut c.profile.auth {
             e.approved = None;
         }
+        // Как при сохранении в форме: адрес без «/» на конце, проекты без пробелов и повторов.
+        normalize_profile(&mut c.profile);
         if let Err(e) = validate_profile(&c.profile) {
             skipped.push(Skipped {
                 name,
@@ -1279,6 +1280,35 @@ mod tests {
         assert_eq!(err.key, "errors.import.invalidJson");
         let err = parse_exchange(b"[1, 2]").err().unwrap();
         assert_eq!(err.key, "errors.import.notGlafiraFile");
+    }
+
+    /// Импортируемый профиль приводится к каноническому виду до проверки, как при сохранении
+    /// в форме: адрес без «/» на конце, проекты без пробелов и повторов.
+    #[test]
+    fn imported_profiles_are_normalized_before_validation() {
+        let mut c = conn_json("n", "N", None);
+        c["apiUrl"] = " https://api.c:6443/ ".into();
+        c["favoriteNamespaces"] = serde_json::json!([" team-a ", "", "team-a", "b"]);
+        c["manualNamespaces"] = serde_json::json!(["  team-c"]);
+        let parsed = parse_exchange(&file(vec![], vec![c.clone()])).unwrap();
+        assert!(parsed.skipped.is_empty(), "{:?}", parsed.skipped);
+        let p = &parsed.connections[0].0;
+        assert_eq!(p.api_url, "https://api.c:6443");
+        assert_eq!(p.favorite_namespaces, ["team-a", "b"]);
+        assert_eq!(p.manual_namespaces, ["team-c"]);
+        let plan = plan_import(&StoreData::default(), &parsed, &opts(None)).unwrap();
+        let stored = conn(&plan.next, "n");
+        assert_eq!(stored.api_url, "https://api.c:6443");
+        assert_eq!(stored.favorite_namespaces, ["team-a", "b"]);
+
+        // Нормализация не прячет настоящие ошибки.
+        c["favoriteNamespaces"] = serde_json::json!(["Bad Name"]);
+        let parsed = parse_exchange(&file(vec![], vec![c])).unwrap();
+        assert_eq!(parsed.connections.len(), 0);
+        assert_eq!(
+            parsed.skipped[0].reason.key,
+            "errors.connections.badNamespace"
+        );
     }
 
     #[test]

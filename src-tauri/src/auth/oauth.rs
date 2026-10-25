@@ -72,7 +72,7 @@ pub fn http_client(p: &ConnectionProfile) -> AppResult<reqwest::Client> {
                 ErrorCode::InvalidInput,
                 "errors.connections.badProxyUrl",
                 "Invalid proxy address “{{url}}”: use http://host:port",
-                url = url
+                url = crate::storage::profile::redact_url(url)
             )
         })?),
     };
@@ -622,6 +622,15 @@ mod tests {
             http_client(&p).unwrap_err().key,
             "errors.connections.badProxyUrl"
         );
+        // Профиль, записанный в обход проверки: пароль прокси в ошибку не попадает.
+        p.proxy = ProxyConfig::Url {
+            url: "http://u:s3cr3t@[::1".into(),
+        };
+        let e = http_client(&p).unwrap_err();
+        assert_eq!(e.key, "errors.connections.badProxyUrl");
+        assert_eq!(e.params["url"], "http://[::1");
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(!json.contains("s3cr3t") && !json.contains('@'), "{json}");
         let mut p = test_profile();
         p.ca = CaConfig::Pem { pem: "nope".into() };
         assert_eq!(

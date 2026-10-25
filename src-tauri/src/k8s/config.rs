@@ -11,7 +11,7 @@ use secrecy::SecretString;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::secrets::{CLIENT_KEY, SecretStore, TOKEN, secret_key};
 use crate::storage::profile::{
-    AuthConfig, CaConfig, ConnectionProfile, ProxyConfig, pem_certificates, without_userinfo,
+    AuthConfig, CaConfig, ConnectionProfile, ProxyConfig, pem_certificates, redact_url,
 };
 
 /// Значение переменной окружения (в тестах подменяется).
@@ -41,27 +41,12 @@ pub fn system_proxy(host: &str, env: EnvLookup) -> Option<String> {
     Some(proxy.trim().to_string())
 }
 
-/// Адрес прокси без имени и пароля для текста ошибки. Если адрес не разбирается как URL с
-/// хостом (нет схемы, пробел в хосте), отбрасывается всё до последней «@».
-fn redact_proxy(raw: &str) -> String {
-    match url::Url::parse(raw) {
-        Ok(u) if u.host().is_some() => without_userinfo(&u),
-        _ => match raw.rsplit_once('@') {
-            Some((head, tail)) => match head.split_once("://") {
-                Some((scheme, _)) => format!("{scheme}://{tail}"),
-                None => tail.to_string(),
-            },
-            None => raw.to_string(),
-        },
-    }
-}
-
 fn invalid_url(p: &ConnectionProfile) -> AppError {
     app_err!(
         ErrorCode::InvalidInput,
         "errors.connections.badApiUrl",
         "Invalid API server address “{{url}}”",
-        url = p.api_url
+        url = redact_url(&p.api_url)
     )
 }
 
@@ -127,7 +112,7 @@ pub fn build_kube_config(
                     ErrorCode::InvalidInput,
                     "errors.connections.badProxyUrl",
                     "Invalid proxy address “{{url}}”: use http://host:port",
-                    url = redact_proxy(&u)
+                    url = redact_url(&u)
                 )
             };
             // Другие схемы kube отвергнет позже, с полным адресом в тексте ошибки.
@@ -478,6 +463,21 @@ mod tests {
                 assert!(!json.contains(secret), "{raw}: {json}");
             }
         }
+    }
+
+    /// Профиль, записанный в обход проверки, с паролем в адресе API: в ошибке адрес без пароля.
+    #[test]
+    fn bad_api_url_is_reported_without_credentials() {
+        let mut p = sample_profile("a");
+        p.api_url = "https://u:s3cr3t@api c:6443".into();
+        let e = build_kube_config(&p, &with_token("a"), &no_env).unwrap_err();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (ErrorCode::InvalidInput, "errors.connections.badApiUrl")
+        );
+        assert_eq!(e.params["url"], "https://api c:6443");
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(!json.contains("s3cr3t") && !json.contains('@'), "{json}");
     }
 
     /// Принимаются только `http` и `https`: остальные схемы kube всё равно отвергнет,

@@ -10,7 +10,6 @@ use std::time::{Duration, SystemTime};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use secrecy::SecretString;
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 
@@ -261,6 +260,28 @@ pub fn is_approved(e: &ExecAuth) -> bool {
     e.approved.as_deref() == Some(fingerprint(e).as_str())
 }
 
+/// Плагин без подтверждённой строки запуска не запускается ни при подключении, ни при проверке
+/// подключения (спец. §5.2): единственное место, где строится эта ошибка.
+pub fn require_approved(e: &ExecAuth) -> AppResult<()> {
+    if is_approved(e) {
+        return Ok(());
+    }
+    Err(app_err!(
+        ErrorCode::AuthFailed,
+        "errors.exec.notApproved",
+        "Confirm the exec plugin launch line in the connection settings"
+    ))
+}
+
+/// Отказ для команды без абсолютного пути: при сохранении профиля и при запуске плагина.
+pub fn command_not_absolute(command: &str) -> LocalizedText {
+    ltext!(
+        "errors.exec.commandNotAbsolute",
+        "Specify the full path to “{{command}}” — use “Find”",
+        command = command
+    )
+}
+
 /// Стандартные каталоги команд, которых может не быть в PATH приложения: Homebrew,
 /// `/usr/local/bin`, `~/.local/bin`; на Windows — ярлыки winget и `%LOCALAPPDATA%`.
 pub fn standard_dirs(home: Option<&Path>, local_app_data: Option<&Path>) -> Vec<PathBuf> {
@@ -340,38 +361,67 @@ pub struct PluginCredential {
     pub expires_at: Option<SystemTime>,
 }
 
-#[derive(Deserialize)]
-struct CredentialOut {
-    status: Option<CredentialStatus>,
+type JsonObject = serde_json::Map<String, serde_json::Value>;
+
+/// Вид значения JSON для причины отказа: само значение в текст не попадает.
+fn json_kind(v: &serde_json::Value) -> &'static str {
+    use serde_json::Value;
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CredentialStatus {
-    token: Option<String>,
-    client_certificate_data: Option<String>,
-    client_key_data: Option<String>,
-    expiration_timestamp: Option<String>,
+/// Строковое поле `status`; поле другого вида — причина с путём поля, но без значения.
+fn status_str(status: &JsonObject, key: &str) -> Result<Option<String>, String> {
+    use serde_json::Value;
+    match status.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(other) => Err(format!(
+            "status.{key}: expected a string, got {}",
+            json_kind(other)
+        )),
+    }
 }
 
-/// Разбор `ExecCredential` из вывода плагина. Ошибка — причина без содержимого вывода.
+/// Разбор `ExecCredential` из вывода плагина. Ошибка — причина без содержимого вывода: ошибка
+/// `serde` повторяет не подошедшее по типу значение (`invalid type: string "…"`), а в выводе
+/// плагина именно токены, поэтому JSON разбирается как дерево и причина называет только поле
+/// и вид значения.
 pub fn parse_credential(stdout: &[u8]) -> Result<PluginCredential, String> {
-    let out: CredentialOut = serde_json::from_slice(stdout).map_err(|e| e.to_string())?;
-    let s = out.status.ok_or("no status in ExecCredential")?;
-    let expires_at = s
-        .expiration_timestamp
+    use serde_json::Value;
+    let out: Value =
+        serde_json::from_slice(stdout).map_err(|e| format!("the output is not valid JSON: {e}"))?;
+    let Value::Object(out) = out else {
+        return Err("the output is not a JSON object".into());
+    };
+    let s = match out.get("status") {
+        None | Some(Value::Null) => return Err("no status in ExecCredential".into()),
+        Some(Value::Object(s)) => s,
+        Some(other) => {
+            return Err(format!(
+                "status: expected an object, got {}",
+                json_kind(other)
+            ));
+        }
+    };
+    let expires_at = status_str(s, "expirationTimestamp")?
         .map(|ts| {
             time::OffsetDateTime::parse(&ts, &time::format_description::well_known::Rfc3339)
                 .map(SystemTime::from)
-                .map_err(|e| format!("expirationTimestamp: {e}"))
+                .map_err(|_| "status.expirationTimestamp: not an RFC 3339 timestamp".to_string())
         })
         .transpose()?;
-    let token = s
-        .token
+    let token = status_str(s, "token")?
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
-    let cert = s.client_certificate_data.filter(|c| !c.trim().is_empty());
-    let key = s.client_key_data.filter(|k| !k.trim().is_empty());
+    let cert = status_str(s, "clientCertificateData")?.filter(|c| !c.trim().is_empty());
+    let key = status_str(s, "clientKeyData")?.filter(|k| !k.trim().is_empty());
     if token.is_none() && (cert.is_none() || key.is_none()) {
         return Err("neither token nor clientCertificateData and clientKeyData".into());
     }
@@ -497,7 +547,9 @@ fn plugin_path(command: &Path, dirs: &[PathBuf]) -> Option<String> {
 }
 
 /// Запускает плагин: без оболочки, `stdin` закрыт, не дольше `limit`; `cancel` прерывает
-/// ожидание (как у входа через браузер). Процесс завершается вместе с ожиданием.
+/// ожидание (как у входа через браузер). Процесс завершается вместе с ожиданием. Профиль могли
+/// поправить в обход проверки, поэтому абсолютный путь и список разрешённых команд проверяются
+/// и здесь. `path_env` — PATH процесса, если в переменных профиля своего PATH нет.
 pub async fn run(
     e: &ExecAuth,
     exec_info: &str,
@@ -505,6 +557,12 @@ pub async fn run(
     cancel: oneshot::Receiver<()>,
     limit: Duration,
 ) -> AppResult<PluginCredential> {
+    if !Path::new(&e.command).is_absolute() {
+        return Err(AppError::localized(
+            ErrorCode::AuthFailed,
+            command_not_absolute(&e.command),
+        ));
+    }
     check_allowed(&e.command, &e.args)
         .map_err(|t| AppError::localized(ErrorCode::AuthFailed, t))?;
     let name = command_name(&e.command);
@@ -516,7 +574,15 @@ pub async fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    if let Some(p) = path_env {
+    // PATH, заданный в профиле, человек подтвердил вместе со строкой запуска: он не затирается.
+    let profile_sets_path = e.env.iter().any(|v| {
+        if cfg!(windows) {
+            v.name.eq_ignore_ascii_case("PATH")
+        } else {
+            v.name == "PATH"
+        }
+    });
+    if let Some(p) = path_env.filter(|_| !profile_sets_path) {
         cmd.env("PATH", p);
     }
     #[cfg(windows)]
@@ -547,12 +613,9 @@ pub async fn run(
             ));
         }
     };
-    let secrets: Vec<&str> = e
-        .env
-        .iter()
-        .filter(|v| is_secret_name(&v.name))
-        .map(|v| v.value.as_str())
-        .collect();
+    // Значения секретных переменных и аргументов не попадают в текст ошибок.
+    let secrets = secret_values(e);
+    let secrets: Vec<&str> = secrets.iter().map(String::as_str).collect();
     if !output.status.success() {
         let code = output
             .status
@@ -577,7 +640,7 @@ pub async fn run(
             "The exec plugin {{command}} returned no credentials",
             command = name
         )
-        .with_details(reason)
+        .with_details(mask_output(&reason, &secrets))
     })
 }
 
@@ -591,13 +654,7 @@ pub async fn credential_for(
     let AuthConfig::Exec(e) = &p.auth else {
         return Err(AppError::internal_with("not an exec plugin connection"));
     };
-    if !is_approved(e) {
-        return Err(app_err!(
-            ErrorCode::AuthFailed,
-            "errors.exec.notApproved",
-            "Confirm the exec plugin launch line in the connection settings"
-        ));
-    }
+    require_approved(e)?;
     let dirs = command_dirs().await;
     let path = plugin_path(Path::new(&e.command), &dirs);
     run(e, &exec_info(e, p), path.as_deref(), cancel, limit).await
@@ -1017,6 +1074,65 @@ mod tests {
         }
     }
 
+    /// Причина отказа разбирает форму вывода и называет поле, но не повторяет значения:
+    /// ошибка `serde` содержит значение, не подошедшее по типу (`invalid type: string "…"`).
+    #[test]
+    fn bad_credential_reasons_never_echo_values() {
+        let secret = "opaque-t0ken-value";
+        for (bad, field) in [
+            (format!(r#"{{"status":"{secret}"}}"#), "status"),
+            (format!(r#"{{"status":{{"token":["{secret}"]}}}}"#), "token"),
+            (
+                format!(r#"{{"status":{{"token":{{"v":"{secret}"}}}}}}"#),
+                "token",
+            ),
+            (
+                format!(r#"{{"status":{{"clientKeyData":12345,"token":"{secret}"}}}}"#),
+                "clientKeyData",
+            ),
+            (
+                format!(r#"{{"status":{{"token":"t","expirationTimestamp":"{secret}"}}}}"#),
+                "expirationTimestamp",
+            ),
+            (
+                format!(r#"{{"status":{{"token":"t","expirationTimestamp":["{secret}"]}}}}"#),
+                "expirationTimestamp",
+            ),
+            (format!(r#"["{secret}"]"#), "JSON object"),
+            (format!("{secret} not json"), "line 1"),
+        ] {
+            let reason = parse_credential(bad.as_bytes()).unwrap_err();
+            assert!(!reason.contains(secret), "{bad}: {reason}");
+            assert!(reason.contains(field), "{bad}: {reason}");
+        }
+        for (bad, reason) in [
+            (r#"{"kind":"ExecCredential"}"#, "no status"),
+            (r#"{"status":null}"#, "no status"),
+            (r#"{"status":{"token":""}}"#, "neither token"),
+        ] {
+            let got = parse_credential(bad.as_bytes()).unwrap_err();
+            assert!(got.contains(reason), "{bad}: {got}");
+        }
+    }
+
+    /// Единая проверка подтверждения: её используют и запуск, и проверка подключения.
+    #[test]
+    fn unapproved_launch_line_is_refused_in_one_place() {
+        let mut e = sample_exec();
+        let err = require_approved(&e).unwrap_err();
+        assert_eq!(
+            (err.code, err.key.as_str()),
+            (ErrorCode::AuthFailed, "errors.exec.notApproved")
+        );
+        e.approved = Some(fingerprint(&e));
+        assert!(require_approved(&e).is_ok());
+        e.args.push("--v=1".into());
+        assert_eq!(
+            require_approved(&e).unwrap_err().key,
+            "errors.exec.notApproved"
+        );
+    }
+
     #[test]
     fn plugin_output_is_masked() {
         let text = "error: token eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1In0.c2lnbmF0dXJl expired\n\
@@ -1059,9 +1175,10 @@ case "$3" in
   ok) printf '{"kind":"ExecCredential","status":{"token":"tok-%s","expirationTimestamp":"2030-01-01T00:00:00Z"}}' "$TEAM" ;;
   info) printf '%s' "$KUBERNETES_EXEC_INFO" > "$INFO_FILE"; printf '{"status":{"token":"t"}}' ;;
   path) printf '{"status":{"token":"%s"}}' "$PATH" ;;
-  fail) echo "refresh token eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1In0.c2lnbmF0dXJl expired, key $AWS_SECRET_ACCESS_KEY" >&2; exit 3 ;;
+  fail) echo "refresh token eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1In0.c2lnbmF0dXJl expired, key $AWS_SECRET_ACCESS_KEY, args $*" >&2; exit 3 ;;
   slow) sleep 30 ;;
   garbage) echo "not json" ;;
+  wrongtype) printf '{"status":"opaque-t0ken-value"}' ;;
 esac
 "#;
 
@@ -1164,6 +1281,92 @@ esac
                 .await
                 .unwrap_err();
             assert_eq!(e.key, "errors.exec.badOutput");
+        }
+
+        /// Секретные аргументы (`--имя=значение` и пара `--имя значение`) в stderr плагина
+        /// маскируются так же, как значения секретных переменных окружения.
+        #[tokio::test]
+        async fn failure_masks_secret_arguments() {
+            let dir = tempfile::tempdir().unwrap();
+            for (extra, secret, shown) in [
+                (
+                    &["--oidc-client-secret=cl1ent-s3cret"][..],
+                    "cl1ent-s3cret",
+                    "--oidc-client-secret=***",
+                ),
+                (
+                    &["--client-secret", "pair-s3cret"][..],
+                    "pair-s3cret",
+                    "--client-secret ***",
+                ),
+            ] {
+                let mut e = plugin(dir.path(), "fail");
+                e.args.extend(extra.iter().map(|a| a.to_string()));
+                let err = go(&e, Duration::from_secs(10)).await.unwrap_err();
+                assert_eq!(err.key, "errors.exec.failed");
+                let details = err.details.unwrap();
+                assert!(!details.contains(secret), "{details}");
+                assert!(details.contains(shown), "{details}");
+                assert!(!details.contains("s3cr3t-value"), "{details}");
+            }
+        }
+
+        /// Вывод плагина не по формату: причина называет поле, но не значение.
+        #[tokio::test]
+        async fn bad_output_reason_has_no_values() {
+            let dir = tempfile::tempdir().unwrap();
+            let err = go(&plugin(dir.path(), "wrongtype"), Duration::from_secs(10))
+                .await
+                .unwrap_err();
+            assert_eq!(err.key, "errors.exec.badOutput");
+            let details = err.details.unwrap();
+            assert!(details.contains("status"), "{details}");
+            assert!(!details.contains("opaque-t0ken-value"), "{details}");
+        }
+
+        /// PATH из переменных окружения профиля не затирается вычисленным PATH.
+        #[tokio::test]
+        async fn profile_path_is_not_overwritten() {
+            use secrecy::ExposeSecret;
+            let dir = tempfile::tempdir().unwrap();
+            let mut e = plugin(dir.path(), "path");
+            e.env.push(ExecEnv {
+                name: "PATH".into(),
+                value: "/profile/bin:/usr/bin:/bin".into(),
+            });
+            let (_keep, cancel) = oneshot::channel();
+            let c = run(
+                &e,
+                "{}",
+                Some("/computed/bin:/usr/bin:/bin"),
+                cancel,
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                c.token.unwrap().expose_secret(),
+                "/profile/bin:/usr/bin:/bin"
+            );
+        }
+
+        /// Относительная команда не запускается, даже если имя из списка разрешённых.
+        #[tokio::test]
+        async fn relative_command_is_not_started() {
+            let dir = tempfile::tempdir().unwrap();
+            for command in ["kubectl", "bin/kubectl", "./kubectl", ""] {
+                let e = ExecAuth {
+                    command: command.into(),
+                    ..plugin(dir.path(), "ok")
+                };
+                let err = go(&e, Duration::from_secs(10)).await.unwrap_err();
+                assert_eq!(
+                    (err.code, err.key.as_str()),
+                    (ErrorCode::AuthFailed, "errors.exec.commandNotAbsolute"),
+                    "{command:?}"
+                );
+                assert_eq!(err.params["command"], command);
+            }
         }
 
         #[tokio::test]
