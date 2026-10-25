@@ -17,8 +17,11 @@ pub enum Callback {
         code: String,
         state: String,
     },
+    /// Отказ (`error=…`); `state` — как в запросе авторизации (RFC 6749, 4.1.2.1), пустой, если
+    /// его нет.
     Denied {
         error: String,
+        state: String,
     },
     /// Другой путь (например, `/favicon.ico`) — ждём дальше.
     Other,
@@ -45,14 +48,13 @@ pub fn parse_request_line(line: &str) -> Callback {
             _ => {}
         }
     }
+    let state = state.unwrap_or_default();
     match (error, code) {
-        (Some(error), _) => Callback::Denied { error },
-        (None, Some(code)) => Callback::Code {
-            code,
-            state: state.unwrap_or_default(),
-        },
+        (Some(error), _) => Callback::Denied { error, state },
+        (None, Some(code)) => Callback::Code { code, state },
         (None, None) => Callback::Denied {
             error: "missing code".into(),
+            state,
         },
     }
 }
@@ -88,14 +90,15 @@ impl CallbackServer {
         })
     }
 
-    /// Ждёт redirect с `expected_state` не дольше `limit`.
+    /// Ждёт redirect с `expected_state` не дольше `limit`: код или отказ (`error=…`) с этим `state`.
     ///
     /// `cancel` прерывает ожидание: и `send(())`, и сброс (drop) отправителя — приёмник `oneshot`
     /// завершается в обоих случаях, поэтому вызывающий держит отправитель, пока вход не закончен.
     ///
     /// Каждое соединение обслуживается отдельной задачей: молчащее или оборванное соединение,
-    /// чужой путь и ответ с чужим `state` (другая вкладка, стороннее приложение) вход не
-    /// прерывают — ожидание продолжается до настоящего redirect, отказа, отмены или `limit`.
+    /// чужой путь и код или отказ с чужим или пропущенным `state` (другая вкладка, стороннее
+    /// приложение) вход не прерывают — ожидание продолжается до настоящего redirect, отмены или
+    /// `limit`.
     pub async fn wait(
         self,
         expected_state: &str,
@@ -175,7 +178,14 @@ async fn serve_connection(
     }
     let (status, page, result) = match parse_request_line(&line) {
         Callback::Other => ("404 Not Found", "", None),
-        Callback::Denied { error } => (
+        // Ответ не на наш запрос (код или отказ с чужим или пропущенным `state`): показываем
+        // страницу ошибки, но вход не прерываем — настоящий redirect ещё может прийти.
+        Callback::Code { state, .. } | Callback::Denied { state, .. }
+            if state != expected_state =>
+        {
+            ("200 OK", DENIED_PAGE, None)
+        }
+        Callback::Denied { error, .. } => (
             "200 OK",
             DENIED_PAGE,
             Some(Err(app_err!(
@@ -185,9 +195,6 @@ async fn serve_connection(
                 error = error
             ))),
         ),
-        // Ответ не на наш запрос: показываем страницу ошибки, но вход не прерываем — настоящий
-        // redirect ещё может прийти.
-        Callback::Code { state, .. } if state != expected_state => ("200 OK", DENIED_PAGE, None),
         Callback::Code { code, .. } => ("200 OK", PAGE, Some(Ok(code))),
     };
     let response = format!(
@@ -223,7 +230,8 @@ mod tests {
         assert_eq!(
             parse_request_line("GET /callback?error=access_denied&state=s HTTP/1.1"),
             Callback::Denied {
-                error: "access_denied".into()
+                error: "access_denied".into(),
+                state: "s".into()
             }
         );
         assert_eq!(
@@ -237,7 +245,8 @@ mod tests {
         assert_eq!(
             parse_request_line("GET /callback HTTP/1.1"),
             Callback::Denied {
-                error: "missing code".into()
+                error: "missing code".into(),
+                state: String::new()
             }
         );
     }
@@ -358,9 +367,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forged_denial_is_ignored_until_the_real_callback() {
+        let server = CallbackServer::bind().await.unwrap();
+        let redirect = server.redirect_uri.clone();
+        let (_tx, rx) = oneshot::channel();
+        let wait =
+            tokio::spawn(async move { server.wait("s1", Duration::from_secs(10), rx).await });
+        // Отказ с чужим state, без state и «пустой» redirect — не ответ на наш запрос.
+        for forged in [
+            format!("{redirect}?error=access_denied&state=other"),
+            format!("{redirect}?error=access_denied"),
+            redirect.clone(),
+        ] {
+            let (status, page) = get(&forged).await;
+            assert_eq!(status, 200);
+            assert!(page.contains("Sign-in failed"), "{forged}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(!wait.is_finished(), "{forged} завершил вход");
+        }
+        let (_, page) = get(&format!("{redirect}?code=c-3&state=s1")).await;
+        assert!(page.contains("Signed in"));
+        assert_eq!(wait.await.unwrap().unwrap(), "c-3");
+    }
+
+    #[tokio::test]
     async fn denial_is_an_error() {
         let server = CallbackServer::bind().await.unwrap();
-        let url = format!("{}?error=access_denied", server.redirect_uri);
+        let url = format!("{}?error=access_denied&state=s1", server.redirect_uri);
         let (_tx, rx) = oneshot::channel();
         let wait =
             tokio::spawn(async move { server.wait("s1", Duration::from_secs(10), rx).await });
