@@ -10,7 +10,9 @@ vi.mock("./help/HelpPanel", () => ({
 }));
 
 describe("TabContent help", () => {
-  beforeEach(() => vi.spyOn(console, "error").mockImplementation(() => {}));
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
   afterEach(() => vi.restoreAllMocks());
 
   it("shows the load error instead of crashing when the guide fails", async () => {

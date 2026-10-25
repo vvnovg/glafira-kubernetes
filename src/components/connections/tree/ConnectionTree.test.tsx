@@ -1,4 +1,4 @@
-import { createEvent, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, createEvent, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -132,7 +132,9 @@ describe("ConnectionTree", () => {
     vi.mocked(api.listConnections).mockResolvedValue([]);
     renderWithClient(<ConnectionTree />);
     await waitFor(() => expect(api.listConnections).toHaveBeenCalled());
-    await new Promise((r) => setTimeout(r, 20));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
     expect(screen.queryByText(/Добавьте первое подключение/)).not.toBeInTheDocument();
     resolveFolders([]);
     expect(await screen.findByText(/Добавьте первое подключение/)).toBeInTheDocument();

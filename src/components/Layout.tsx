@@ -69,7 +69,7 @@ export function Layout() {
           })}
         </nav>
         {tabs.length === 0 && <p className="empty">{t("layout.empty")}</p>}
-        {/* Неактивные вкладки скрыты, но не размонтированы — browse-сессии и состояние форм сохраняются. */}
+        {/* Неактивные вкладки скрыты, но не размонтированы — подключения и состояние форм сохраняются. */}
         {tabs.map((tab) => (
           <section key={tab.id} className="tab-content" hidden={tab.id !== activeId}>
             <TabContent tab={tab} />

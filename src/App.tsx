@@ -16,8 +16,11 @@ function AppMenu() {
 
 // Без автоповтора: backend сам ждёт до таймаута и быстро отказывает при недоступном кластере,
 // а повтор удваивал бы ожидание. Повторить можно кнопкой в баннере ошибки.
+// Без перезапроса при возвращении сети: вкладки остаются смонтированными, и событие online
+// заново запустило бы подключение каждой открытой вкладки (exec-плагин или вход в браузере
+// у профилей с истекающими учётными данными) без действия пользователя.
 const queryClient = new QueryClient({
-  defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
+  defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false, refetchOnReconnect: false } },
 });
 
 export default function App() {
