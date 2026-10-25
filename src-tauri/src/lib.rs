@@ -1,5 +1,6 @@
 #[macro_use]
 pub mod i18n;
+pub mod auth;
 pub mod commands;
 mod dock_name;
 pub mod error;
@@ -13,6 +14,7 @@ pub mod settings;
 pub mod state;
 pub mod storage;
 pub mod sync;
+pub mod tls;
 
 use std::sync::Arc;
 
@@ -23,6 +25,7 @@ use crate::state::AppState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    crate::tls::ensure_crypto_provider();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
