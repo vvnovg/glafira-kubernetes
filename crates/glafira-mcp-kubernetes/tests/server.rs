@@ -2,6 +2,7 @@
 //! фальшивый Backend.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -30,6 +31,15 @@ struct Fake {
     workloads: Mutex<usize>,
     /// Список проектов кластера не читается.
     projects_forbidden: Mutex<bool>,
+    /// Задержка чтения обзора кластера (медленный кластер) и проверки.
+    overview_delay: Mutex<Duration>,
+    check_delay: Mutex<Duration>,
+    /// Операций чтения сейчас.
+    active: AtomicUsize,
+    /// Находки с длинными пояснениями (предел 100 КБ).
+    big_findings: AtomicBool,
+    /// Сколько длинных замечаний отдаёт `list_annotations` (0 — три коротких).
+    many_notes: AtomicUsize,
 }
 
 impl Fake {
@@ -40,6 +50,11 @@ impl Fake {
             states: Mutex::new(VecDeque::new()),
             workloads: Mutex::new(3),
             projects_forbidden: Mutex::new(false),
+            overview_delay: Mutex::new(Duration::ZERO),
+            check_delay: Mutex::new(Duration::ZERO),
+            active: AtomicUsize::new(0),
+            big_findings: AtomicBool::new(false),
+            many_notes: AtomicUsize::new(0),
         })
     }
 
@@ -125,6 +140,126 @@ fn event(kind: &str, reason: &str, ago: i64) -> Event {
     }
 }
 
+fn target(kind: TargetKind, ns: Option<&str>, name: Option<&str>) -> Target {
+    Target {
+        kind,
+        namespace: ns.map(String::from),
+        name: name.map(String::from),
+        workload_kind: (kind == TargetKind::Workload).then_some(WorkloadKind::Deployment),
+    }
+}
+
+fn finding(
+    rule: &str,
+    severity: Severity,
+    t: Target,
+    ignored: bool,
+    details: String,
+) -> HealthFinding {
+    HealthFinding {
+        key: format!("{rule}:{}", t.name.clone().unwrap_or_default()),
+        rule_id: rule.into(),
+        severity,
+        target: t,
+        title: format!("{rule} title"),
+        details,
+        params: Default::default(),
+        ignored,
+    }
+}
+
+fn sample_run(big: bool) -> HealthRun {
+    let findings = if big {
+        (0..300)
+            .map(|i| {
+                finding(
+                    "pod.crashLoop",
+                    Severity::Critical,
+                    target(TargetKind::Workload, Some("team-a"), Some(&format!("w{i}"))),
+                    false,
+                    "x".repeat(1000),
+                )
+            })
+            .collect()
+    } else {
+        vec![
+            finding(
+                "cluster.apiNotReady",
+                Severity::Critical,
+                target(TargetKind::Cluster, None, None),
+                false,
+                "d".into(),
+            ),
+            finding(
+                "pod.crashLoop",
+                Severity::Critical,
+                target(TargetKind::Workload, Some("team-a"), Some("web")),
+                false,
+                "d".into(),
+            ),
+            finding(
+                "pod.crashLoop",
+                Severity::Critical,
+                target(TargetKind::Workload, Some("team-a"), Some("legacy")),
+                true,
+                "d".into(),
+            ),
+            finding(
+                "pod.crashLoop",
+                Severity::Critical,
+                target(TargetKind::Workload, Some("team-b"), Some("other")),
+                false,
+                "d".into(),
+            ),
+            finding(
+                "workload.singleReplica",
+                Severity::Warning,
+                target(TargetKind::Workload, Some("team-a"), Some("web")),
+                false,
+                "d".into(),
+            ),
+            finding(
+                "container.latestTag",
+                Severity::Info,
+                target(TargetKind::Workload, Some("team-a"), Some("api")),
+                false,
+                "d".into(),
+            ),
+        ]
+    };
+    HealthRun {
+        run_id: "r1".into(),
+        started_at_ms: 1,
+        duration_ms: 2,
+        trigger: json!({ "kind": "ui" }),
+        environment: "prod".into(),
+        incomplete: false,
+        reused: true,
+        scope: HealthScope {
+            projects: vec!["team-a".into(), "team-b".into()],
+            projects_total: 2,
+            pods: 10,
+            nodes: Some(3),
+        },
+        findings,
+    }
+}
+
+fn note_view(i: i64, ns: &str, body_len: usize) -> AnnotationView {
+    AnnotationView {
+        id: format!("n{i}"),
+        target: target(TargetKind::Pod, Some(ns), Some("web-1")),
+        severity: Severity::Warning,
+        title: format!("Note {i}"),
+        body: "x".repeat(body_len),
+        related_rule_id: None,
+        client: Some("claude-ai".into()),
+        status: "open".into(),
+        created_at_ms: i,
+        updated_at_ms: i,
+    }
+}
+
 fn annotations() -> BTreeMap<String, String> {
     BTreeMap::from([
         (
@@ -165,6 +300,13 @@ impl Backend for Fake {
         Box::pin(async move {
             self.ops.lock().unwrap().push(op.clone());
             Ok(match op {
+                ReadOp::ClusterOverview { .. } => {
+                    self.active.fetch_add(1, Ordering::SeqCst);
+                    let d = *self.overview_delay.lock().unwrap();
+                    tokio::time::sleep(d).await;
+                    self.active.fetch_sub(1, Ordering::SeqCst);
+                    return Err(BackendError::new("FORBIDDEN", "not in this test"));
+                }
                 ReadOp::ListConnections => ReadOutput::Connections(vec![Connection {
                     id: "c1".into(),
                     name: "dev".into(),
@@ -318,8 +460,54 @@ impl Backend for Fake {
 
     fn health(&self, op: HealthOp) -> BoxFuture<'_, Result<HealthOutput, BackendError>> {
         Box::pin(async move {
-            self.health_ops.lock().unwrap().push(op);
-            Err(BackendError::unexpected())
+            self.health_ops.lock().unwrap().push(op.clone());
+            match op {
+                HealthOp::Check { run_id, .. } => {
+                    if run_id.as_deref() == Some("old") {
+                        return Err(BackendError::not_found(
+                            "The check was replaced by a newer one",
+                        ));
+                    }
+                    if run_id.is_none() {
+                        let d = *self.check_delay.lock().unwrap();
+                        tokio::time::sleep(d).await;
+                    }
+                    Ok(HealthOutput::Run(sample_run(
+                        self.big_findings.load(Ordering::SeqCst),
+                    )))
+                }
+                HealthOp::Annotate { note, .. } => {
+                    if note.target.name.as_deref() == Some("missing") {
+                        return Err(BackendError::not_found("No such pod"));
+                    }
+                    if note.title == "too many" {
+                        return Err(BackendError::new("limit_reached", "At most 200 open notes"));
+                    }
+                    Ok(HealthOutput::Annotated {
+                        annotation_id: "n1".into(),
+                        created: true,
+                    })
+                }
+                HealthOp::ListAnnotations { .. } => {
+                    let many = self.many_notes.load(Ordering::SeqCst) as i64;
+                    Ok(HealthOutput::Annotations(if many > 0 {
+                        (0..many).map(|i| note_view(i, "team-a", 2000)).collect()
+                    } else {
+                        vec![
+                            note_view(0, "team-a", 5),
+                            note_view(1, "team-b", 5),
+                            note_view(2, "team-a", 5),
+                        ]
+                    }))
+                }
+                HealthOp::RemoveAnnotation { annotation_id, .. } => match annotation_id.as_str() {
+                    "foreign" => Err(BackendError::new(
+                        "not_allowed",
+                        "Only notes created by this client can be removed",
+                    )),
+                    _ => Ok(HealthOutput::Removed),
+                },
+            }
         })
     }
 }
@@ -332,6 +520,10 @@ struct Running {
 }
 
 async fn env(fake: Arc<Fake>) -> Running {
+    env_with(fake, |_| {}).await
+}
+
+async fn env_with(fake: Arc<Fake>, tune: impl FnOnce(&mut GatewayOptions)) -> Running {
     let dir = tempfile::tempdir().unwrap();
     let ep = endpoint::choose(
         dir.path(),
@@ -341,6 +533,7 @@ async fn env(fake: Arc<Fake>) -> Running {
     let audit = Arc::new(AuditLog::new(dir.path()));
     let mut opts = GatewayOptions::new("glafira-kubernetes", "0.1.0");
     opts.observe_unit = Duration::from_millis(10);
+    tune(&mut opts);
     let handle = glafira_mcp_kubernetes::start(&ep, TOKEN.into(), fake, audit.clone(), opts)
         .await
         .unwrap();
@@ -399,12 +592,15 @@ async fn exposes_exactly_the_tools() {
     assert_eq!(
         names,
         [
+            "annotate",
             "describe_node",
             "describe_pod",
             "describe_workload",
             "get_cluster_overview",
             "get_network",
             "get_quotas",
+            "health_check",
+            "list_annotations",
             "list_connections",
             "list_events",
             "list_nodes",
@@ -412,16 +608,22 @@ async fn exposes_exactly_the_tools() {
             "list_projects",
             "list_workloads",
             "observe_workload",
+            "remove_annotation",
         ]
     );
     for t in &tools {
         let a = t.annotations.as_ref().unwrap();
+        // Замечания пишутся в Glafira (не в кластер): только они не read-only.
+        let writes = matches!(t.name.as_ref(), "annotate" | "remove_annotation");
         assert_eq!(
             (a.read_only_hint, a.destructive_hint, a.open_world_hint),
-            (Some(true), Some(false), Some(false)),
+            (Some(!writes), Some(false), Some(false)),
             "{}",
             t.name
         );
+        if writes {
+            assert_eq!(a.idempotent_hint, Some(true), "{}", t.name);
+        }
         assert!(
             t.description.as_deref().is_some_and(|d| d.len() > 30),
             "{}",
@@ -1301,4 +1503,306 @@ async fn calls_are_audited_with_the_connection_name() {
     assert_eq!(recent[0]["connection"]["name"], "name-c2");
     assert_eq!(recent[0]["args"]["namespace"], "x");
     assert_eq!(recent[1]["tool"], "list_connections");
+}
+
+#[tokio::test]
+async fn health_check_keeps_to_the_llm_scope_and_pages() {
+    let fake = Fake::new();
+    let e = env(fake.clone()).await;
+    let c = client(&e.ep).await;
+    let v = ok(call(
+        &c,
+        "health_check",
+        json!({"connectionId": "c1", "minSeverity": "warning", "includeIgnored": false, "limit": 1}),
+    )
+    .await);
+    // Находка в team-b (вне области c1) не попадает ни в сводку, ни в страницу.
+    assert_eq!(
+        v["summary"][1],
+        json!({"ruleId": "pod.crashLoop", "severity": "critical", "count": 2})
+    );
+    assert_eq!(v["summary"].as_array().unwrap().len(), 4);
+    assert_eq!(
+        v["findings"]["total"], 3,
+        "скрытая и info не попали в страницу"
+    );
+    assert_eq!(
+        v["findings"]["items"][0]["target"],
+        json!({"kind": "cluster"})
+    );
+    assert_eq!(v["findings"]["nextOffset"], 1);
+    assert_eq!(v["scope"]["projects"], json!(["team-a"]));
+    assert_eq!(
+        (v["reused"].as_bool(), v["truncated"].as_bool()),
+        (Some(true), Some(false))
+    );
+    let ops = fake.health_ops.lock().unwrap().clone();
+    let HealthOp::Check {
+        connection_id,
+        max_age_ms,
+        run_id,
+        namespaces,
+        session,
+    } = &ops[0]
+    else {
+        panic!("{ops:?}")
+    };
+    assert_eq!(
+        (connection_id.as_str(), *max_age_ms, run_id.as_deref()),
+        ("c1", 300_000, None)
+    );
+    assert_eq!(
+        namespaces.as_deref(),
+        Some(&["team-a".to_string()][..]),
+        "без списка — область LLM"
+    );
+    assert!(!session.id.is_empty());
+
+    ok(call(&c, "health_check", json!({"connectionId": "c2"})).await);
+    let ops = fake.health_ops.lock().unwrap().clone();
+    assert!(
+        matches!(
+            &ops[1],
+            HealthOp::Check {
+                namespaces: None,
+                ..
+            }
+        ),
+        "все проекты"
+    );
+    for (args, code) in [
+        (
+            json!({"connectionId": "c1", "maxAgeSeconds": 4000}),
+            "invalid_argument",
+        ),
+        (
+            json!({"connectionId": "c1", "limit": 201}),
+            "invalid_argument",
+        ),
+        (
+            json!({"connectionId": "c1", "namespaces": []}),
+            "invalid_argument",
+        ),
+        (
+            json!({"connectionId": "c1", "namespaces": ["team-b"]}),
+            "not_allowed",
+        ),
+        (json!({"connectionId": "nope"}), "not_allowed"),
+        (json!({"connectionId": "c1", "runId": "old"}), "not_found"),
+    ] {
+        let msg = err(&call(&c, "health_check", args).await);
+        assert!(msg.starts_with(code), "{msg}");
+    }
+}
+
+#[tokio::test]
+async fn health_check_fits_the_size_limit() {
+    let fake = Fake::new();
+    fake.big_findings.store(true, Ordering::SeqCst);
+    let e = env(fake).await;
+    let c = client(&e.ep).await;
+    let v = ok(call(
+        &c,
+        "health_check",
+        json!({"connectionId": "c1", "limit": 200}),
+    )
+    .await);
+    assert_eq!(v["truncated"], true);
+    let shown = v["findings"]["items"].as_array().unwrap().len();
+    assert!(shown > 0 && shown < 200, "{shown}");
+    assert_eq!(v["findings"]["nextOffset"], shown);
+    assert!(serde_json::to_vec(&v).unwrap().len() <= 100 * 1024);
+}
+
+#[tokio::test]
+async fn health_check_gives_up_waiting() {
+    let fake = Fake::new();
+    *fake.check_delay.lock().unwrap() = Duration::from_secs(5);
+    let e = env_with(fake, |o| o.check_wait = Duration::from_millis(100)).await;
+    let c = client(&e.ep).await;
+    let msg = err(&call(&c, "health_check", json!({"connectionId": "c1"})).await);
+    assert!(msg.starts_with("check_in_progress_timeout"), "{msg}");
+}
+
+#[tokio::test]
+async fn paging_by_run_id_does_not_take_cluster_slots() {
+    let fake = Fake::new();
+    *fake.overview_delay.lock().unwrap() = Duration::from_secs(2);
+    let e = env_with(fake.clone(), |o| o.check_wait = Duration::from_millis(300)).await;
+    let c = Arc::new(client(&e.ep).await);
+    // Оба слота сессии заняты медленными чтениями кластера.
+    let busy: Vec<_> = (0..2)
+        .map(|_| {
+            let c = c.clone();
+            tokio::spawn(async move {
+                call(&c, "get_cluster_overview", json!({"connectionId": "c1"})).await
+            })
+        })
+        .collect();
+    for _ in 0..100 {
+        if fake.active.load(Ordering::SeqCst) == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(fake.active.load(Ordering::SeqCst), 2);
+    // Страница прошлой проверки читается из файла Glafira — слот кластера не нужен.
+    ok(call(
+        &c,
+        "health_check",
+        json!({"connectionId": "c1", "runId": "r1"}),
+    )
+    .await);
+    // Новая проверка ходит в кластер: ждёт слот и не дожидается.
+    let msg = err(&call(&c, "health_check", json!({"connectionId": "c1"})).await);
+    assert!(msg.starts_with("check_in_progress_timeout"), "{msg}");
+    for h in busy {
+        h.await.unwrap();
+    }
+}
+
+fn note(target: Value, title: &str) -> Value {
+    json!({
+        "connectionId": "c1",
+        "target": target,
+        "severity": "warning",
+        "title": title,
+        "body": "the body of the note",
+        "relatedRuleId": "pod.crashLoop",
+    })
+}
+
+#[tokio::test]
+async fn annotate_validates_and_keeps_text_out_of_the_log() {
+    let fake = Fake::new();
+    let e = env(fake.clone()).await;
+    let c = client(&e.ep).await;
+    let pod = |name: &str| json!({"kind": "pod", "namespace": "team-a", "name": name});
+    for (args, code) in [
+        (
+            note(
+                json!({"kind": "workload", "namespace": "team-a", "name": "web"}),
+                "t",
+            ),
+            "invalid_argument",
+        ),
+        (
+            note(
+                json!({"kind": "node", "namespace": "team-a", "name": "w1"}),
+                "t",
+            ),
+            "invalid_argument",
+        ),
+        (note(pod("web-1"), "  "), "invalid_argument"),
+        (
+            note(
+                json!({"kind": "pod", "namespace": "team-b", "name": "x"}),
+                "t",
+            ),
+            "not_allowed",
+        ),
+        (note(pod("missing"), "t"), "not_found"),
+        (note(pod("web-1"), "too many"), "limit_reached"),
+    ] {
+        let msg = err(&call(&c, "annotate", args).await);
+        assert!(msg.starts_with(code), "{msg}");
+    }
+    let v = ok(call(&c, "annotate", note(pod("web-1"), "Restarts on OOM")).await);
+    assert_eq!(v, json!({"annotationId": "n1", "created": true}));
+    let ops = fake.health_ops.lock().unwrap().clone();
+    let Some(HealthOp::Annotate {
+        note: n, session, ..
+    }) = ops.last()
+    else {
+        panic!("{ops:?}")
+    };
+    assert_eq!(
+        (n.title.as_str(), n.related_rule_id.as_deref()),
+        ("Restarts on OOM", Some("pod.crashLoop"))
+    );
+    assert!(!session.id.is_empty());
+    let line = e.audit.recent(1)[0].to_string();
+    assert!(
+        line.contains("\"annotate\"") && line.contains("web-1"),
+        "{line}"
+    );
+    assert!(
+        !line.contains("Restarts on OOM") && !line.contains("the body"),
+        "{line}"
+    );
+    ok(call(
+        &c,
+        "annotate",
+        note(json!({"kind": "workload", "namespace": "team-a", "name": "web", "workloadKind": "Deployment"}), "t"),
+    )
+    .await);
+    ok(call(&c, "annotate", note(json!({"kind": "cluster"}), "t")).await);
+}
+
+#[tokio::test]
+async fn annotations_are_listed_within_the_scope_and_removed() {
+    let fake = Fake::new();
+    let e = env(fake.clone()).await;
+    let c = client(&e.ep).await;
+    let v = ok(call(
+        &c,
+        "list_annotations",
+        json!({"connectionId": "c1", "status": "all"}),
+    )
+    .await);
+    let ids: Vec<&str> = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["n2", "n0"], "новые первыми, team-b не видно");
+    assert_eq!(v["items"][0]["client"], "claude-ai");
+    assert!(matches!(
+        fake.health_ops.lock().unwrap()[0],
+        HealthOp::ListAnnotations {
+            status: StatusFilter::All,
+            ..
+        }
+    ));
+    let v = ok(call(
+        &c,
+        "remove_annotation",
+        json!({"connectionId": "c1", "annotationId": "n1"}),
+    )
+    .await);
+    assert_eq!(v, json!({"removed": true}));
+    let msg = err(&call(
+        &c,
+        "remove_annotation",
+        json!({"connectionId": "c1", "annotationId": "foreign"}),
+    )
+    .await);
+    assert!(msg.starts_with("not_allowed"), "{msg}");
+}
+
+#[tokio::test]
+async fn long_annotation_list_is_cut_to_the_newest() {
+    let fake = Fake::new();
+    fake.many_notes.store(80, Ordering::SeqCst);
+    let e = env(fake).await;
+    let c = client(&e.ep).await;
+    let v = ok(call(&c, "list_annotations", json!({"connectionId": "c1"})).await);
+    assert!(serde_json::to_vec(&v).unwrap().len() <= 100 * 1024);
+    assert_eq!(v["truncated"], true);
+    let hint = v["hint"].as_str().unwrap();
+    assert!(hint.contains("100 KB") && hint.contains("most recently updated"));
+    let ids: Vec<&str> = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    assert!(!ids.is_empty() && ids.len() < 80, "{}", ids.len());
+    let expected: Vec<String> = (0..80)
+        .rev()
+        .take(ids.len())
+        .map(|i| format!("n{i}"))
+        .collect();
+    assert_eq!(ids, expected);
 }

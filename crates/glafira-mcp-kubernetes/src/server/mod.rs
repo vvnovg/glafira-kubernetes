@@ -13,6 +13,7 @@ use rmcp::{ErrorData, RoleServer, ServerHandler, tool_handler};
 
 use crate::model::{Backend, ReadOp, ReadOutput, Scope, not_allowed};
 
+mod health_tools;
 mod tools;
 
 pub const INSTRUCTIONS: &str = "\
@@ -89,7 +90,7 @@ impl KubeServer {
             session,
             backend,
             options,
-            tool_router: Self::tool_router(),
+            tool_router: Self::tool_router() + Self::health_router(),
         }
     }
 

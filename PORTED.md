@@ -143,3 +143,4 @@
 | `crates/glafira-mcp-kubernetes/src/server/mod.rs` | `crates/glafira-mcp/src/server/mod.rs` | `8bbd0bd` | адаптирован: обработчик поверх `glafira_mcp_core::Session`, инструкции Kubernetes, проверка области LLM |
 | `crates/glafira-mcp-kubernetes/src/server/tools.rs` | `crates/glafira-mcp/src/server/tools.rs` | `8bbd0bd` | адаптирован: 13 инструментов чтения Kubernetes, маскировка в ответах |
 | `crates/glafira-mcp-kubernetes/tests/server.rs` | `crates/glafira-mcp/tests/server.rs` | `8bbd0bd` | адаптирован: фальшивый Backend Kubernetes, область LLM, маскировка |
+| `crates/glafira-mcp-kubernetes/src/server/health_tools.rs` | `crates/glafira-mcp/src/server/health_tools.rs` | `8bbd0bd` | адаптирован: проекты проверки, фильтр области LLM, объекты Kubernetes |
