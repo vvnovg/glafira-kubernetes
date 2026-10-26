@@ -77,18 +77,42 @@ GO_IT_KUBECONFIG="$PWD/dev/kind/out/kubeconfig" cargo test --manifest-path src-t
 
 ## Чтение кластера
 - Всё чтение — в Rust через `ReadClient` (`src-tauri/src/k8s/read.rs`): только get, list, watch, логи и проверки
-  прав; списки — страницами по 500, не больше 10 000 объектов. Каждая команда работает с правами пользователя; часть
-  экрана без прав приходит причиной (`Part` в `src-tauri/src/k8s/view.rs`), остальное показывается.
+  прав; списки — страницами по 500, не больше 10 000 объектов (`truncated`). Имя объекта и namespace проверяются до
+  запроса (`check_name`, `check_namespace`; namespace — DNS-1123 label, в имени нет `/`, `\`, `%`, `?`, `#`, `;`,
+  `..` и не-ASCII): ошибка `INVALID_INPUT`, в кластер ничего не уходит. Каждая команда работает с правами
+  пользователя; часть экрана без прав приходит причиной (`Part` в `src-tauri/src/k8s/view.rs`), остальное
+  показывается.
 - Обзор кластера (`k8s/overview.rs`): `/readyz?verbose`, ноды по ролям, классы Ingress и Gateway, число проектов; у
-  OpenShift — адаптер платформы (`platform/adapters.rs`): ClusterVersion, Infrastructure, консоль, ClusterOperators,
-  MachineConfigPools и срок токена (`useroauthaccesstokens`).
-- Проекты, права в проекте (`SelfSubjectRulesReview`, кэш на 5 минут, сброс при 403), workloads, поды, события, сеть,
-  конфигурация (значения Secret не читаются интерфейсом), PVC, квоты, YAML без `managedFields` — модули `src-tauri/src/k8s/`.
+  OpenShift — адаптер платформы (`platform/adapters.rs`): ClusterVersion (версия — последняя завершённая по истории
+  обновлений), Infrastructure и консоль (частями с причиной), ClusterOperators, MachineConfigPools и срок токена
+  (`useroauthaccesstokens`). Интерфейс открывает адрес консоли, только если это http или https.
+- Проекты, права в проекте (`SelfSubjectRulesReview`, кэш на 5 минут, сброс при 403, переподключении и входе;
+  `get_namespace_access(…, force)` обходит кэш — вкладка проекта перечитывает права раз в 5 минут и по «Обновить»),
+  workloads, поды, события, сеть, конфигурация (значения Secret не читаются интерфейсом), PVC, квоты — модули
+  `src-tauri/src/k8s/`.
+- YAML (`k8s/yaml.rs`, `redact`): объект как `kubectl get -o yaml`, но без `managedFields`, без аннотаций с копией
+  объекта (`kubectl.kubernetes.io/last-applied-configuration`, `kapp.k14s.io/original`,
+  `objectset.rio.cattle.io/applied`, `openshift.io/encoded-deployment-config`) и без `spec.tls.key` у Route — ключ не
+  уходит из Rust. Литеральные значения переменных окружения с секретными именами (`is_secret_name` и `PRIVATE`,
+  `AUTHORIZATION`) — `***`, как и `kubernetes.io/change-cause` с таким присваиванием; `valueFrom`, `command`/`args` и
+  прочие значения остаются.
 - Списки подов, workloads и событий проекта обновляются через watch (`src-tauri/src/watch/`), без прав на watch — опрос
-  раз в 10 с; логи (`src-tauri/src/logs/`) — фильтр в Rust, обрезка строк длиннее 64 КБ, переподключение в follow.
-  Сессии останавливаются `stop_session`, при отключении и удалении подключения.
+  раз в 10 с. Сессия держит не больше 10 000 строк на все виды (`truncated` у `Reset`), страница начального списка
+  ждётся не дольше таймаута запроса, ошибка одного вида workloads не скрывает остальные, ошибка учётных данных или TLS
+  завершает сессию (`fatal`). Скрытая вкладка рабочей области не обращается к кластеру (`src/lib/tabActive.ts`): watch
+  останавливается и при показе начинается заново, автообновление встаёт на паузу; лог со слежением идёт дальше.
+  «Первые 10 000» видны на экранах подов, workloads, событий, PVC, нод, обзора проекта и в дереве проектов; сеть,
+  конфигурация, квоты и обзор кластера `truncated` из Rust пока не передают.
+- Логи (`src-tauri/src/logs/`): фильтр в Rust, обрезка строк длиннее 64 КБ, байты не в UTF-8 — U+FFFD, счётчики
+  уходят и без новых строк; в follow — переподключение до 60 с, а 401, TLS и 403 завершают лог сразу, удалённый под или
+  остановленный контейнер — конец лога; `previous` идёт без follow. `save_logs` пишет атомарно (временный файл 0600,
+  fsync, rename; `AtomicFile` в `storage/fs.rs`), с таймаутом на строку и останавливается при отключении.
+- Сессии останавливаются `stop_session`, при отключении и удалении подключения, при сохранении профиля, новом токене,
+  обновлении подключения импортом и перезагрузке окна (`Sessions::stop_all`); интерфейс после этого начинает их
+  заново.
 - Одновременные чтения одного подключения подключаются один раз: кто ждал очереди, пока чужая попытка не удалась,
-  получает ту же ошибку (`AppState::connected`), — exec-плагин не запускается по разу на каждую подвкладку.
+  получает ту же ошибку (`AppState::connected`, в том числе через команду `connect`), — exec-плагин не запускается по
+  разу на каждую подвкладку. Клиент выбывает из пула, только если упал именно он (`evict_if_same`).
 
 ## Где хранятся данные
 - Профили и папки: `connections.json` в каталоге данных (macOS: `~/Library/Application Support/io.github.vvnovg.glafira.kubernetes/`).

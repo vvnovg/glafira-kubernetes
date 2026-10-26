@@ -101,12 +101,15 @@ operators). If the cluster does not let you list projects, enter them in
 ## Cluster overview {#overview}
 
 Under the connection details, the connection tab shows the [[ui:cluster.overview.title]]: whether the API server is
-ready (the `/readyz` checks, which any user may read, and the checks that failed), ready nodes by role, the number of
-projects, the Ingress classes and, with Gateway API, the Gateway classes. On OpenShift it adds the version, the update
-channel and the available updates, the infrastructure, the web console, the cluster operators that are not fine
-([[ui:cluster.overview.operatorsAll]] lists every one) and the machine config pools. A part you may not read shows
-a dash (—) with the reason; the rest is shown. On OpenShift the tab also shows until when the sign-in token is valid and warns
-an hour before it expires.
+ready (the `/readyz` checks, which any user may read, and the checks that failed; if `/readyz` does not answer, a dash
+with the reason), ready nodes by role, the number of projects, the Ingress classes and, with Gateway API, the Gateway
+classes. On OpenShift it adds the version (during an update — the last completed one, and the update in progress
+separately), the update channel and the available updates, the infrastructure, the web console (a link only for an
+http or https address), the cluster operators that are not fine ([[ui:cluster.overview.operatorsAll]] lists every
+one) and the machine config pools. A part you may not read shows a dash (—) with the reason; the rest is shown. On
+OpenShift the tab also shows until when the sign-in token is valid and warns an hour before it expires; the warning
+appears on time even if the tab stays open, and once the token has expired, [[ui:cluster.connection.reconnect]] is
+next to it.
 
 ## Nodes {#nodes}
 

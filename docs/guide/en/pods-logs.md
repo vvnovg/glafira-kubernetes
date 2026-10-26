@@ -4,9 +4,10 @@
 
 The pods of a project or a workload show the status as `kubectl get pods` does (`Running`, `CrashLoopBackOff`,
 `Init:1/2`, `Completed`…), the ready containers, the restarts and when the last one was, the node, the age, the QoS
-class and the owner. A problem pod — the image cannot be pulled, a container was killed for memory (`OOMKilled`),
-restarts in a loop, the pod waits to be scheduled (`Pending`) or has failed — is highlighted; the problems-only
-filter leaves just them.
+class and the owner. A native sidecar (an init container with `restartPolicy: Always`) counts with the containers
+once it has started and does not hold the pod in `Init`. A problem pod — the image cannot be pulled, a container was
+killed for memory (`OOMKilled`), restarts in a loop, the pod waits to be scheduled (`Pending`) or has failed — is
+highlighted; the problems-only filter leaves just them.
 
 ## Pod tab {#pod}
 
@@ -14,21 +15,33 @@ Click a pod to open its tab. [[ui:objects.tabs.overview]] shows the phase, the c
 the owner (a click opens the workload) and every container, init containers too: the image and the digest that is
 running, the state and the last state with the reason, the exit code and the time, the restarts, the probes, the
 requests and limits and the environment variables — names and sources only (a value in the spec, a ConfigMap or
-Secret key, a field), never the values. [[ui:objects.tabs.events]] and YAML are there too.
+Secret key, a field), never the values. [[ui:objects.tabs.events]] and YAML are there too. YAML shows the object
+without `managedFields` and without the annotations that copy the whole object; the values of environment variables
+with secret-looking names (PASSWORD, TOKEN, KEY…) are replaced by `***`, other values are shown.
 
 ## Logs {#logs}
 
 [[ui:logs.title]] shows the log of a container: choose the [[ui:logs.container]], the [[ui:logs.previous]], the
-[[ui:logs.tail]] (500 by default) or where to start from ([[ui:logs.since]]), and [[ui:logs.follow]].
+[[ui:logs.tail]] (500 by default) or where to start from ([[ui:logs.since]]), and [[ui:logs.follow]]. The previous
+run has already finished, so with [[ui:logs.previous]] following is off, and the option says why.
 [[ui:logs.timestamps]] adds the time of each line. The [[ui:logs.filter]] — a substring or a regular expression,
 [[ui:logs.caseSensitive]] if needed — runs in Glafira before the lines reach the window, and the counter shows how many
-lines were shown and how many were read. The window keeps up to 100,000 lines; a line longer than 64 KB is cut. When
-the connection is lost while following, Glafira reconnects from the last line it has, without repeats, and reports an
-error after a minute without success. [[ui:logs.save]] reads the log again with the same settings (without
-following) and saves the whole lines to a file.
+lines were shown and how many were read; it changes even when no new line matches.
+
+The window keeps the last 100,000 lines; when more arrive, a note above the lines says how many older lines were
+dropped. A line longer than 64 KB is cut and marked [[ui:logs.truncated]]; long lines scroll sideways. Bytes that are
+not UTF-8 are shown as replacement characters (�).
+
+When the connection is lost while following, the status says so, and Glafira reconnects from the last line it has,
+without repeats; it reports an error after a minute without success. An expired session, a TLS error or missing rights
+end the log at once. When the container stops or the pod is deleted, the log ends.
+
+[[ui:logs.save]] reads the log again with the same settings (without following) and saves the whole lines to a file.
+The file appears only when the whole log is read (on macOS and Linux only you may read it); disconnecting stops the
+saving, and a log that stops sending lines for longer than the request timeout ends it with an error.
 
 ## When the session expires {#session}
 
 If the token expires while you read the cluster, the tabs show the error with [[ui:objects.signInAgain]]: it opens the
-connection tab, where you sign in again. After that the open tabs of the connection read their data again by
-themselves, and the logs and the lists that update themselves start over.
+connection tab, where you sign in again (on the connection tab itself, it starts signing in). After that the open tabs
+of the connection read their data again by themselves, and the logs and the lists that update themselves start over.

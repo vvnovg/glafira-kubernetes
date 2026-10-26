@@ -50,3 +50,7 @@ HTTPRoute, GRPCRoute, Service, ConfigMap, Secret, PVC, HPA, ResourceQuota, Limit
 | capacity / allocatable | ёмкость / доступно подам | ресурсы ноды |
 | logs, follow | логи, следить за новыми строками | |
 | previous run | предыдущий запуск | логи прошлого запуска контейнера (`previous`) |
+| accepted / programmed | принят / настроен | заголовки условий `Accepted` и `Programmed` (Route, Gateway); значения условий не переводятся |
+| expired | истёк | срок сертификата Route, токена |
+| the list is incomplete | список неполный | показаны первые 10 000 объектов (`truncated`) |
+| dropped (log lines) | отброшены (строки лога) | ранние строки, которые не помещаются в окно логов |
