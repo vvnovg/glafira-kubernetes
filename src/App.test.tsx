@@ -9,10 +9,12 @@ vi.mock("./api/client", async (importOriginal) => {
       getLanguageSettings: vi.fn(() => new Promise(() => {})),
       listConnections: vi.fn().mockResolvedValue([]),
       listFolders: vi.fn().mockResolvedValue([]),
+      getMcpStatus: vi.fn().mockResolvedValue(mcpStatus()),
     },
   };
 });
 
+import { mcpStatus } from "./test/mcp";
 import App from "./App";
 
 test("пустое окно предлагает добавить подключение", async () => {

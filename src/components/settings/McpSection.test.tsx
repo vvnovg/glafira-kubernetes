@@ -24,11 +24,11 @@ import { api } from "../../api/client";
 import { McpSection } from "./McpSection";
 
 const configs = {
-  command: "/Applications/Glafira for Apache Kafka.app/Contents/MacOS/glafira-kafka",
+  command: "/Applications/Glafira for Kubernetes.app/Contents/MacOS/glafira-kubernetes",
   args: ["mcp"],
-  claudeDesktop: '{"mcpServers":{"glafira-kafka":{}}}',
-  claudeCode: "claude mcp add glafira-kafka -- /x mcp",
-  otherClient: "'/Applications/Glafira for Apache Kafka.app/Contents/MacOS/glafira-kafka' mcp",
+  claudeDesktop: '{"mcpServers":{"glafira-kubernetes":{}}}',
+  claudeCode: "claude mcp add glafira-kubernetes -- /x mcp",
+  otherClient: "'/Applications/Glafira for Kubernetes.app/Contents/MacOS/glafira-kubernetes' mcp",
 };
 
 beforeEach(() => {
@@ -49,7 +49,7 @@ describe("McpSection", () => {
     await user.click(toggle);
     expect(api.setMcpEnabled).toHaveBeenCalledWith(true);
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Сервер работает"));
-    expect(screen.getByText("claude mcp add glafira-kafka -- /x mcp")).toBeInTheDocument();
+    expect(screen.getByText("claude mcp add glafira-kubernetes -- /x mcp")).toBeInTheDocument();
     // Путь с пробелами — в кавычках, как у Claude Code.
     expect(screen.getByText(configs.otherClient)).toBeInTheDocument();
   });
@@ -89,7 +89,7 @@ describe("McpSection", () => {
     vi.mocked(api.revokeMcpClient).mockResolvedValue(status);
     vi.mocked(api.disconnectMcpSessions).mockResolvedValue(status);
     vi.mocked(api.getMcpAudit).mockResolvedValue([
-      { ts: 0, event: "call", client: "claude-ai 1.2", tool: "describe_topic", connection: { id: "c1", name: "dev" }, outcome: "error", code: "not_allowed", ms: 3 },
+      { ts: 0, event: "call", client: "claude-ai 1.2", tool: "describe_workload", connection: { id: "c1", name: "dev" }, outcome: "error", code: "not_allowed", ms: 3 },
       { ts: 0, event: "approved", session: "s1", client: "claude-ai" },
     ]);
     const user = userEvent.setup();
@@ -98,7 +98,7 @@ describe("McpSection", () => {
     expect(within(sessions).getByText("7")).toBeInTheDocument();
     await user.click(within(sessions).getByRole("button", { name: "Отключить" }));
     expect(api.disconnectMcpSessions).toHaveBeenCalledWith("s1");
-    expect(await screen.findByText("describe_topic")).toBeInTheDocument();
+    expect(await screen.findByText("describe_workload")).toBeInTheDocument();
     expect(screen.getByText("not_allowed")).toBeInTheDocument();
     expect(screen.getByText("Клиент подтверждён")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Отозвать" }));
