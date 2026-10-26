@@ -4,6 +4,8 @@ import type { Tab } from "../state/workspace";
 import { AboutPanel } from "./about/AboutPanel";
 import { ConnectionPanel } from "./cluster/ConnectionPanel";
 import { NodesPanel } from "./cluster/NodesPanel";
+import { PodPanel } from "./objects/PodPanel";
+import { WorkloadPanel } from "./objects/WorkloadPanel";
 import { ConnectionFormTab } from "./connections/ConnectionFormTab";
 import { SettingsPanel } from "./settings/SettingsPanel";
 
@@ -46,5 +48,9 @@ export function TabContent({ tab }: { tab: Tab }) {
       return <ConnectionPanel connectionId={tab.connectionId} />;
     case "nodes":
       return <NodesPanel connectionId={tab.connectionId} />;
+    case "workload":
+      return <WorkloadPanel connectionId={tab.connectionId} namespace={tab.namespace} kind={tab.workloadKind} name={tab.name} />;
+    case "pod":
+      return <PodPanel connectionId={tab.connectionId} namespace={tab.namespace} name={tab.name} />;
   }
 }

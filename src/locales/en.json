@@ -511,6 +511,95 @@
       "since": "Since"
     },
     "labels": "Labels",
-    "annotations": "Annotations"
+    "annotations": "Annotations",
+    "tabs": {
+      "overview": "Overview",
+      "pods": "Pods",
+      "events": "Events"
+    },
+    "watch": {
+      "polling": "No watch rights — the list refreshes every 10 s"
+    },
+    "pods": {
+      "title": "Pods",
+      "name": "Name",
+      "status": "Status",
+      "ready": "Ready",
+      "restarts": "Restarts",
+      "node": "Node",
+      "age": "Age",
+      "owner": "Owner",
+      "filter": "Filter by name",
+      "problemsOnly": "Problems only ({{count}})"
+    },
+    "pod": {
+      "phase": "Phase",
+      "ip": "Pod IP",
+      "hostIp": "node {{ip}}",
+      "serviceAccount": "Service account",
+      "started": "Started",
+      "volumes": "Volumes"
+    },
+    "events": {
+      "title": "Events",
+      "lastSeen": "Last",
+      "type": "Type",
+      "reason": "Reason",
+      "object": "Object",
+      "objectFilter": "Object, e.g. Pod/web",
+      "message": "Message",
+      "count": "Count",
+      "all": "all"
+    },
+    "workload": {
+      "problem": {
+        "unavailable": "Fewer replicas are available than desired",
+        "rolloutStuck": "The rollout exceeded its progress deadline",
+        "failed": "The Job failed"
+      },
+      "desired": "Desired",
+      "ready": "Ready",
+      "available": "Available",
+      "updated": "Updated",
+      "completions": "Completions",
+      "succeeded": "Succeeded",
+      "schedule": "Schedule",
+      "suspended": "suspended",
+      "lastSchedule": "Last run",
+      "activeJobs": "Running Jobs",
+      "selector": "Pod selector",
+      "strategy": "Strategy",
+      "created": "Created",
+      "conditions": "Conditions",
+      "hpaReplicas": "replicas now {{current}}, needed {{desired}}",
+      "pdbState": "disruptions allowed {{allowed}}, healthy {{healthy}} of {{desired}}",
+      "history": "Rollout history",
+      "revision": "Revision",
+      "revisionName": "Name",
+      "images": "Images",
+      "replicas": "Replicas",
+      "age": "Age",
+      "current": "current",
+      "containers": "Containers"
+    },
+    "container": {
+      "init": "init container",
+      "image": "Image",
+      "state": "State",
+      "lastState": "Last state",
+      "ready": "Ready",
+      "restarts": "Restarts",
+      "memory": "Memory",
+      "ports": "Ports",
+      "liveness": "Liveness probe",
+      "readiness": "Readiness probe",
+      "startup": "Startup probe",
+      "running": "running since {{since}}",
+      "waiting": "waiting: {{reason}}",
+      "terminated": "terminated: {{reason}}, exit code {{code}}, at {{at}}",
+      "literal": "value in the spec",
+      "env_one": "{{count}} environment variable (names and sources)",
+      "env_other": "{{count}} environment variables (names and sources)"
+    }
   }
 }

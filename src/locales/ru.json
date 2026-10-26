@@ -523,6 +523,97 @@
       "since": "С момента"
     },
     "labels": "Метки",
-    "annotations": "Аннотации"
+    "annotations": "Аннотации",
+    "tabs": {
+      "overview": "Обзор",
+      "pods": "Поды",
+      "events": "События"
+    },
+    "watch": {
+      "polling": "Нет прав на watch — список обновляется раз в 10 с"
+    },
+    "pods": {
+      "title": "Поды",
+      "name": "Имя",
+      "status": "Статус",
+      "ready": "Готово",
+      "restarts": "Рестарты",
+      "node": "Нода",
+      "age": "Возраст",
+      "owner": "Владелец",
+      "filter": "Фильтр по имени",
+      "problemsOnly": "Только проблемные ({{count}})"
+    },
+    "pod": {
+      "phase": "Фаза",
+      "ip": "IP пода",
+      "hostIp": "нода {{ip}}",
+      "serviceAccount": "Сервисная учётная запись",
+      "started": "Запущен",
+      "volumes": "Тома"
+    },
+    "events": {
+      "title": "События",
+      "lastSeen": "Последнее",
+      "type": "Тип",
+      "reason": "Причина",
+      "object": "Объект",
+      "objectFilter": "Объект, например Pod/web",
+      "message": "Сообщение",
+      "count": "Сколько раз",
+      "all": "все"
+    },
+    "workload": {
+      "problem": {
+        "unavailable": "Доступно меньше реплик, чем желаемо",
+        "rolloutStuck": "Выкладка не уложилась в отведённое время (progressDeadlineSeconds)",
+        "failed": "Job завершился ошибкой"
+      },
+      "desired": "Желаемо",
+      "ready": "Готово",
+      "available": "Доступно",
+      "updated": "Обновлено",
+      "completions": "Нужно завершений",
+      "succeeded": "Успешно",
+      "schedule": "Расписание",
+      "suspended": "приостановлен",
+      "lastSchedule": "Последний запуск",
+      "activeJobs": "Идущие Job",
+      "selector": "Селектор подов",
+      "strategy": "Стратегия",
+      "created": "Создан",
+      "conditions": "Условия",
+      "hpaReplicas": "реплик сейчас {{current}}, нужно {{desired}}",
+      "pdbState": "можно прервать {{allowed}}, здоровых {{healthy}} из {{desired}}",
+      "history": "История выкладки",
+      "revision": "Ревизия",
+      "revisionName": "Имя",
+      "images": "Образы",
+      "replicas": "Реплики",
+      "age": "Возраст",
+      "current": "текущая",
+      "containers": "Контейнеры"
+    },
+    "container": {
+      "init": "init-контейнер",
+      "image": "Образ",
+      "state": "Состояние",
+      "lastState": "Прошлое состояние",
+      "ready": "Готов",
+      "restarts": "Рестарты",
+      "memory": "Память",
+      "ports": "Порты",
+      "liveness": "Liveness-проба",
+      "readiness": "Readiness-проба",
+      "startup": "Startup-проба",
+      "running": "работает с {{since}}",
+      "waiting": "ждёт: {{reason}}",
+      "terminated": "завершён: {{reason}}, код {{code}}, {{at}}",
+      "literal": "значение в спецификации",
+      "env_one": "{{count}} переменная окружения (имена и источники)",
+      "env_few": "{{count}} переменные окружения (имена и источники)",
+      "env_many": "{{count}} переменных окружения (имена и источники)",
+      "env_other": "{{count}} переменной окружения (имена и источники)"
+    }
   }
 }

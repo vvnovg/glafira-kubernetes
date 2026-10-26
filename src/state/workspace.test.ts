@@ -35,6 +35,17 @@ describe("workspace", () => {
     expect(tabId({ kind: "connection-form", connectionId: "c" })).toBe("connection-form:c");
     expect(tabId({ kind: "cluster", connectionId: "c" })).toBe("cluster:c");
     expect(tabId({ kind: "help", chapter: "connections" })).toBe("help");
+    expect(tabId({ kind: "nodes", connectionId: "c" })).toBe("nodes:c");
+    expect(tabId({ kind: "workload", connectionId: "c", namespace: "team-a", workloadKind: "Deployment", name: "web" })).toBe("workload:c:team-a:Deployment:web");
+    expect(tabId({ kind: "pod", connectionId: "c", namespace: "team-a", name: "web-1" })).toBe("pod:c:team-a:web-1");
+  });
+
+  it("вкладки объектов закрываются вместе с подключением", () => {
+    const { open, closeForConnection } = useWorkspace.getState();
+    open({ kind: "pod", connectionId: "a", namespace: "team-a", name: "web-1" });
+    open({ kind: "workload", connectionId: "b", namespace: "team-a", workloadKind: "Job", name: "migrate" });
+    closeForConnection("a");
+    expect(useWorkspace.getState().tabs.map((t) => t.id)).toEqual(["workload:b:team-a:Job:migrate"]);
   });
 
   it("closeForConnection закрывает все вкладки подключения", () => {

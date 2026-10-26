@@ -1,9 +1,12 @@
 import { create } from "zustand";
+import type { WorkloadKind } from "../api/types";
 
 export type TabSpec =
   /** Обзор подключения и кластера: кто вошёл, права, API-сервер, ноды, у OpenShift — обновления и операторы. */
   | { kind: "cluster"; connectionId: string }
   | { kind: "nodes"; connectionId: string }
+  | { kind: "workload"; connectionId: string; namespace: string; workloadKind: WorkloadKind; name: string }
+  | { kind: "pod"; connectionId: string; namespace: string; name: string }
   /** folderId — папка нового подключения («Новое подключение здесь»). */
   | { kind: "connection-form"; connectionId: string | null; folderId?: string | null }
   | { kind: "about" }
@@ -23,6 +26,10 @@ export function tabId(spec: TabSpec): string {
       return "help";
     case "settings":
       return "settings";
+    case "workload":
+      return `workload:${spec.connectionId}:${spec.namespace}:${spec.workloadKind}:${spec.name}`;
+    case "pod":
+      return `pod:${spec.connectionId}:${spec.namespace}:${spec.name}`;
     default:
       return `${spec.kind}:${spec.connectionId}`;
   }
