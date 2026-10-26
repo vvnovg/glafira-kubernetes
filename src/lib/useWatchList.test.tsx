@@ -93,6 +93,16 @@ describe("useWatchList", () => {
     await waitFor(() => expect(api.startWatch).toHaveBeenCalledTimes(2));
   });
 
+  it("сброс без truncated — не обрезан", async () => {
+    const { result } = renderHook(() => useWatchList(PARAMS, podKey));
+    await waitFor(() => expect(api.startWatch).toHaveBeenCalledTimes(1));
+    act(() => emit({ type: "reset", items: [pod("a")], errors: [], truncated: true }));
+    expect(result.current.truncated).toBe(true);
+    act(() => emit({ type: "reset", items: [pod("a")], errors: [] }));
+    expect(result.current.truncated).toBe(false);
+    expect(result.current.rows.map((r) => r.name)).toEqual(["a"]);
+  });
+
   it("пустой пакет изменений снимает ошибку: сессия восстановилась", async () => {
     const { result } = renderHook(() => useWatchList(PARAMS, podKey));
     await waitFor(() => expect(api.startWatch).toHaveBeenCalledTimes(1));

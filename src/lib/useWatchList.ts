@@ -52,7 +52,7 @@ export function useWatchList<T extends WatchRow>(params: WatchParams | null, key
               status: s.status === "polling" ? "polling" : "live",
               error: null,
               kindErrors: e.errors,
-              truncated: e.truncated,
+              truncated: e.truncated ?? false,
             }));
             break;
           case "changes":

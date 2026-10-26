@@ -794,8 +794,8 @@ export type WatchRow = PodRow | WorkloadRow | EventRow;
 export type RowChange = { op: "upsert"; row: WatchRow } | { op: "delete"; key: string };
 
 export type WatchEvent =
-  /** Список целиком; `truncated` — сессия держит предельные 10 000 строк, остальные не показываются. */
-  | { type: "reset"; items: WatchRow[]; errors: KindError[]; truncated: boolean }
+  /** Список целиком; `truncated` — сессия держит предельные 10 000 строк, остальные не показываются. Rust присылает его всегда, нет значения — `false`. */
+  | { type: "reset"; items: WatchRow[]; errors: KindError[]; truncated?: boolean }
   | { type: "changes"; changes: RowChange[] }
   | { type: "polling" }
   | { type: "error"; error: AppError; fatal: boolean };

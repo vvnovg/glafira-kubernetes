@@ -14800,7 +14800,6 @@ describe("PodList", () => {
         type: "reset",
         items: [podRow("web-b"), podRow("web-a", { status: "CrashLoopBackOff", problem: "crashLoop", restarts: 7, lastRestart: 1 })],
         errors: [],
-        truncated: false,
       }),
     );
     expect(screen.getAllByRole("row").slice(1).map((r) => r.firstChild?.textContent)).toEqual(["web-a", "web-b"]);
@@ -16260,7 +16259,6 @@ describe("ProjectPanel", () => {
         type: "reset",
         items: [workloadRow("web"), workloadRow("report", { kind: "CronJob", schedule: "0 3 * * *" })],
         errors: [{ kind: "DaemonSet", error: { code: "FORBIDDEN", key: "errors.k8s.forbiddenIn", params: { verb: "list", resource: "daemonsets", namespace: "team-a" }, message: "x", retryable: false } }],
-        truncated: false,
       }),
     );
     expect(screen.getByText("DaemonSet: — Нет прав: list daemonsets в проекте «team-a»")).toBeInTheDocument();
