@@ -21,7 +21,8 @@
       "minutes": "{{n}} мин",
       "hours": "{{n}} ч",
       "days": "{{n}} д"
-    }
+    },
+    "copyFailed": "Не удалось скопировать в буфер обмена"
   },
   "errors": {
     "generic": "{{message}}",

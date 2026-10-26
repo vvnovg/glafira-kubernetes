@@ -28,12 +28,24 @@ const pod = (name: string, status = "Running"): PodRow => ({
 
 const PARAMS: WatchParams = { connectionId: "c1", namespace: "team-a", kind: "pods" };
 
+/** Обработчик событий последней начатой сессии. */
 let emit: (e: WatchEvent) => void = () => undefined;
+/** Обработчики всех начатых сессий по порядку: у перезапущенной сессии прежний обработчик ещё жив. */
+let emits: Array<(e: WatchEvent) => void> = [];
+
+/** Ответ `startWatch`, который приходит, когда его решит тест. */
+function deferred<T>() {
+  let resolve: (v: T) => void = () => undefined;
+  const promise = new Promise<T>((r) => (resolve = r));
+  return { promise, resolve };
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
+  emits = [];
   vi.mocked(api.startWatch).mockImplementation(async (_p, onEvent) => {
     emit = onEvent;
+    emits.push(onEvent);
     return `s${vi.mocked(api.startWatch).mock.calls.length}`;
   });
   vi.mocked(api.stopSession).mockResolvedValue(true);
@@ -127,6 +139,115 @@ describe("useWatchList", () => {
     expect(api.stopSession).toHaveBeenCalledWith("s1");
     unmount();
     expect(api.stopSession).toHaveBeenCalledWith("s2");
+  });
+
+  describe("гонки сессий", () => {
+    it("id сессии пришёл после размонтирования: сессия останавливается, состояние не трогается", async () => {
+      const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const late = deferred<string>();
+      vi.mocked(api.startWatch).mockImplementationOnce(() => late.promise);
+      const { result, unmount } = renderHook(() => useWatchList(PARAMS, podKey));
+      await waitFor(() => expect(api.startWatch).toHaveBeenCalledTimes(1));
+      const before = result.current;
+      unmount();
+      expect(api.stopSession).not.toHaveBeenCalled();
+      await act(async () => late.resolve("late"));
+      expect(api.stopSession).toHaveBeenCalledTimes(1);
+      expect(api.stopSession).toHaveBeenCalledWith("late");
+      expect(result.current).toBe(before);
+      expect(errors).not.toHaveBeenCalled();
+      errors.mockRestore();
+    });
+
+    it("id сессии пришёл после перезапуска: старая сессия останавливается, строки новой на месте", async () => {
+      const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const late = deferred<string>();
+      vi.mocked(api.startWatch).mockImplementationOnce(() => late.promise);
+      const { result } = renderHook(() => useWatchList(PARAMS, podKey));
+      await waitFor(() => expect(api.startWatch).toHaveBeenCalledTimes(1));
+      await act(async () => {
+        useConnectionEpoch.getState().bump("c1");
+      });
+      await waitFor(() => expect(api.startWatch).toHaveBeenCalledTimes(2));
+      act(() => emit({ type: "reset", items: [pod("new")], errors: [], truncated: false }));
+      const before = result.current;
+      expect(api.stopSession).not.toHaveBeenCalled();
+      await act(async () => late.resolve("late"));
+      expect(api.stopSession).toHaveBeenCalledTimes(1);
+      expect(api.stopSession).toHaveBeenCalledWith("late");
+      expect(result.current).toBe(before);
+      expect(result.current.rows.map((r) => r.name)).toEqual(["new"]);
+      expect(errors).not.toHaveBeenCalled();
+      errors.mockRestore();
+    });
+
+    it("события прежней сессии после перезапуска и размонтирования игнорируются", async () => {
+      const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const { result, unmount } = renderHook(() => useWatchList(PARAMS, podKey));
+      await waitFor(() => expect(emits).toHaveLength(1));
+      const [first] = emits;
+      act(() => first({ type: "reset", items: [pod("old")], errors: [], truncated: true }));
+      expect(result.current.rows.map((r) => r.name)).toEqual(["old"]);
+      await act(async () => {
+        useConnectionEpoch.getState().bump("c1");
+      });
+      await waitFor(() => expect(emits).toHaveLength(2));
+      act(() => emits[1]({ type: "reset", items: [pod("new")], errors: [], truncated: false }));
+      const before = result.current;
+      // Запоздавшие события первой сессии всех видов.
+      act(() => first({ type: "reset", items: [pod("old-2")], errors: [], truncated: true }));
+      act(() => first({ type: "changes", changes: [{ op: "upsert", row: pod("old-3") }] }));
+      act(() => first({ type: "polling" }));
+      act(() => first({ type: "error", error: { code: "CONNECTION_FAILED", message: "x", retryable: true }, fatal: true }));
+      expect(result.current).toBe(before);
+      expect(result.current.rows.map((r) => r.name)).toEqual(["new"]);
+      expect(result.current.truncated).toBe(false);
+      expect(result.current.status).toBe("live");
+      unmount();
+      act(() => emits[1]({ type: "reset", items: [pod("after-unmount")], errors: [], truncated: false }));
+      expect(errors).not.toHaveBeenCalled();
+      errors.mockRestore();
+    });
+  });
+
+  describe("смена параметров", () => {
+    it("другой проект: ни один кадр не показывает строки прежнего", async () => {
+      const seen: string[][] = [];
+      const { rerender } = renderHook(
+        ({ params }: { params: WatchParams | null }) => {
+          const state = useWatchList(params, podKey);
+          seen.push(state.rows.map((r) => r.name));
+          return state;
+        },
+        { initialProps: { params: PARAMS as WatchParams | null } },
+      );
+      await waitFor(() => expect(api.startWatch).toHaveBeenCalledTimes(1));
+      act(() => emit({ type: "reset", items: [pod("a-1")], errors: [], truncated: true }));
+      expect(seen[seen.length - 1]).toEqual(["a-1"]);
+      const rendersBefore = seen.length;
+      rerender({ params: { ...PARAMS, namespace: "team-b" } });
+      expect(seen.slice(rendersBefore).flat()).toEqual([]);
+      await waitFor(() => expect(api.startWatch).toHaveBeenCalledTimes(2));
+      expect(api.stopSession).toHaveBeenCalledWith("s1");
+    });
+
+    it("params null: строки и статус сбрасываются, сессия останавливается", async () => {
+      const { result, rerender } = renderHook(({ params }: { params: WatchParams | null }) => useWatchList(params, podKey), {
+        initialProps: { params: PARAMS as WatchParams | null },
+      });
+      await waitFor(() => expect(api.startWatch).toHaveBeenCalledTimes(1));
+      act(() => emit({ type: "reset", items: [pod("a")], errors: [], truncated: true }));
+      expect(result.current.status).toBe("live");
+      rerender({ params: null });
+      expect(result.current.rows).toEqual([]);
+      expect(result.current.status).toBe("connecting");
+      expect(result.current.truncated).toBe(false);
+      await waitFor(() => expect(api.stopSession).toHaveBeenCalledWith("s1"));
+      // Возврат к тем же параметрам начинает с чистого состояния, а не со строк до `null`.
+      rerender({ params: PARAMS });
+      expect(result.current.rows).toEqual([]);
+      await waitFor(() => expect(api.startWatch).toHaveBeenCalledTimes(2));
+    });
   });
 
   it("без параметров сессии нет", () => {

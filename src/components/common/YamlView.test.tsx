@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderWithClient } from "../../test/render";
@@ -14,7 +14,10 @@ import { KeyValues } from "./KeyValues";
 import { SubTabs } from "./SubTabs";
 import { YamlView } from "./YamlView";
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.useRealTimers();
+});
 
 describe("YamlView и мелкие части экранов", () => {
   it("YAML объекта и копирование", async () => {
@@ -27,6 +30,60 @@ describe("YamlView и мелкие части экранов", () => {
     await user.click(screen.getByRole("button", { name: "Копировать" }));
     expect(writeText).toHaveBeenCalledWith("kind: Deployment\nmetadata:\n  name: web\n");
     await waitFor(() => expect(screen.getByText("Скопировано")).toBeInTheDocument());
+  });
+
+  it("«Скопировано» исчезает через 2 с", async () => {
+    vi.mocked(api.getYaml).mockResolvedValue("kind: Pod\n");
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    renderWithClient(<YamlView connectionId="c1" namespace="team-a" kind="Pod" name="web" />);
+    await screen.findByText(/kind: Pod/);
+    await user.click(screen.getByRole("button", { name: "Копировать" }));
+    expect(await screen.findByText("Скопировано")).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1500);
+    });
+    expect(screen.getByText("Скопировано")).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(screen.queryByText("Скопировано")).not.toBeInTheDocument();
+  });
+
+  it("новый текст YAML снимает «Скопировано»: скопирован был прежний", async () => {
+    vi.mocked(api.getYaml).mockResolvedValueOnce("kind: Pod\nmetadata:\n  resourceVersion: \"1\"\n").mockResolvedValue("kind: Pod\nmetadata:\n  resourceVersion: \"2\"\n");
+    const user = userEvent.setup();
+    vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    renderWithClient(<YamlView connectionId="c1" namespace="team-a" kind="Pod" name="web" />);
+    await screen.findByText(/resourceVersion: "1"/);
+    await user.click(screen.getByRole("button", { name: "Копировать" }));
+    expect(await screen.findByText("Скопировано")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Обновить" }));
+    await screen.findByText(/resourceVersion: "2"/);
+    expect(screen.queryByText("Скопировано")).not.toBeInTheDocument();
+  });
+
+  it("отказ буфера обмена виден: асинхронный и синхронный", async () => {
+    vi.mocked(api.getYaml).mockResolvedValue("kind: Pod\n");
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockRejectedValue(new Error("denied"));
+    renderWithClient(<YamlView connectionId="c1" namespace="team-a" kind="Pod" name="web" />);
+    await screen.findByText(/kind: Pod/);
+    await user.click(screen.getByRole("button", { name: "Копировать" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось скопировать в буфер обмена");
+    expect(screen.queryByText("Скопировано")).not.toBeInTheDocument();
+    // Вторая попытка удалась: отказ заменяется итогом.
+    writeText.mockResolvedValue();
+    await user.click(screen.getByRole("button", { name: "Копировать" }));
+    expect(await screen.findByText("Скопировано")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    // Буфера нет вовсе (`writeText` бросает сразу, не промисом).
+    writeText.mockImplementation(() => {
+      throw new TypeError("clipboard unavailable");
+    });
+    await user.click(screen.getByRole("button", { name: "Копировать" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось скопировать в буфер обмена");
   });
 
   it("условия, метки и подвкладки", async () => {

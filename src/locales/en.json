@@ -21,7 +21,8 @@
       "minutes": "{{n}}m",
       "hours": "{{n}}h",
       "days": "{{n}}d"
-    }
+    },
+    "copyFailed": "Could not copy to the clipboard"
   },
   "errors": {
     "generic": "{{message}}",

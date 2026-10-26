@@ -38,6 +38,52 @@ describe("VirtualTable", () => {
     expect(onRowClick).toHaveBeenLastCalledWith(rows[1]);
   });
 
+  it("пробел выбирает строку, Enter и пробел от кнопки внутри ячейки — нет", async () => {
+    const onRowClick = vi.fn();
+    const onInner = vi.fn();
+    const user = userEvent.setup();
+    const withButton = [
+      columns[0],
+      {
+        key: "act",
+        title: "Действие",
+        width: "80px",
+        render: (r: (typeof rows)[number]) => (
+          <button type="button" onClick={(e) => (e.stopPropagation(), onInner(r.name))}>
+            {`Открыть ${r.name}`}
+          </button>
+        ),
+      },
+    ];
+    render(<VirtualTable label="Поды" rows={rows} columns={withButton} rowKey={(r) => r.name} onRowClick={onRowClick} />);
+    const [, web] = screen.getAllByRole("row");
+    web.focus();
+    await user.keyboard(" ");
+    expect(onRowClick).toHaveBeenCalledTimes(1);
+    expect(onRowClick).toHaveBeenLastCalledWith(rows[0]);
+    // Пробел на строке не прокручивает список.
+    const space = new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true });
+    web.dispatchEvent(space);
+    expect(space.defaultPrevented).toBe(true);
+    expect(onRowClick).toHaveBeenCalledTimes(2);
+
+    // Кнопка внутри ячейки получает свои Enter и пробел как есть: строка не выбирается, действие по умолчанию не отменяется.
+    onRowClick.mockClear();
+    const button = screen.getByRole("button", { name: "Открыть api" });
+    const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    button.dispatchEvent(enter);
+    const spaceOnButton = new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true });
+    button.dispatchEvent(spaceOnButton);
+    expect(enter.defaultPrevented).toBe(false);
+    expect(spaceOnButton.defaultPrevented).toBe(false);
+    button.focus();
+    await user.keyboard("{Enter}");
+    await user.keyboard(" ");
+    expect(onInner).toHaveBeenCalledTimes(2);
+    expect(onInner).toHaveBeenCalledWith("api");
+    expect(onRowClick).not.toHaveBeenCalled();
+  });
+
   it("пустой список и автообновление", async () => {
     const onInterval = vi.fn();
     const onRefresh = vi.fn();

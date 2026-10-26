@@ -31,7 +31,15 @@ const INITIAL = { rows: [], status: "connecting" as const, error: null, kindErro
 export function useWatchList<T extends WatchRow>(params: WatchParams | null, keyOf: (row: T) => string): WatchState<T> {
   const epoch = useEpoch(params?.connectionId ?? "");
   const paramsKey = params ? JSON.stringify(params) : null;
+  const sessionKey = paramsKey === null ? null : `${epoch}:${paramsKey}`;
   const [state, setState] = useState<WatchState<T>>(INITIAL);
+  // Другой проект или вид, вход заново, `params` null: строки прежней сессии не показываются ни в одном кадре,
+  // состояние сбрасывается прямо при рендере, а не в эффекте.
+  const [stateKey, setStateKey] = useState(sessionKey);
+  if (stateKey !== sessionKey) {
+    setStateKey(sessionKey);
+    setState(INITIAL);
+  }
 
   useEffect(() => {
     if (!paramsKey) return;
@@ -39,7 +47,6 @@ export function useWatchList<T extends WatchRow>(params: WatchParams | null, key
     let active = true;
     let sessionId: string | null = null;
     const rows = new Map<string, T>();
-    setState(INITIAL);
     api
       .startWatch(p, (e) => {
         if (!active) return;
@@ -85,5 +92,5 @@ export function useWatchList<T extends WatchRow>(params: WatchParams | null, key
     // keyOf — функция модуля; сессия зависит только от параметров и входа.
   }, [paramsKey, epoch]);
 
-  return state;
+  return stateKey === sessionKey ? state : INITIAL;
 }

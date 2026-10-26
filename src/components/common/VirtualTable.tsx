@@ -43,6 +43,8 @@ export function VirtualTable<T>({
     tabIndex: 0,
     onClick: () => onRowClick?.(row),
     onKeyDown: (e: KeyboardEvent) => {
+      // Enter и пробел от кнопки или ссылки внутри ячейки её же и нажимают: строку они не выбирают.
+      if (e.target !== e.currentTarget) return;
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
         onRowClick?.(row);
