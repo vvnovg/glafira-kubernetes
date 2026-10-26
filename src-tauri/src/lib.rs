@@ -5,6 +5,7 @@ pub mod commands;
 pub mod der;
 mod dock_name;
 pub mod error;
+pub mod health;
 pub mod k8s;
 pub mod logging;
 pub mod logs;
