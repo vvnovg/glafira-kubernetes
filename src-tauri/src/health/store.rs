@@ -193,19 +193,22 @@ fn same_title(a: &str, b: &str) -> bool {
 /// должно укладываться в 255 байт имени файла.
 pub const MAX_ID_BYTES: usize = 100;
 
-/// Имя файла по id подключения. Id, который создаёт приложение (uuid), — как есть; любой другой
-/// (импортированный файл подключений может принести что угодно) — `h-<hex байтов id>`: такое имя
-/// безопасно для файловой системы и однозначно. Пустой и слишком длинный id файла не имеют.
-/// Id, который сам начинается с «h-» или «H-» (файловые системы macOS и Windows не различают регистр),
-/// тоже кодируется — иначе он совпал бы с hex-именем другого id.
+/// Имя файла по id подключения. Id, который создаёт приложение (uuid в нижнем регистре), — как
+/// есть; любой другой (импортированный файл подключений может принести что угодно) — `h-<hex байтов id>`:
+/// такое имя безопасно для файловой системы и однозначно. Простое имя состоит только из строчных
+/// букв, цифр, «-» и «_»: файловые системы macOS и Windows по умолчанию не различают регистр, и `Prod-1`
+/// с `prod-1` делили бы один файл (проверка одного подключения досталась бы другому, в том числе
+/// подключению с выключенным доступом LLM), поэтому id с заглавной буквой кодируется. Пустой и слишком
+/// длинный id файла не имеют. Id, который сам начинается с «h-», тоже кодируется — иначе он совпал бы
+/// с hex-именем другого id (hex пишется строчными, а «H-…» кодируется как любой id с заглавной буквой).
 pub(crate) fn file_stem(id: &str) -> Option<String> {
     if id.is_empty() || id.len() > MAX_ID_BYTES {
         return None;
     }
-    let plain = !id.get(..2).is_some_and(|p| p.eq_ignore_ascii_case("h-"))
+    let plain = !id.starts_with("h-")
         && id
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
     Some(if plain {
         id.to_string()
     } else {
@@ -752,6 +755,40 @@ mod tests {
             file_stem(&"a".repeat(MAX_ID_BYTES)).as_deref(),
             Some("a".repeat(MAX_ID_BYTES).as_str())
         );
+    }
+
+    #[test]
+    fn ids_that_differ_only_in_case_get_different_file_names() {
+        // На macOS и Windows `Prod-1.json` и `prod-1.json` — один файл: простое имя только из
+        // строчных букв, цифр, «-» и «_», всё с заглавной буквой кодируется.
+        let (d, s) = store();
+        assert_eq!(file_stem("prod-1").as_deref(), Some("prod-1"));
+        assert_eq!(
+            file_stem("Prod-1").as_deref(),
+            Some("h-50726f642d31"),
+            "заглавная буква — hex"
+        );
+        assert_ne!(file_stem("Prod-1"), file_stem("prod-1"));
+        // Имена не совпадают и без учёта регистра: так их различит и регистронезависимая ФС.
+        let all = [
+            "prod-1", "Prod-1", "PROD-1", "pRod-1", "h-1", "H-1", "A_b", "a_b",
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for id in all {
+            let stem = file_stem(id).unwrap();
+            assert!(seen.insert(stem.to_lowercase()), "{id}: {stem}");
+        }
+        // Настоящие файлы: настройки одного не видны другому.
+        s.set_ignored("prod-1", "k", true, T0).unwrap();
+        assert!(!s.load("Prod-1", T0).unwrap().is_ignored("k"));
+        assert!(s.load("prod-1", T0).unwrap().is_ignored("k"));
+        s.set_ignored("Prod-1", "j", true, T0).unwrap();
+        assert!(!s.load("prod-1", T0).unwrap().is_ignored("j"));
+        assert!(d.path().join("health/prod-1.json").exists());
+        assert!(d.path().join("health/h-50726f642d31.json").exists());
+        // Uuid приложения (строчные буквы) — без изменений.
+        let uuid = "6cbcdae0-39c3-4187-9ebb-3c0279a56a4a";
+        assert_eq!(file_stem(uuid).as_deref(), Some(uuid));
     }
 
     #[test]
