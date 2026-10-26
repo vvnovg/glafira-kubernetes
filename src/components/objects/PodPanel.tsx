@@ -11,10 +11,11 @@ import { ReadError } from "../common/ReadError";
 import { RefreshControls, useRefreshInterval } from "../common/RefreshControls";
 import { SubTabs } from "../common/SubTabs";
 import { YamlView } from "../common/YamlView";
+import { LogsView } from "../logs/LogsView";
 import { ContainerCard } from "./ContainerCard";
 import { ObjectEvents } from "./EventList";
 
-type Sub = "overview" | "events" | "yaml";
+type Sub = "overview" | "logs" | "events" | "yaml";
 
 const WORKLOAD_KINDS: string[] = ["Deployment", "StatefulSet", "DaemonSet", "DeploymentConfig", "Job", "CronJob"] satisfies WorkloadKind[];
 
@@ -22,8 +23,11 @@ const WORKLOAD_KINDS: string[] = ["Deployment", "StatefulSet", "DaemonSet", "Dep
 export function PodPanel({ connectionId, namespace, name }: { connectionId: string; namespace: string; name: string }) {
   const { t } = useTranslation();
   const [sub, setSub] = useState<Sub>("overview");
+  // Контейнеры для логов — из того же запроса, что и обзор.
+  const details = useQuery({ queryKey: ["pod", connectionId, namespace, name], queryFn: () => api.getPod(connectionId, namespace, name) });
   const tabs: { id: Sub; label: string }[] = [
     { id: "overview", label: t("objects.tabs.overview") },
+    { id: "logs", label: t("logs.title") },
     { id: "events", label: t("objects.tabs.events") },
     { id: "yaml", label: "YAML" },
   ];
@@ -35,6 +39,9 @@ export function PodPanel({ connectionId, namespace, name }: { connectionId: stri
       </div>
       <SubTabs tabs={tabs} active={sub} onChange={setSub} />
       {sub === "overview" && <PodOverview connectionId={connectionId} namespace={namespace} name={name} />}
+      {sub === "logs" && details.isPending && <p className="muted">{t("common.loading")}</p>}
+      {sub === "logs" && details.data && <LogsView connectionId={connectionId} namespace={namespace} pod={name} containers={details.data.containers} />}
+      {sub === "logs" && details.error && <ReadError error={details.error} connectionId={connectionId} onRetry={() => void details.refetch()} />}
       {sub === "events" && <ObjectEvents connectionId={connectionId} namespace={namespace} object={{ kind: "Pod", name }} />}
       {sub === "yaml" && <YamlView connectionId={connectionId} namespace={namespace} kind="Pod" name={name} />}
     </div>

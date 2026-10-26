@@ -17,3 +17,6 @@ th.cap::first-letter { text-transform: uppercase; }
 .facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 12px; margin: 0; }
 .facts dt { color: var(--muted); }
 .facts dd { margin: 0; overflow-wrap: anywhere; }
+.log-lines { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; min-height: 360px; }
+.log-line { position: absolute; left: 0; right: 0; padding: 0 8px; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+input.narrow { width: 70px; }

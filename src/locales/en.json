@@ -214,6 +214,9 @@
     "import": {
       "target": "Where new folders and connections go. Existing ones stay where they are.",
       "updateExisting": "Connections that already exist get the settings from the file; your tokens, keys and their place in the tree are kept."
+    },
+    "logs": {
+      "filter": "The filter runs in Glafira before the lines reach the window: a substring or a regular expression (regex). Lines that do not match are counted but not shown."
     }
   },
   "connections": {
@@ -685,5 +688,29 @@
       "used": "Used",
       "hard": "Limit"
     }
+  },
+  "logs": {
+    "title": "Logs",
+    "container": "Container",
+    "previous": "Previous run",
+    "tail": "Last lines",
+    "since": "Since",
+    "sinceAll": "the start",
+    "sinceLast": "last {{minutes}} min",
+    "follow": "Follow new lines",
+    "timestamps": "Line timestamps",
+    "filter": "Filter",
+    "caseSensitive": "Match case",
+    "counters": "shown {{shown}} of {{scanned}}",
+    "status": {
+      "connecting": "connecting…",
+      "streaming": "streaming",
+      "reconnecting": "connection lost — reconnecting…",
+      "ended": "end of the log",
+      "error": "error"
+    },
+    "save": "Save to file…",
+    "saved": "Lines saved: {{count}} — {{path}}",
+    "truncated": "(line truncated)"
   }
 }
