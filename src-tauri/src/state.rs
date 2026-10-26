@@ -7,7 +7,7 @@ use crate::error::{AppError, AppResult, ErrorCode};
 use crate::k8s::connectivity::ensure_allowed;
 use crate::k8s::errors::breaks_client;
 use crate::k8s::pool::{ClientPool, Connected, open};
-use crate::k8s::read::{Observed, observe};
+use crate::k8s::read::{Observed, check_namespace, observe};
 use crate::secrets::SecretStore;
 use crate::storage::connections::ConnectionStore;
 use crate::storage::profile::AuthConfig;
@@ -110,12 +110,15 @@ impl AppState {
 
     /// Чтение в проекте: как `read`, а ответ 403 ещё и сбрасывает кэш прав этого проекта —
     /// права могли измениться (спец. §5.4). Как и в `read`, считается и 403 части экрана или
-    /// вида списка, при котором `f` вернул `Ok`.
+    /// вида списка, при котором `f` вернул `Ok`. Namespace из webview проверяется до
+    /// подключения и запросов (`check_namespace`): через `read_in` идут все чтения проекта,
+    /// в том числе сессии watch и логов.
     pub async fn read_in<T, F, Fut>(&self, id: &str, namespace: &str, f: F) -> AppResult<T>
     where
         F: FnOnce(Arc<Connected>) -> Fut,
         Fut: Future<Output = AppResult<T>>,
     {
+        check_namespace(namespace)?;
         let (result, seen) = self.read_observed(id, f).await;
         if seen.forbidden
             || result
@@ -520,6 +523,65 @@ mod tests {
         );
         assert!(st.access.get("a", "team-b").is_some());
         assert!(st.pool.get("a").is_some(), "403 клиент не сбрасывает");
+    }
+
+    /// Namespace, который увёл бы запрос по другому пути, отклоняется до подключения: `f` не
+    /// вызывается, запросов нет. Имя объекта с `..` отклоняет `ReadClient`, правильное читается.
+    #[tokio::test]
+    async fn read_in_rejects_names_before_any_request() {
+        use k8s_openapi::api::core::v1::ConfigMap;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let st = state(dir.path());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = requests.clone();
+        pool_mock(&st, move |s| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(s.path(), "/api/v1/namespaces/team-a/configmaps/web");
+            (
+                200,
+                serde_json::json!({"apiVersion": "v1", "kind": "ConfigMap",
+                    "metadata": {"name": "web", "namespace": "team-a"}}),
+            )
+        });
+        let called = &AtomicBool::new(false);
+        for (id, ns) in [
+            ("a", "team-a/../kube-system"),
+            ("a", "a/b"),
+            ("a", ".."),
+            ("a", ""),
+            ("nope", "a/b"),
+        ] {
+            let e = st
+                .read_in(id, ns, move |_| async move {
+                    called.store(true, Ordering::SeqCst);
+                    Ok(())
+                })
+                .await
+                .unwrap_err();
+            assert_eq!(e.code, ErrorCode::InvalidInput, "{ns}: {e:?}");
+            assert_eq!(e.key, "errors.connections.badNamespace");
+        }
+        assert!(!called.load(Ordering::SeqCst), "f не вызывался");
+        let e = st
+            .read_in("a", "team-a", |c| async move {
+                c.reader().get::<ConfigMap>("team-a", "../secrets/db").await
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (ErrorCode::InvalidInput, "errors.k8s.badName")
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 0, "запросов не было");
+        let cm = st
+            .read_in("a", "team-a", |c| async move {
+                c.reader().get::<ConfigMap>("team-a", "web").await
+            })
+            .await
+            .unwrap();
+        assert_eq!(cm.metadata.name.as_deref(), Some("web"));
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
     }
 
     /// Подключение `a` в пуле: мок API-сервера с ответами `handler`.

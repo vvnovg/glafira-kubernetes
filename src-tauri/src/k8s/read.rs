@@ -94,6 +94,44 @@ fn noted<T>(r: AppResult<T>) -> AppResult<T> {
     r
 }
 
+/// Проект (namespace) запроса — имя DNS-1123 (`is_valid_namespace`). `kube` подставляет его в
+/// путь как есть, без кодирования: `a/../b` увёл бы запрос по другому пути, а прокси,
+/// который нормализует пути, — к другому объекту.
+pub fn check_namespace(namespace: &str) -> AppResult<()> {
+    if crate::storage::profile::is_valid_namespace(namespace) {
+        return Ok(());
+    }
+    Err(crate::app_err!(
+        ErrorCode::InvalidInput,
+        "errors.connections.badNamespace",
+        "“{{name}}” is not a valid project name: use lowercase letters, digits and “-”",
+        name = namespace.escape_debug()
+    ))
+}
+
+/// Имя объекта запроса: не пустое и не `.`, печатаемый ASCII без `/`, `\`, `%`, `?`, `#`, `;`
+/// и без `..`. `ReadClient` вида не знает, поэтому правило — самое мягкое из правил имён
+/// Kubernetes (`path.IsValidPathSegmentName`: не `.` и `..`, без `/` и `%`; под него подходит и
+/// `sha256~…` у `UserOAuthAccessToken`, который DNS-1123 не пропустил бы) и сверх него то, что
+/// по-своему понимают URL (`?`, `#`) и нормализующие прокси (`\`, `..;`, пробелы, не-ASCII).
+pub fn check_name(name: &str) -> AppResult<()> {
+    let ok = !name.is_empty()
+        && name != "."
+        && !name.contains("..")
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && !b"/\\%?#;".contains(&b));
+    if ok {
+        return Ok(());
+    }
+    Err(crate::app_err!(
+        ErrorCode::InvalidInput,
+        "errors.k8s.badName",
+        "“{{name}}” is not a valid object name",
+        name = name.escape_debug()
+    ))
+}
+
 /// Клиент только для чтения поверх `kube::Client` подключения.
 #[derive(Clone)]
 pub struct ReadClient {
@@ -129,6 +167,9 @@ impl ReadClient {
             + DeserializeOwned
             + Debug,
     {
+        if let Some(ns) = namespace {
+            check_namespace(ns)?;
+        }
         let api = match namespace {
             Some(ns) => Api::namespaced(self.client.clone(), ns),
             None => Api::all(self.client.clone()),
@@ -156,6 +197,9 @@ impl ReadClient {
         namespace: Option<&str>,
         params: &ListParams,
     ) -> AppResult<Listed<DynamicObject>> {
+        if let Some(ns) = namespace {
+            check_namespace(ns)?;
+        }
         self.pages(&self.dynamic(ar, namespace), params, MAX_ITEMS)
             .await
     }
@@ -210,6 +254,8 @@ impl ReadClient {
             + DeserializeOwned
             + Debug,
     {
+        check_namespace(namespace)?;
+        check_name(name)?;
         let api: Api<K> = Api::namespaced(self.client.clone(), namespace);
         self.call(api.get(name)).await
     }
@@ -222,6 +268,8 @@ impl ReadClient {
             + DeserializeOwned
             + Debug,
     {
+        check_namespace(namespace)?;
+        check_name(name)?;
         let api: Api<K> = Api::namespaced(self.client.clone(), namespace);
         self.call(api.get_opt(name)).await
     }
@@ -233,6 +281,7 @@ impl ReadClient {
             + DeserializeOwned
             + Debug,
     {
+        check_name(name)?;
         let api: Api<K> = Api::all(self.client.clone());
         self.call(api.get(name)).await
     }
@@ -243,6 +292,10 @@ impl ReadClient {
         namespace: Option<&str>,
         name: &str,
     ) -> AppResult<DynamicObject> {
+        if let Some(ns) = namespace {
+            check_namespace(ns)?;
+        }
+        check_name(name)?;
         self.call(self.dynamic(ar, namespace).get(name)).await
     }
 
@@ -256,7 +309,8 @@ impl ReadClient {
     }
 
     /// Изменения объектов namespace (`kube::runtime::watcher`): список, затем watch; после
-    /// разрыва watcher сам читает список заново. Таймаут к потоку не применяется.
+    /// разрыва watcher сам читает список заново. Таймаут к потоку не применяется. Ошибку
+    /// поток вернуть не может: namespace сессии проверяет `AppState::read_in` (`check_namespace`).
     pub fn watch<K>(
         &self,
         namespace: &str,
@@ -286,6 +340,7 @@ impl ReadClient {
     /// Права пользователя в namespace (`SelfSubjectRulesReview`). Проверка создаётся запросом
     /// POST, но в кластере ничего не меняет.
     pub async fn rules_review(&self, namespace: &str) -> AppResult<SubjectRulesReviewStatus> {
+        check_namespace(namespace)?;
         let api: Api<SelfSubjectRulesReview> = Api::all(self.client.clone());
         let review = SelfSubjectRulesReview {
             spec: SelfSubjectRulesReviewSpec {
@@ -317,6 +372,8 @@ impl ReadClient {
         pod: &str,
         params: &LogParams,
     ) -> AppResult<impl AsyncBufRead + use<>> {
+        check_namespace(namespace)?;
+        check_name(pod)?;
         let api: Api<k8s_openapi::api::core::v1::Pod> =
             Api::namespaced(self.client.clone(), namespace);
         self.call(api.log_stream(pod, params)).await
@@ -546,5 +603,105 @@ mod tests {
         let e = r.get_text("/livez?verbose").await.unwrap_err();
         assert_eq!(e.code, ErrorCode::ConnectionFailed);
         assert!(e.params["message"].contains("[-]etcd failed"), "{e:?}");
+    }
+
+    #[test]
+    fn names_and_namespaces_that_may_go_into_a_path() {
+        for ok in ["team-a", "a", "0abc"] {
+            assert!(check_namespace(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "",
+            "team-a/../kube-system",
+            "a/b",
+            "..",
+            "Team",
+            "a.b",
+            "a%2Fb",
+            "a?b",
+            &"a".repeat(64),
+        ] {
+            let e = check_namespace(bad).unwrap_err();
+            assert_eq!(e.code, ErrorCode::InvalidInput, "{bad}");
+        }
+        for ok in [
+            "web",
+            "web-7d9f-x",
+            "app.v1",
+            "Web",
+            "system:node",
+            "sha256~AbC-_x",
+        ] {
+            assert!(check_name(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "",
+            ".",
+            "..",
+            "a..b",
+            "../secrets/db",
+            "a/b",
+            "a\\b",
+            "a%2Fb",
+            "a?watch=1",
+            "a#b",
+            "x;y",
+            "a b",
+            "a\nb",
+            "a\u{0}",
+            "веб",
+            "a\u{ff0f}b",
+        ] {
+            let e = check_name(bad).unwrap_err();
+            assert_eq!(
+                (e.code, e.key.as_str()),
+                (ErrorCode::InvalidInput, "errors.k8s.badName"),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(check_name("a\nb").unwrap_err().params["name"], "a\\nb");
+    }
+
+    /// Имя или namespace, которые не прошли проверку, в запрос не уходят ни одним методом;
+    /// правильные доходят до API-сервера как есть.
+    #[tokio::test]
+    async fn rejected_names_send_no_request() {
+        let (client, server) = mock_client(|_| {
+            (
+                200,
+                serde_json::json!({"apiVersion": "v1", "kind": "ConfigMap",
+                    "metadata": {"name": "web", "namespace": "team-a"}}),
+            )
+        });
+        let r = reader(client);
+        let cm = ApiResource::erase::<ConfigMap>(&());
+        let params = ListParams::default();
+        let codes = [
+            r.get::<ConfigMap>("team-a", "../secrets/db").await.err(),
+            r.get::<ConfigMap>("team-a/../kube-system", "web")
+                .await
+                .err(),
+            r.get_opt::<ConfigMap>("team-a", "..").await.err(),
+            r.get_cluster::<Node>("a/b").await.err(),
+            r.get_dynamic(&cm, Some("a/b"), "web").await.err(),
+            r.get_dynamic(&cm, None, "a?b").await.err(),
+            r.list::<Pod>(Some("a/b"), &params).await.err(),
+            r.list_dynamic(&cm, Some(".."), &params).await.err(),
+            r.log_stream("team-a", "../x", &LogParams::default())
+                .await
+                .err(),
+            r.rules_review("a/b").await.err(),
+        ]
+        .map(|e| e.map(|e| e.code));
+        assert!(
+            codes.iter().all(|c| *c == Some(ErrorCode::InvalidInput)),
+            "{codes:?}"
+        );
+        let ok: ConfigMap = r.get("team-a", "web").await.unwrap();
+        assert_eq!(ok.metadata.name.as_deref(), Some("web"));
+        drop(r);
+        let seen = server.await.unwrap();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].path(), "/api/v1/namespaces/team-a/configmaps/web");
     }
 }

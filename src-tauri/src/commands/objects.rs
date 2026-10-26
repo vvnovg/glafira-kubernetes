@@ -167,7 +167,10 @@ pub async fn get_quotas(
         .await
 }
 
-/// YAML объекта без `managedFields` (Secret — нельзя).
+/// YAML объекта (`k8s::yaml::object_yaml`, Secret — нельзя): без `metadata.managedFields`, без
+/// аннотаций с копией объекта (`last-applied-configuration` и подобных), у Route — без
+/// `spec.tls.key`; литеральные значения переменных окружения с секретными именами — `***`,
+/// как и команда `kubernetes.io/change-cause` с ними. Имя и namespace проверяются до запроса.
 #[tauri::command]
 pub async fn get_yaml(
     state: State<'_, AppState>,

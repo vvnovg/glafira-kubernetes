@@ -97,7 +97,8 @@
       "timeout": "The server did not respond in time",
       "connect": "Cannot connect to the server",
       "transport": "Network error: {{message}}",
-      "malformedObject": "Cannot read {{kind}} “{{name}}”: unexpected object format"
+      "malformedObject": "Cannot read {{kind}} “{{name}}”: unexpected object format",
+      "badName": "“{{name}}” is not a valid object name"
     },
     "oauth": {
       "denied": "Sign-in was not completed: {{error}}",

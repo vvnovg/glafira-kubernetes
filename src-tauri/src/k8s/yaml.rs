@@ -1,7 +1,8 @@
 //! YAML объекта только для чтения (спец. §6.4–6.5): объект из API без `metadata.managedFields`,
 //! записанный в YAML. Свой вывод JSON → YAML вместо крейта: нужно только записывать, а
 //! `serde_yaml` больше не поддерживается. Secret сюда не попадает — его вида нет в `YamlKind`;
-//! ключ `spec.tls.key` Route и аннотации с копией объекта вырезаются до вывода (`redact`).
+//! ключ `spec.tls.key` Route и аннотации с копией объекта вырезаются до вывода, значения
+//! переменных окружения с секретными именами скрыты (`redact`).
 
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::batch::v1::{CronJob, Job};
@@ -12,6 +13,7 @@ use serde::Deserialize;
 
 use crate::error::AppResult;
 use crate::k8s::read::ReadClient;
+use crate::storage::profile::REDACTED;
 
 /// Виды объектов, YAML которых показывает интерфейс.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -69,13 +71,23 @@ const OBJECT_COPIES: &[&str] = &[
     "openshift.io/encoded-deployment-config",
 ];
 
+/// Команда, записанная `--record`: `kubectl set env … DB_PASSWORD=x` оставил бы в ней значение,
+/// которое скрыто в `env`.
+const CHANGE_CAUSE: &str = "kubernetes.io/change-cause";
+
 /// Объект для показа: без `managedFields` и аннотаций-копий, у Route — без закрытого ключа
-/// `spec.tls.key` (спец. §10.2: «никогда, на любом уровне»). Через неё проходит каждый YAML.
+/// `spec.tls.key` (спец. §10.2: «никогда, на любом уровне»), значения переменных окружения
+/// с секретными именами скрыты (`mask_env`). Через неё проходит каждый YAML.
 fn redact(kind: YamlKind, v: &mut serde_json::Value) {
     if let Some(meta) = v.get_mut("metadata").and_then(|m| m.as_object_mut()) {
         meta.remove("managedFields");
         if let Some(a) = meta.get_mut("annotations").and_then(|a| a.as_object_mut()) {
             a.retain(|k, _| !OBJECT_COPIES.contains(&k.as_str()));
+            if let Some(cause) = a.get_mut(CHANGE_CAUSE)
+                && cause.as_str().is_some_and(assigns_a_secret)
+            {
+                *cause = REDACTED.into();
+            }
             if a.is_empty() {
                 meta.remove("annotations");
             }
@@ -86,9 +98,74 @@ fn redact(kind: YamlKind, v: &mut serde_json::Value) {
     {
         tls.remove("key");
     }
+    mask_env(v);
 }
 
-/// YAML объекта без `managedFields`, аннотаций-копий и ключа TLS Route.
+/// Значение переменной окружения с таким именем скрыто: слова `auth::exec::is_secret_name`
+/// (`TOKEN`, `SECRET`, `PASS`, `KEY`, `BEARER`, `COOKIE`, `CREDENTIAL`) и имена полей спец. §10.3
+/// по умолчанию, которых среди них нет (`private`, `authorization`); по вхождению, без учёта
+/// регистра. Остальные имена §10.3 (`password`, `passwd`, `secret`, `token`, `apikey`, `api_key`,
+/// `api-key`, `credentials`) содержат эти слова.
+fn is_secret_env(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    crate::auth::exec::is_secret_name(name)
+        || ["PRIVATE", "AUTHORIZATION"].iter().any(|w| n.contains(w))
+}
+
+/// Литеральные значения переменных с секретными именами — `***` (как `REDACTED` профиля и
+/// маскировка спец. §10.3). Ищутся во всём объекте: списки `env` контейнеров, init- и
+/// ephemeral-контейнеров пода и шаблонов workload'ов (с `jobTemplate` CronJob), хуков
+/// `execNewPod` DeploymentConfig и `environment` его `customParams`. `valueFrom` — ссылка и
+/// остаётся; пустое значение — тоже: секрета в нём нет.
+fn mask_env(v: &mut serde_json::Value) {
+    use serde_json::Value;
+    match v {
+        Value::Object(m) => {
+            for (k, child) in m.iter_mut() {
+                if matches!(k.as_str(), "env" | "environment")
+                    && let Value::Array(vars) = child
+                {
+                    for var in vars.iter_mut().filter_map(Value::as_object_mut) {
+                        let secret = var
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .is_some_and(is_secret_env);
+                        let literal = var
+                            .get("value")
+                            .and_then(Value::as_str)
+                            .is_some_and(|s| !s.is_empty());
+                        if secret && literal {
+                            var.insert("value".into(), REDACTED.into());
+                        }
+                    }
+                }
+                mask_env(child);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(mask_env),
+        _ => {}
+    }
+}
+
+/// В команде есть присваивание секретному имени (`DB_PASSWORD=…`, `--env=API_TOKEN=…`,
+/// `--password=…`) или секретный флаг со значением через пробел (`--token …`). Тогда скрыта вся
+/// команда: где кончается значение в кавычках, по строке не понять.
+fn assigns_a_secret(command: &str) -> bool {
+    command.split_whitespace().any(|word| {
+        let mut parts: Vec<&str> = word.split('=').collect();
+        if parts.len() > 1 {
+            parts.pop();
+        } else if !word.starts_with('-') {
+            return false;
+        }
+        parts
+            .iter()
+            .any(|p| is_secret_env(p.trim_start_matches('-')))
+    })
+}
+
+/// YAML объекта без `managedFields`, аннотаций-копий и ключа TLS Route, со скрытыми значениями
+/// переменных окружения с секретными именами.
 pub async fn object_yaml(
     r: &ReadClient,
     namespace: &str,
@@ -553,6 +630,153 @@ mod tests {
             server.await.unwrap()[0].path(),
             "/apis/apps/v1/namespaces/team-a/deployments/web"
         );
+    }
+
+    /// Переменные контейнеров и init-контейнеров.
+    fn env() -> serde_json::Value {
+        serde_json::json!([
+            {"name": "DB_PASSWORD", "value": "x"},
+            {"name": "API_TOKEN", "value": "y"},
+            {"name": "LOG_LEVEL", "value": "debug"},
+            {"name": "DB_SECRET", "valueFrom": {"secretKeyRef": {"name": "db", "key": "password"}}},
+        ])
+    }
+
+    fn pod_spec() -> serde_json::Value {
+        serde_json::json!({
+            "initContainers": [{"name": "migrate", "image": "app", "env": env()}],
+            "containers": [{"name": "web", "image": "app", "env": env()}]})
+    }
+
+    /// Значения переменных с секретными именами скрыты в YAML Deployment и пода, остальные
+    /// значения и ссылки `valueFrom` — как есть.
+    #[tokio::test]
+    async fn secret_env_values_are_masked_in_workloads_and_pods() {
+        let (client, _server) = mock_client(|s| match s.path() {
+            "/apis/apps/v1/namespaces/team-a/deployments/web" => (
+                200,
+                serde_json::json!({"apiVersion": "apps/v1", "kind": "Deployment",
+                    "metadata": {"name": "web", "namespace": "team-a"},
+                    "spec": {"template": {"spec": pod_spec()}}}),
+            ),
+            _ => (
+                200,
+                serde_json::json!({"apiVersion": "v1", "kind": "Pod",
+                    "metadata": {"name": "web-1", "namespace": "team-a"}, "spec": pod_spec()}),
+            ),
+        });
+        let r = ReadClient::new(client, Duration::from_secs(5));
+        for (kind, name, pad) in [
+            (YamlKind::Deployment, "web", " ".repeat(12)),
+            (YamlKind::Pod, "web-1", " ".repeat(8)),
+        ] {
+            let y = object_yaml(&r, "team-a", kind, name).await.unwrap();
+            let var =
+                |name: &str, value: &str| format!("{pad}- name: {name}\n{pad}  value: {value}\n");
+            assert_eq!(y.matches(&var("DB_PASSWORD", "\"***\"")).count(), 2, "{y}");
+            assert_eq!(y.matches(&var("API_TOKEN", "\"***\"")).count(), 2, "{y}");
+            assert_eq!(y.matches(&var("LOG_LEVEL", "debug")).count(), 2, "{y}");
+            assert!(
+                !y.contains("value: x\n") && !y.contains("value: y\n"),
+                "{y}"
+            );
+            let reference = format!(
+                "{pad}- name: DB_SECRET\n{pad}  valueFrom:\n{pad}    secretKeyRef:\n{pad}      key: password\n"
+            );
+            assert_eq!(y.matches(&reference).count(), 2, "{y}");
+        }
+    }
+
+    /// Списки `env` везде, где они бывают: `jobTemplate` CronJob, ephemeral-контейнеры пода, хуки
+    /// и `customParams` DeploymentConfig; пустое значение остаётся; команда `--record` с секретом
+    /// скрыта целиком.
+    #[test]
+    fn secret_env_values_are_masked_wherever_env_lives() {
+        let var = || {
+            serde_json::json!([{"name": "private_key", "value": "k"}, {"name": "MODE", "value": "m"},
+            {"name": "AUTH_PASS", "value": ""}])
+        };
+        let mut cron = serde_json::json!({"spec": {"jobTemplate": {"spec": {"template": {"spec":
+            {"containers": [{"name": "c", "env": var()}]}}}}}});
+        redact(YamlKind::CronJob, &mut cron);
+        let env = &cron["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]["env"];
+        assert_eq!(
+            env,
+            &serde_json::json!([{"name": "private_key", "value": "***"}, {"name": "MODE", "value": "m"},
+                {"name": "AUTH_PASS", "value": ""}])
+        );
+        let mut pod =
+            serde_json::json!({"spec": {"ephemeralContainers": [{"name": "debug", "env": var()}]}});
+        redact(YamlKind::Pod, &mut pod);
+        assert_eq!(
+            pod["spec"]["ephemeralContainers"][0]["env"][0]["value"],
+            "***"
+        );
+        let mut dc = serde_json::json!({
+            "metadata": {"annotations": {
+                "kubernetes.io/change-cause": "oc set env dc/web DB_PASSWORD=\"s3 cr3t\" --record=true"}},
+            "spec": {"strategy": {
+                "recreateParams": {"pre": {"execNewPod": {"containerName": "web", "env": var()}}},
+                "customParams": {"environment": var()}}}});
+        redact(YamlKind::DeploymentConfig, &mut dc);
+        let strategy = &dc["spec"]["strategy"];
+        assert_eq!(
+            strategy["recreateParams"]["pre"]["execNewPod"]["env"][0]["value"],
+            "***"
+        );
+        assert_eq!(strategy["customParams"]["environment"][0]["value"], "***");
+        assert_eq!(strategy["customParams"]["environment"][1]["value"], "m");
+        assert_eq!(
+            dc["metadata"]["annotations"]["kubernetes.io/change-cause"],
+            "***"
+        );
+    }
+
+    #[test]
+    fn secret_names_of_env_and_of_commands() {
+        // Имена §10.3 по умолчанию и слова `is_secret_name`.
+        for s in [
+            "DB_PASSWORD",
+            "db_passwd",
+            "CLIENT_SECRET",
+            "API_TOKEN",
+            "STRIPE_APIKEY",
+            "api_key",
+            "x-api-key",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "PRIVATE_KEY_PEM",
+            "AUTHORIZATION",
+            "REDIS_PASS",
+            "JWT_SIGNING_KEY",
+            "SESSION_COOKIE",
+            "AUTH_BEARER",
+        ] {
+            assert!(is_secret_env(s), "{s}");
+        }
+        for s in [
+            "LOG_LEVEL",
+            "JAVA_OPTS",
+            "HOME",
+            "PORT",
+            "SPRING_PROFILES_ACTIVE",
+        ] {
+            assert!(!is_secret_env(s), "{s}");
+        }
+        for c in [
+            "kubectl set env deployment/web DB_PASSWORD=x --record=true",
+            "kubectl run web --env=API_TOKEN=y",
+            "oc login --token sha256~abc",
+            "kubectl create secret generic db --from-literal=password=x",
+        ] {
+            assert!(assigns_a_secret(c), "{c}");
+        }
+        for c in [
+            "kubectl set image deployment/web web=registry/app:1.2 --record=true",
+            "kubectl apply -f secret.yaml --record",
+            "kubectl scale deployment/keycloak --replicas=2",
+        ] {
+            assert!(!assigns_a_secret(c), "{c}");
+        }
     }
 
     #[test]
