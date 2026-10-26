@@ -147,13 +147,15 @@ crates/glafira-mcp-kubernetes — инструменты, типы ответо�
 - **Гарантия MCP «только чтение».** Крейты `glafira-mcp-*` не зависят от `kube`, `k8s-openapi`, `reqwest` и крейта
   приложения — тест `tests/manifest.rs` читает их `Cargo.toml`. Реализация `Backend` в `src-tauri/src/mcp/` получает
   только `ReadClient` (newtype без доступа к внутреннему `kube::Client`: get, list, watch, logs и GET-запросы
-  к Prometheus); тест-«сторожок» проверяет, что `src-tauri/src/mcp/**` не импортирует `ops::` и `ClusterWriter`.
-  Предложения и замечания пишутся только в файл Glafira.
+  к Prometheus); тест-«сторожок» проверяет, что `src-tauri/src/mcp/**` не импортирует `ops::` и `ClusterWriter` и не
+  берёт внутренний клиент (`Connected::kube_client`). Предложения и замечания пишутся только в файл Glafira.
 - **Длительные операции** (watch, логи, сбор метрик проекта, проверка) — фоновые tokio-задачи с `SessionId`; данные
   уходят во фронтенд через `tauri::ipc::Channel` батчами (до 200 элементов или раз в 100 мс; начальный снимок `Reset` уходит одним сообщением и бывает больше); отмена —
   `stop_session(id)` через `CancellationToken`.
 - **Пул клиентов:** на подключение — один `kube::Client` (общий для интерфейса и MCP) и один HTTP-клиент метрик;
-  создаются при `connect`, уничтожаются при `disconnect` и смене токена.
+  создаются при `connect`, уничтожаются при `disconnect` и смене токена. Вызов MCP к подключению, которое ещё не
+  открыто, открывает его сам (`AppState::read`, как вкладка, с теми же проверками политики); если для этого нужен вход,
+  вызов получает ошибку, а вход человек выполняет в окне.
 - **Таймауты:** запрос — 30 с, подключение — 10 с (настраиваются в профиле); у каждой сетевой операции есть таймаут
   и отмена, UI не блокируется. Долгие потоки (watch, follow логов) защищает таймаут чтения клиента — 295 с без единого
   байта: соединение, умершее после сна, смены Wi-Fi или VPN, обрывается, а не висит молча (TCP keepalive у `kube`
@@ -264,9 +266,9 @@ crates/glafira-mcp-kubernetes — инструменты, типы ответо�
   пользователю список проектов (обычный Kubernetes без прав на `namespaces`);
 - **метрики:** `auto` (по умолчанию), свой URL Thanos, свой URL Prometheus; авторизация источника — токен
   подключения, отдельный bearer-токен или без авторизации; CA источника — как у подключения или свой;
-- **LLM:** уровень доступа `llmAccess` (`off` / `metadata` / `logs`, по умолчанию `off`), проекты для LLM
-  (`llmNamespaces`: «все доступные» — по умолчанию — или список), список имён полей для маскировки (по умолчанию —
-  стандартный, §10.3);
+- **LLM:** уровень доступа `llmAccess` (`off` / `metadata` / `logs`, по умолчанию `off`; до O4 — `off` и `metadata`,
+  незнакомое значение читается как `off`), проекты для LLM (`llmNamespaces`: «все доступные» — по умолчанию, `null` —
+  или список), список имён полей для маскировки (с O4; до этого — стандартный список крейта, §10.3);
 - таймауты: запрос (30 с), подключение (10 с).
 
 Поля `llmAccess`, `llmNamespaces`, папка и порядок — локальные: экспорт их не пишет, импорт не переносит (как
@@ -660,11 +662,14 @@ request и limit, пометки и нарушения ограничений; �
 - запуск только по кнопке «Проверить» или вызову `health_check`; автоматических и периодических проверок нет;
 - одна проверка на подключение одновременно, второй вызов ждёт идущую и получает тот же результат;
 - **охват:** уровень кластера (если есть права) и проекты — по умолчанию все доступные, не больше 50 проектов и
-  5000 подов; не больше 4 параллельных запросов; дедлайн 45 с;
+  5000 подов; не больше 4 параллельных запросов; дедлайн 45 с. `health_check` проверяет проекты `namespaces` или, без
+  них, `llmNamespaces` (у «все доступные» — как интерфейс); такая проверка хранит их в `scope.requested`. Ожидание
+  идущей проверки и повтор свежей (`maxAgeSeconds`) — только если она охватывает запрошенные проекты;
 - непрочитанный объект считается непроверенным, ложных находок по нему нет; сводка — находка `check.partial`;
 - чувствительные значения в снимок не попадают: снимок хранит только поля, нужные правилам;
-- находка `{ key, ruleId, severity, target { kind, namespace?, name? }, params }`; `key` — `ruleId` + объект;
-  находки по подам одного владельца собираются в одну находку на workload («3 из 5 подов»);
+- находка `{ key, ruleId, severity, target { kind, namespace?, name?, workloadKind? }, params }` (`workloadKind` — у
+  `workload`); `key` — `ruleId` + объект (`pod.crashLoop:workload:team-a:Deployment/web`); находки по подам одного
+  владельца собираются в одну находку на workload («3 из 5 подов», `params.pods`), под без владельца — своя находка;
 - скрытие находки для объекта, файл `health/<id>.json`, вкладка «Замечания», значки в дереве и списках, блоки на
   экранах объектов, событие `health://changed` — как в Kafka G2/G3.
 
@@ -685,12 +690,12 @@ request и limit, пометки и нарушения ограничений; �
 | `node.pressure` | node | `MemoryPressure`, `DiskPressure` или `PIDPressure` = `True` | К | П | П |
 | `node.requestsHigh` | node | сумма requests подов ноды > 90 % allocatable по CPU или памяти (нужно чтение подов всех namespace) | П | П | И |
 | `node.unschedulable` | node | `spec.unschedulable` | И | И | И |
-| `pod.crashLoop` | workload / pod | контейнер ждёт с причиной `CrashLoopBackOff` | К | П | П |
+| `pod.crashLoop` | workload / pod | контейнер ждёт с причиной `CrashLoopBackOff` или, между перезапусками, завершён с ненулевым кодом или сигналом при ≥ 1 рестарте; под не `Succeeded`/`Failed` и не удаляется, `restartPolicy` ≠ `Never` (нативный sidecar перезапускается всегда) | К | П | П |
 | `pod.imagePull` | workload / pod | `ErrImagePull`, `ImagePullBackOff`, `InvalidImageName` | К | П | П |
-| `pod.pending` | workload / pod | `Pending` дольше 5 мин; причина из условия `PodScheduled` или ожидания контейнера | К | П | П |
+| `pod.pending` | workload / pod | `Pending` дольше 5 мин, кроме подов с `pod.imagePull` и `pod.crashLoop`; причина из условия `PodScheduled` или ожидания контейнера | К | П | П |
 | `pod.oomKilled` | workload / pod | `lastState.terminated.reason = OOMKilled` за последние 24 ч | К | П | И |
 | `pod.restartsFrequent` | workload / pod | рестартов ≥ 5 и последний — меньше 1 ч назад (кроме `pod.crashLoop`) | П | П | И |
-| `workload.unavailable` | workload | доступно меньше желаемого (> 0) дольше 5 мин | К | П | И |
+| `workload.unavailable` | workload | Deployment, StatefulSet, DaemonSet, DeploymentConfig: доступно меньше желаемого (> 0) дольше 5 мин — от самого давнего неготового пода, иначе от `Available=False`, иначе от создания | К | П | И |
 | `workload.rolloutStuck` | workload | `Progressing=False` с `ProgressDeadlineExceeded` (Deployment, DeploymentConfig) | К | П | П |
 | `workload.singleReplica` | workload | желаемо 1 реплика (Deployment, StatefulSet, DeploymentConfig), HPA нет или `minReplicas = 1` | П | И | — |
 | `container.noRequests` | workload | у контейнера работающего пода нет CPU- или memory-request (после применения `LimitRange`) | П | П | И |
@@ -698,7 +703,7 @@ request и limit, пометки и нарушения ограничений; �
 | `container.noReadinessProbe` | workload | у контейнера долгоживущего workload'а нет readiness-пробы | П | И | — |
 | `container.latestTag` | workload | образ работающего пода с тегом `latest` или без тега и не по digest | П | И | — |
 | `quota.nearLimit` | quota | использовано ≥ 90 % любого ресурса ResourceQuota | П | П | И |
-| `pvc.pending` | pvc | `Pending` дольше 5 мин или `Lost` | К | П | П |
+| `pvc.pending` | pvc | `Lost`; `Pending` дольше 5 мин — только если PVC монтирует под (у `WaitForFirstConsumer` без потребителя `Pending` — норма) | К | П | П |
 | `hpa.atMax` | hpa | `ScalingLimited=True` с причиной `TooManyReplicas` | П | П | И |
 | `hpa.unableToScale` | hpa | `AbleToScale=False` или `ScalingActive=False` (например, нет requests для метрики) | П | П | И |
 | `service.noEndpoints` | service | Service с селектором без готовых endpoints; в `params` — Route, Ingress, HTTPRoute и GRPCRoute, которые на него ссылаются | П | П | И |
@@ -729,9 +734,14 @@ request и limit, пометки и нарушения ограничений; �
   права `list secrets` в проекте; без прав — пометка в `check.partial`;
 - `route.certExpiring` проверяет только сертификаты, заданные в `spec.tls.certificate` самого Route (сертификат
   роутера по умолчанию не читается);
+- `container.*` смотрят основные контейнеры и нативные sidecar работающих подов (`container.latestTag` — все
+  контейнеры), `container.noReadinessProbe` — шаблон долгоживущего workload'а; `workload.singleReplica` срабатывает,
+  только если HPA проекта прочитаны (иначе неизвестно, есть ли HPA, — пометка в `check.partial`);
 - тексты для человека — ключи `health.rules.<ruleId>.title|details|fix` во всех словарях; для LLM — короткие
-  английские `title` и `details` из Rust (`health/texts.rs`); тест проверяет наличие ключей в `en.json` для каждого
-  правила из `rule_ids()`.
+  английские `title` и `details` из Rust (`health/texts.rs`); тест проверяет наличие ключей и `health.ruleNames.<ruleId>`
+  в `en.json` и `ru.json` для каждого правила из `rule_ids()`. Часть пояснений зависит от параметров
+  (`detailsHpa`, `detailsLost`, `detailsNoStatus`, `detailsExpired`, `detailsNoClass`, `detailsUsedBy`,
+  `detailsUnknown`).
 
 ---
 
@@ -785,7 +795,9 @@ request и limit, пометки и нарушения ограничений; �
 чем он), уровень `llmAccess` подключения и список `llmNamespaces`. Проверки — при каждом вызове: сервер включён и
 политика не запрещает; сессия подтверждена; у подключения `llmAccess ≠ off`; namespace входит в `llmNamespaces`.
 Подключение или проект, которых нет, и подключение или проект без доступа дают одинаковую ошибку `not_allowed`.
-Изменение флагов, отзыв клиента и выключение действуют сразу.
+Изменение флагов, отзыв клиента и выключение действуют сразу. Крейт сверяет подключение и проект с
+`Backend::scope` до каждого чтения, бэкенд приложения — ещё раз по профилю; кластер и ноды видны модели, если их может
+читать пользователь, а проекты и всё в них — только из `llmNamespaces`.
 
 | Уровень | Что видит модель |
 |---|---|
@@ -801,7 +813,8 @@ request и limit, пометки и нарушения ограничений; �
 
 Чистые функции крейта `glafira-mcp-kubernetes/src/mask.rs`, применяются к ответу до его сборки:
 - **имена полей** из списка подключения (по умолчанию: `password`, `passwd`, `secret`, `token`, `apikey`, `api_key`,
-  `api-key`, `credentials`, `private`, `authorization`, без учёта регистра): значение env, ключа ConfigMap,
+  `api-key`, `credentials`, `private`, `authorization`, без учёта регистра; до O4 — только этот список, константой
+  крейта): значение env, ключа ConfigMap,
   аннотации, флага `--name=value` в `command`/`args` и пары `name=value` / `"name": value` в строке лога;
 - **встроенные шаблоны:** JWT, `Bearer <токен>`, `user:pass@` в URL, email, номера карт с проверкой Луна, ключи
   `AKIA…`, PEM-блоки приватных ключей, токены `sha256~…`;
@@ -843,6 +856,9 @@ request и limit, пометки и нарушения ограничений; �
 | `withdraw_proposal` | metadata | `connectionId`, `proposalId` | `{ withdrawn: true }` |
 
 Уточнения:
+- `list_connections`: `platform` и `distribution` — пока подключение открыто (в пуле клиентов), иначе `null`;
+- `health_check`: `namespaces` — до 50 проектов внутри `llmNamespaces`; находки вне `llmNamespaces` модель не видит,
+  `scope.projects` в ответе — тоже только из них;
 - логи: строка длиннее 4 КБ обрезается; `search_workload_logs` просматривает не больше 20 подов, 50 МБ и 40 с
   (запрос логов с `limitBytes`); `get_pod_logs` и `search_workload_logs` — одна длительная операция на сессию, общая
   с `observe_workload`;
@@ -1042,8 +1058,10 @@ keychain: сервис glafira-kubernetes, ключи <connection-id>/<field>
   с ingress-nginx, CRD Gateway API (standard channel) и kube-prometheus: платформа `kubernetes`, правила Ingress и
   Gateway API, автопоиск Prometheus через прокси API-сервера. В O1b — только `it_connect` и `it_read` на kind без CRD
   OpenShift и Gateway API; объекты проекта из `dev/kind/fixtures.yaml` запускает образ-помощник, который уже есть на
-  ноде, поэтому образы не скачиваются. CRD OpenShift и Gateway API на стенде понадобятся с этапа O2, для правил
-  проверки.
+  ноде, поэтому образы не скачиваются. В O2 — ещё `it_health` и `it_mcp` на том же kind: минимальные CRD Route и Gateway
+  API (`dev/kind/crds.yaml`, схема без проверки полей, без контроллеров и без групп `config.openshift.io` — платформа
+  остаётся `kubernetes`; статус HTTPRoute пишет `setup.sh`) и объекты для правил (`dev/kind/health.yaml`); правила
+  ClusterOperator, ClusterVersion и MachineConfigPool проверяются unit-тестами на снимках и смоуком на OpenShift.
 - **MCP-крейты:** фейковый `Backend`, MCP-клиент rmcp — список инструментов и аннотации, сторожок имён, уровни
   доступа (`not_allowed`, `logs_disabled`), `llmNamespaces`, маскировка в ответах, усечение до 100 КБ, лимиты,
   рукопожатие, журнал без содержимого; `tests/manifest.rs` — нет зависимости от `kube`, `k8s-openapi`, `reqwest` и
