@@ -43,11 +43,11 @@ Deployment, StatefulSet, DaemonSet, DeploymentConfig (OpenShift), Job и CronJob
 workload'а показывает реплики (желаемо, готово, доступно, обновлено), проблему, если она есть, условия, селектор подов,
 стратегию, HPA и PodDisruptionBudget, историю выкладки (ReplicaSets или ReplicationControllers с ревизией и образами) и
 контейнеры. [[ui:objects.tabs.pods]] — его поды. [[ui:objects.tabs.events]] — его события вместе с событиями объектов,
-которые он создаёт (ReplicaSets, Jobs, поды): они узнаются по именам, которые им даёт Kubernetes, поэтому поды
-индексированного Job, Jobs, созданные из CronJob вручную, и дети workload'а с именем длиннее примерно 46 символов сюда
-не попадают. YAML — объект, как в `kubectl get -o yaml`, но без `managedFields`, без аннотаций с копией всего объекта
-(`kubectl.kubernetes.io/last-applied-configuration` и подобных) и без закрытого ключа Route; значения переменных
-окружения с секретными именами (PASSWORD, TOKEN, KEY…) заменены на `***`.
+которые он создаёт (ReplicaSets, Jobs, ReplicationControllers у DeploymentConfig, поды): они узнаются по именам, которые
+им даёт Kubernetes, поэтому поды индексированного Job, Jobs, созданные из CronJob вручную, и дети workload'а с именем
+длиннее примерно 46 символов сюда не попадают. YAML — объект, как в `kubectl get -o yaml`, но без `managedFields`, без
+аннотаций с копией всего объекта (`kubectl.kubernetes.io/last-applied-configuration` и подобных) и без закрытого ключа
+Route; значения переменных окружения с секретными именами (PASSWORD, TOKEN, KEY…) заменены на `***`.
 
 ## Сеть {#network}
 

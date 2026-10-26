@@ -169,24 +169,30 @@ describe("права проекта: перечитывание", () => {
     incomplete: false,
   };
 
-  it("права перечитываются раз в 5 минут, скрытая подвкладка возвращается", async () => {
+  it("права перечитываются, когда кэш Rust (5 минут) уже истёк, скрытая подвкладка возвращается", async () => {
     vi.mocked(api.getNamespaceAccess).mockResolvedValueOnce(READ_EVENTS_DENIED).mockResolvedValue(READ_EVENTS_GRANTED);
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     renderWithClient(<ProjectPanel connectionId="c1" namespace="team-a" />);
     await screen.findByRole("tab", { name: "Поды" });
     await waitFor(() => expect(screen.queryByRole("tab", { name: "События" })).not.toBeInTheDocument());
     expect(api.getNamespaceAccess).toHaveBeenCalledTimes(1);
+    // Ровно 5 минут — срок кэша Rust: тик в этот момент получил бы закэшированные права, поэтому его ещё нет.
     await act(async () => {
-      vi.advanceTimersByTime(4 * 60_000);
+      vi.advanceTimersByTime(5 * 60_000);
     });
     expect(api.getNamespaceAccess).toHaveBeenCalledTimes(1);
     await act(async () => {
-      vi.advanceTimersByTime(60_000);
+      vi.advanceTimersByTime(5_000);
     });
     expect(await screen.findByRole("tab", { name: "События" })).toBeInTheDocument();
     expect(api.getNamespaceAccess).toHaveBeenCalledTimes(2);
-    // Автоматическое чтение — из кэша Rust, без ручного обновления.
+    // Автоматическое чтение — без ручного обновления (`force`): кэш Rust к этому времени истёк.
     expect(api.getNamespaceAccess).toHaveBeenLastCalledWith("c1", "team-a");
+    // Следующий тик — через тот же интервал, а не через два.
+    await act(async () => {
+      vi.advanceTimersByTime(5 * 60_000 + 5_000);
+    });
+    expect(api.getNamespaceAccess).toHaveBeenCalledTimes(3);
   });
 
   it("«Обновить» в обзоре читает права заново и возвращает подвкладку", async () => {
@@ -401,6 +407,8 @@ describe("скрытая вкладка проекта", () => {
 
     view.rerender(inTab(true));
     await advance(5 * 60_000);
+    expect(api.getNamespaceAccess).toHaveBeenCalledTimes(1);
+    await advance(5_000);
     expect(api.getNamespaceAccess).toHaveBeenCalledTimes(2);
   });
 });

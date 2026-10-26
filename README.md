@@ -87,7 +87,8 @@ GO_IT_KUBECONFIG="$PWD/dev/kind/out/kubeconfig" cargo test --manifest-path src-t
   обновлений), Infrastructure и консоль (частями с причиной), ClusterOperators, MachineConfigPools и срок токена
   (`useroauthaccesstokens`). Интерфейс открывает адрес консоли, только если это http или https.
 - Проекты, права в проекте (`SelfSubjectRulesReview`, кэш на 5 минут, сброс при 403, переподключении и входе;
-  `get_namespace_access(…, force)` обходит кэш — вкладка проекта перечитывает права раз в 5 минут и по «Обновить»),
+  `get_namespace_access(…, force)` обходит кэш — вкладка проекта перечитывает права раз в 5 минут, таймер — срок
+  кэша плюс 5 с (`ACCESS_REFRESH_MS` в `src/components/project/useNamespaceAccess.ts`), и по «Обновить»),
   workloads, поды, события, сеть, конфигурация (значения Secret не читаются интерфейсом), PVC, квоты — модули
   `src-tauri/src/k8s/`.
 - YAML (`k8s/yaml.rs`, `redact`): объект как `kubectl get -o yaml`, но без `managedFields`, без аннотаций с копией

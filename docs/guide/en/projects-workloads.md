@@ -38,17 +38,17 @@ cluster overview read at most 10,000 objects of a kind too, but do not show this
 
 ## Workloads {#workloads}
 
-Deployment, StatefulSet, DaemonSet, DeploymentConfig (OpenShift), Job and CronJob, with a filter by kind and name.
-A workload tab shows the replicas (desired, ready, available, updated), the problem if there is one, the conditions,
-the pod selector, the strategy, the HPA and the PodDisruptionBudget, the rollout history (ReplicaSets or
-ReplicationControllers with the revision and the images) and the containers. [[ui:objects.tabs.pods]] lists its
-pods. [[ui:objects.tabs.events]] shows its events together with those of the objects it creates (ReplicaSets, Jobs,
-pods): they are recognized by the names Kubernetes generates for them, so the pods of an indexed Job, Jobs created
-from a CronJob by hand and the children of a workload whose name is longer than about 46 characters are not
-included. YAML shows the object as `kubectl get -o yaml` does, but without `managedFields`, without the annotations
-that copy the whole object (`kubectl.kubernetes.io/last-applied-configuration` and the like) and without the private
-key of a Route; the values of environment variables with secret-looking names (PASSWORD, TOKEN, KEY…) are replaced by
-`***`.
+Deployment, StatefulSet, DaemonSet, DeploymentConfig (OpenShift), Job and CronJob, with a filter by kind and name. A
+workload tab shows the replicas (desired, ready, available, updated), the problem if there is one, the conditions, the
+pod selector, the strategy, the HPA and the PodDisruptionBudget, the rollout history (ReplicaSets or
+ReplicationControllers with the revision and the images) and the containers. [[ui:objects.tabs.pods]] lists its pods.
+[[ui:objects.tabs.events]] shows its events together with those of the objects it creates (ReplicaSets, Jobs,
+ReplicationControllers of a DeploymentConfig, pods): they are recognized by the names Kubernetes generates for them, so
+the pods of an indexed Job, Jobs created from a CronJob by hand and the children of a workload whose name is longer than
+about 46 characters are not included. YAML shows the object as `kubectl get -o yaml` does, but without `managedFields`,
+without the annotations that copy the whole object (`kubectl.kubernetes.io/last-applied-configuration` and the like) and
+without the private key of a Route; the values of environment variables with secret-looking names (PASSWORD, TOKEN,
+KEY…) are replaced by `***`.
 
 ## Network {#network}
 

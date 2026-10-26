@@ -2,10 +2,12 @@
 
 ## Pod list {#pods}
 
-The pods of a project or a workload show the status as `kubectl get pods` does (`Running`, `CrashLoopBackOff`,
-`Init:1/2`, `Completed`…), the ready containers, the restarts and when the last one was, the node, the age, the QoS
-class and the owner. A native sidecar (an init container with `restartPolicy: Always`) counts with the containers
-once it has started and does not hold the pod in `Init`. A problem pod — the image cannot be pulled, a container was
+The pods of a project or a workload show the status by the rules of `kubectl get pods` (`Running`,
+`CrashLoopBackOff`, `Init:1/2`, `Completed`…), the ready containers, the restarts and when the last one was, the node,
+the age, the QoS class and the owner. A native sidecar (an init container with `restartPolicy: Always`) counts with the
+containers once it has started and does not hold the pod in `Init`. Known differences from `kubectl`: a pod waiting
+for its scheduling gates shows `Pending`, not `SchedulingGated`; ephemeral containers are not shown; while a pod
+initializes, its restarts do not include those of regular init containers. A problem pod — the image cannot be pulled, a container was
 killed for memory (`OOMKilled`), restarts in a loop, the pod waits to be scheduled (`Pending`) or has failed — is
 highlighted; the problems-only filter leaves just them.
 

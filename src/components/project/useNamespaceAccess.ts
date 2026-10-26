@@ -2,8 +2,13 @@ import { type QueryClient, useQuery } from "@tanstack/react-query";
 import { api } from "../../api/client";
 import { useRefetchInterval } from "../../lib/tabActive";
 
-/** Срок кэша прав в Rust (`ACCESS_TTL`): права перечитываются с той же частотой, чтобы подвкладка не оставалась скрытой по устаревшим правам. */
-export const ACCESS_REFRESH_MS = 5 * 60_000;
+/**
+ * Как часто права перечитываются по таймеру, чтобы подвкладка не оставалась скрытой по устаревшим правам: срок кэша прав
+ * в Rust (`ACCESS_TTL`, 5 минут) и ещё 5 с. Таймер зовёт команду без `force`: с интервалом ровно 5 минут тик приходил бы
+ * чуть раньше, чем кэш истёк, получал бы закэшированные права, и до кластера доходил бы только каждый второй тик (раз в
+ * 10 минут). С запасом каждый тик застаёт кэш истёкшим.
+ */
+export const ACCESS_REFRESH_MS = 5 * 60_000 + 5_000;
 
 const accessKey = (connectionId: string, namespace: string) => ["access", connectionId, namespace] as const;
 

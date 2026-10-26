@@ -371,8 +371,9 @@ oc. В тексте отказа — только имя ключа: значе�
   `clusterversions`, `machineconfigpools`, `pods` во всех namespace); результат — `Capabilities`.
 - При открытии проекта — `SelfSubjectRulesReview` в этом namespace; результат кэшируется на 5 минут и
   сбрасывается при ответе 403 на любое чтение в проекте, при переподключении, входе заново и сбросе клиента
-  подключения. Вкладка проекта перечитывает права раз в 5 минут и по «Обновить» в обзоре
-  (`get_namespace_access(…, force: true)` обходит кэш), так что подвкладка, скрытая по устаревшим правам, возвращается.
+  подключения. Вкладка проекта перечитывает права раз в 5 минут (таймер — срок кэша плюс 5 с, чтобы каждый тик
+  заставал кэш истёкшим и доходил до кластера) и по «Обновить» в обзоре (`get_namespace_access(…, force: true)`
+  обходит кэш), так что подвкладка, скрытая по устаревшим правам, возвращается.
 - Узлы дерева и вкладки без прав на чтение не показываются; изменяющие кнопки без прав видны неактивными
   с подсказкой вида «Нет прав: patch deployments в project-a». Окончательную проверку делает API-сервер.
 
@@ -433,9 +434,11 @@ oc. В тексте отказа — только имя ключа: значе�
   «Замечания»;
 - **Workloads** — Deployment, StatefulSet, DaemonSet, DeploymentConfig, Job, CronJob: имя, вид, готово / желаемо,
   образы, возраст, значок замечаний; фильтр по виду и имени;
-- **Pods** — имя, статус (как `kubectl get pods`: с причиной ожидания или завершения; запущенный нативный sidecar —
-  init-контейнер с `restartPolicy: Always` — считается с контейнерами и не держит под в `Init`), готовность
-  контейнеров, рестарты, нода, возраст, QoS; фильтр «только проблемные»;
+- **Pods** — имя, статус (по правилам `kubectl get pods`: с причиной ожидания или завершения; запущенный нативный
+  sidecar — init-контейнер с `restartPolicy: Always` — считается с контейнерами и не держит под в `Init`; известные
+  расхождения с kubectl — нет причины `SchedulingGated`, ephemeral-контейнеры не показываются, рестарты
+  инициализирующегося пода — без обычных init-контейнеров), готовность контейнеров, рестарты, нода, возраст, QoS;
+  фильтр «только проблемные»;
 - **Сеть** — Services (тип, порты, готовые endpoints по EndpointSlices; у dual-stack семейства адресов не
   складываются); Routes (хост, путь, TLS-терминация, `Admitted`, срок встроенного сертификата: меньше 30 дней —
   предупреждение, истёк — ошибка со словом «истёк»); Ingress (класс, хосты и пути → Service и порт, TLS — хосты и имя
@@ -1012,14 +1015,15 @@ keychain: сервис glafira-kubernetes, ключи <connection-id>/<field>
   подтверждение при смене строки запуска); адрес API с путём (прокси Rancher); правила Ingress и Gateway API, включая
   исключение для Ingress с созданными из него Routes.
 - **Интеграция** (`src-tauri/tests/`, включается переменными `GO_IT_KUBECONFIG` и `GO_IT_THANOS_URL`; без них тест
-  пропускается; в O1b — `it_connect` и `it_read` на kind без CRD OpenShift и Gateway API, объекты проекта
-  `dev/kind/fixtures.yaml` запускает образ-помощник ноды, образы не скачиваются; CRD нужны правилам O2): `kind` с
-  установленными CRD OpenShift (`Route`, `ClusterOperator`, `ClusterVersion`,
+  пропускается): `kind` с установленными CRD OpenShift (`Route`, `ClusterOperator`, `ClusterVersion`,
   `MachineConfigPool`, `DeploymentConfig`) и kube-state-metrics; сценарии — проблемные поды (CrashLoop, ImagePull,
   OOM, Pending), проверка с окружением `prod`, применение каждого вида `Change` с dry-run и `CONFLICT`, read-only;
   мок-HTTP Thanos с записанными ответами для источников метрик и движка. Второй прогон — `kind` без CRD OpenShift,
   с ingress-nginx, CRD Gateway API (standard channel) и kube-prometheus: платформа `kubernetes`, правила Ingress и
-  Gateway API, автопоиск Prometheus через прокси API-сервера.
+  Gateway API, автопоиск Prometheus через прокси API-сервера. В O1b — только `it_connect` и `it_read` на kind без CRD
+  OpenShift и Gateway API; объекты проекта из `dev/kind/fixtures.yaml` запускает образ-помощник, который уже есть на
+  ноде, поэтому образы не скачиваются. CRD OpenShift и Gateway API на стенде понадобятся с этапа O2, для правил
+  проверки.
 - **MCP-крейты:** фейковый `Backend`, MCP-клиент rmcp — список инструментов и аннотации, сторожок имён, уровни
   доступа (`not_allowed`, `logs_disabled`), `llmNamespaces`, маскировка в ответах, усечение до 100 КБ, лимиты,
   рукопожатие, журнал без содержимого; `tests/manifest.rs` — нет зависимости от `kube`, `k8s-openapi`, `reqwest` и
