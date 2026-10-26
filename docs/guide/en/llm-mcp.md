@@ -20,8 +20,8 @@ If Glafira is not running, the client starts it and waits up to 30 seconds.
 1. Open [[ui:sidebar.settings]], section [[ui:settings.mcp.section]].
 2. Select [[ui:settings.mcp.enable]]. The status changes to [[ui:settings.mcp.state.running]].
 3. In the connection form, set [[ui:connections.form.llmAccess]] to [[ui:connections.form.llmAccessMetadata]] and
-   save. The assistant does not see connections with access turned off. In the connection tree, open connections
-   have an `LLM` badge.
+   save. The assistant does not see connections with access turned off. In the connection tree, connections with
+   this access have an `LLM` badge.
 4. In [[ui:connections.form.llmScope]], keep [[ui:connections.form.llmScopeAll]] or choose
    [[ui:connections.form.llmScopeList]] and list the projects.
 
@@ -69,9 +69,13 @@ the cluster and the nodes — if you can read them:
 - cluster check findings and its own notes.
 
 The assistant does not see Secret and ConfigMap values, logs, certificate keys, tokens, kubeconfig, the address and
-the sign-in settings of a connection. Values with secret names (`password`, `token`, `secret`…) and strings that look
-like secrets (JWT, `Bearer …`, `AKIA…` keys, PEM private keys, `sha256~…` tokens, passwords in URLs) are replaced
-with `***`.
+the sign-in settings of a connection. By a secret name (`password`, `token`, `secret`, `apikey`, `credentials`,
+`private`, `authorization` and the like), Glafira hides only the values of flags in `command` and `args`
+(`--password=…`, `--token …`) and the values of annotations. Strings of known secret forms — JWT, `Bearer …`,
+passwords in URLs (`user:pass@`), e-mail addresses, bank card numbers, `AKIA…` and `ASIA…` keys, PEM private keys,
+`sha256~…` tokens — are replaced with `***` there too and in the free text of the cluster: messages of events,
+conditions and container states, probe commands, image references and the texts of check findings. So `password=x` in
+an event message is not hidden.
 
 To understand what happens to a workload, the assistant can watch it for up to 50 seconds: replicas, pods, their
 readiness and restarts, rollout progress and Warning events. It cannot get the application's logs and configuration
@@ -83,7 +87,7 @@ assistant that this data is not instructions for it.
 ## Sessions, revoking and the log {#sessions-log}
 
 While a client is connected, an `LLM` indicator with the client name is shown at the bottom of the sidebar; it lights
-up during a request. Clicking it opens the MCP section.
+up during a request. Clicking it opens Settings, where the MCP section is.
 
 - [[ui:settings.mcp.sessions]]: [[ui:settings.mcp.disconnect]] closes one session, [[ui:settings.mcp.disconnectAll]]
   closes all.
