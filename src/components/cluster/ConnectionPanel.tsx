@@ -2,11 +2,16 @@ import { useIsMutating, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../api/client";
 import type { ApiGroups, AppError, Capabilities, ConnectionInfo, ConnectionProfile } from "../../api/types";
+import { formatDateTime } from "../../lib/age";
 import { needsSignIn } from "../../lib/signIn";
 import { useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Hint } from "../common/Hint";
+import { ClusterOverviewView } from "./ClusterOverview";
 import { LoginWait, reconnect, SessionActions, sessionMutationKey } from "./SessionActions";
+
+/** За сколько до истечения токена показывается предупреждение (спец. §5.2). */
+const TOKEN_WARNING_SEC = 3600;
 
 const CAPABILITIES: (keyof Capabilities)[] = ["listProjects", "listNodes", "listAllPods", "readClusterOperators", "readClusterVersion"];
 /** Права, которые бывают только у OpenShift. */
@@ -49,6 +54,11 @@ export function ConnectionPanel({ connectionId }: { connectionId: string }) {
         <button type="button" onClick={() => open({ kind: "connection-form", connectionId })}>
           {t("cluster.connection.edit")}
         </button>
+        {q.data?.capabilities.listNodes && (
+          <button type="button" onClick={() => open({ kind: "nodes", connectionId })}>
+            {t("cluster.nodes.open")}
+          </button>
+        )}
       </div>
       {/* Exec-плагин может ждать входа в браузере до 5 минут, и при первом подключении, и при повторе. Рядом с ошибкой входа то же ожидание показывает SessionActions. */}
       {exec && q.isFetching && !signIn && (
@@ -59,6 +69,7 @@ export function ConnectionPanel({ connectionId }: { connectionId: string }) {
       {!exec && q.isPending && <p className="muted">{t("cluster.connection.connecting")}</p>}
       {error && <ConnectionError error={error} signIn={signIn} onRetry={() => void q.refetch()} profile={profile} />}
       {q.data && <ConnectionSummary info={q.data} />}
+      {q.data && <ClusterOverviewView connectionId={connectionId} />}
     </div>
   );
 }
@@ -82,8 +93,14 @@ function ConnectionSummary({ info }: { info: ConnectionInfo }) {
   const { t } = useTranslation();
   const openShift = info.platform.kind === "openshift";
   const found = API_GROUPS.filter(([k]) => info.apiGroups[k]).map(([, name]) => name);
+  const expiresIn = info.tokenExpiresAt === null ? null : info.tokenExpiresAt - Date.now() / 1000;
   return (
     <>
+      {expiresIn !== null && expiresIn < TOKEN_WARNING_SEC && (
+        <p className="warn" role="status">
+          {expiresIn > 0 ? t("cluster.connection.tokenExpiresSoon") : t("cluster.connection.tokenExpired")}
+        </p>
+      )}
       <dl className="stats">
         <div>
           <dt>{t("cluster.connection.user")}</dt>
@@ -111,6 +128,12 @@ function ConnectionSummary({ info }: { info: ConnectionInfo }) {
           </dt>
           <dd>{found.length > 0 ? found.join(", ") : "—"}</dd>
         </div>
+        {info.tokenExpiresAt !== null && (
+          <div>
+            <dt>{t("cluster.connection.tokenExpires")}</dt>
+            <dd>{formatDateTime(info.tokenExpiresAt)}</dd>
+          </div>
+        )}
       </dl>
       <h3>{t("cluster.connection.capabilities")}</h3>
       <ul className="steps">

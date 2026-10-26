@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import type { Tab } from "../state/workspace";
 import { AboutPanel } from "./about/AboutPanel";
 import { ConnectionPanel } from "./cluster/ConnectionPanel";
+import { NodesPanel } from "./cluster/NodesPanel";
 import { ConnectionFormTab } from "./connections/ConnectionFormTab";
 import { SettingsPanel } from "./settings/SettingsPanel";
 
@@ -43,5 +44,7 @@ export function TabContent({ tab }: { tab: Tab }) {
       return <ConnectionFormTab connectionId={tab.connectionId} folderId={tab.folderId ?? null} tabId={tab.id} />;
     case "cluster":
       return <ConnectionPanel connectionId={tab.connectionId} />;
+    case "nodes":
+      return <NodesPanel connectionId={tab.connectionId} />;
   }
 }

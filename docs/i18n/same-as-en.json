@@ -1,6 +1,8 @@
 {
   "ru": [
     "connections.form.step.tcp",
-    "connections.form.step.tls"
+    "connections.form.step.tls",
+    "cluster.nodes.taints",
+    "cluster.nodes.version"
   ]
 }

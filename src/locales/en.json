@@ -205,7 +205,8 @@
     },
     "cluster": {
       "platform": "Detected from the API groups and the version: OpenShift, or Kubernetes with its distribution (EKS, GKE, AKS, Rancher, Deckhouse, k3s, RKE2).",
-      "apiGroups": "What the cluster offers beyond plain Kubernetes: Route, projects and DeploymentConfig (OpenShift), Gateway API. They decide which objects are shown."
+      "apiGroups": "What the cluster offers beyond plain Kubernetes: Route, projects and DeploymentConfig (OpenShift), Gateway API. They decide which objects are shown.",
+      "readyz": "The <code>/readyz</code> checks of the API server. Any user can read them; a failed check names the part of the server that is not ready."
     },
     "kubeconfig": {
       "target": "New connections go to this folder; connections that already exist keep their place, name, environment and color."
@@ -298,7 +299,10 @@
       "apiGroups": "Found in the cluster",
       "capabilities": "What you can read at the cluster level",
       "groups_one": "{{count}} group",
-      "groups_other": "{{count}} groups"
+      "groups_other": "{{count}} groups",
+      "tokenExpires": "Token valid until",
+      "tokenExpiresSoon": "The token expires in less than an hour — sign in again soon",
+      "tokenExpired": "The token has expired — sign in again"
     },
     "capability": {
       "listProjects": "List of projects",
@@ -318,6 +322,62 @@
       "saveToken": "Save token",
       "tokenPage": "Get a token on the cluster page",
       "editConnection": "Edit connection"
+    },
+    "overview": {
+      "title": "Cluster overview",
+      "apiServer": "API server",
+      "ready": "ready",
+      "notReady": "not ready",
+      "failedChecks": "Failed checks",
+      "nodes": "Ready nodes",
+      "byRole": "By role",
+      "projects": "Projects",
+      "ingressClasses": "Ingress classes",
+      "gatewayClasses": "Gateway classes",
+      "defaultClass": "default",
+      "version": "Version",
+      "channel": "Update channel",
+      "updates": "Available updates",
+      "failing": "Update fails",
+      "progressing": "Updating",
+      "infrastructure": "Infrastructure",
+      "console": "Web console",
+      "operators": "Cluster operators",
+      "operatorsOk": "All {{total}} operators are fine.",
+      "operatorsProblems": "Not fine: {{bad}} of {{total}}.",
+      "operatorsAll": "Show all",
+      "operatorsProblemsOnly": "Only the problems",
+      "machineConfigPools": "Machine config pools",
+      "machinesUpdated": "machines updated",
+      "updating": "updating",
+      "degraded_one": "{{count}} machine degraded",
+      "degraded_other": "{{count}} machines degraded",
+      "hiddenByRights": "The rest is hidden by your rights."
+    },
+    "operators": {
+      "name": "Operator",
+      "available": "Available",
+      "progressing": "Progressing",
+      "degraded": "Degraded",
+      "message": "Message"
+    },
+    "nodes": {
+      "open": "Nodes",
+      "title": "Nodes",
+      "name": "Name",
+      "status": "Status",
+      "roles": "Roles",
+      "version": "Kubelet",
+      "memory": "Memory",
+      "age": "Age",
+      "addresses": "Addresses",
+      "os": "OS",
+      "runtime": "Container runtime",
+      "conditions": "Conditions",
+      "taints": "Taints",
+      "resources": "Resources",
+      "capacity": "Capacity",
+      "allocatable": "Allocatable"
     }
   },
   "sidebar": {
@@ -409,7 +469,8 @@
     "help": "Help",
     "connection": "Connection: {{name}}",
     "newConnection": "New connection",
-    "cluster": "{{conn}} · Overview"
+    "cluster": "{{conn}} · Overview",
+    "nodes": "{{conn}} · Nodes"
   },
   "layout": {
     "closeTab": "Close tab",
@@ -448,6 +509,8 @@
       "reason": "Reason",
       "message": "Message",
       "since": "Since"
-    }
+    },
+    "labels": "Labels",
+    "annotations": "Annotations"
   }
 }

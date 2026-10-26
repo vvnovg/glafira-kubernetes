@@ -1,8 +1,9 @@
 import { create } from "zustand";
 
 export type TabSpec =
-  /** Обзор подключения: кто вошёл, версия, права (этап O1b добавит обзор кластера). */
+  /** Обзор подключения и кластера: кто вошёл, права, API-сервер, ноды, у OpenShift — обновления и операторы. */
   | { kind: "cluster"; connectionId: string }
+  | { kind: "nodes"; connectionId: string }
   /** folderId — папка нового подключения («Новое подключение здесь»). */
   | { kind: "connection-form"; connectionId: string | null; folderId?: string | null }
   | { kind: "about" }

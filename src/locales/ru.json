@@ -205,7 +205,8 @@
     },
     "cluster": {
       "platform": "Определяется по группам API и версии: OpenShift или Kubernetes с дистрибутивом (EKS, GKE, AKS, Rancher, Deckhouse, k3s, RKE2).",
-      "apiGroups": "Что есть в кластере сверх обычного Kubernetes: Route, проекты и DeploymentConfig (OpenShift), Gateway API. От этого зависит, какие объекты показываются."
+      "apiGroups": "Что есть в кластере сверх обычного Kubernetes: Route, проекты и DeploymentConfig (OpenShift), Gateway API. От этого зависит, какие объекты показываются.",
+      "readyz": "Проверки <code>/readyz</code> API-сервера. Их может читать любой пользователь; непройденная проверка называет часть сервера, которая не готова."
     },
     "kubeconfig": {
       "target": "Новые подключения попадут в эту папку; уже существующие сохранят своё место, имя, окружение и цвет."
@@ -300,7 +301,10 @@
       "groups_one": "{{count}} группа",
       "groups_few": "{{count}} группы",
       "groups_many": "{{count}} групп",
-      "groups_other": "{{count}} группы"
+      "groups_other": "{{count}} группы",
+      "tokenExpires": "Токен действует до",
+      "tokenExpiresSoon": "Токен истекает меньше чем через час — скоро нужно будет войти снова",
+      "tokenExpired": "Срок токена истёк — войдите снова"
     },
     "capability": {
       "listProjects": "Список проектов",
@@ -320,6 +324,64 @@
       "saveToken": "Сохранить токен",
       "tokenPage": "Получить токен на странице кластера",
       "editConnection": "Изменить подключение"
+    },
+    "overview": {
+      "title": "Обзор кластера",
+      "apiServer": "API-сервер",
+      "ready": "готов",
+      "notReady": "не готов",
+      "failedChecks": "Не пройдены проверки",
+      "nodes": "Готовые ноды",
+      "byRole": "По ролям",
+      "projects": "Проекты",
+      "ingressClasses": "Классы Ingress",
+      "gatewayClasses": "Классы Gateway",
+      "defaultClass": "по умолчанию",
+      "version": "Версия",
+      "channel": "Канал обновлений",
+      "updates": "Доступно обновлений",
+      "failing": "Обновление не удаётся",
+      "progressing": "Идёт обновление",
+      "infrastructure": "Инфраструктура",
+      "console": "Веб-консоль",
+      "operators": "Операторы кластера",
+      "operatorsOk": "Все {{total}} операторов в норме.",
+      "operatorsProblems": "Не в норме: {{bad}} из {{total}}.",
+      "operatorsAll": "Показать все",
+      "operatorsProblemsOnly": "Только проблемные",
+      "machineConfigPools": "Пулы машин (MachineConfigPool)",
+      "machinesUpdated": "машин обновлено",
+      "updating": "обновляется",
+      "degraded_one": "деградировала {{count}} машина",
+      "degraded_few": "деградировали {{count}} машины",
+      "degraded_many": "деградировали {{count}} машин",
+      "degraded_other": "деградировали {{count}} машины",
+      "hiddenByRights": "Остальное скрыто правами."
+    },
+    "operators": {
+      "name": "Оператор",
+      "available": "Доступен",
+      "progressing": "Обновляется",
+      "degraded": "Деградировал",
+      "message": "Сообщение"
+    },
+    "nodes": {
+      "open": "Ноды",
+      "title": "Ноды",
+      "name": "Имя",
+      "status": "Статус",
+      "roles": "Роли",
+      "version": "Kubelet",
+      "memory": "Память",
+      "age": "Возраст",
+      "addresses": "Адреса",
+      "os": "ОС",
+      "runtime": "Среда контейнеров",
+      "conditions": "Условия",
+      "taints": "Taints",
+      "resources": "Ресурсы",
+      "capacity": "Ёмкость",
+      "allocatable": "Доступно подам"
     }
   },
   "sidebar": {
@@ -415,7 +477,8 @@
     "help": "Справка",
     "connection": "Подключение: {{name}}",
     "newConnection": "Новое подключение",
-    "cluster": "{{conn}} · Обзор"
+    "cluster": "{{conn}} · Обзор",
+    "nodes": "{{conn}} · Ноды"
   },
   "layout": {
     "closeTab": "Закрыть вкладку",
@@ -458,6 +521,8 @@
       "reason": "Причина",
       "message": "Сообщение",
       "since": "С момента"
-    }
+    },
+    "labels": "Метки",
+    "annotations": "Аннотации"
   }
 }

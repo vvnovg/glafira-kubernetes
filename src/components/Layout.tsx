@@ -24,6 +24,8 @@ function tabTitle(tab: Tab, byId: Map<string, ConnectionProfile>): string {
       return tab.connectionId ? i18n.t("tabs.connection", { name: conn }) : i18n.t("tabs.newConnection");
     case "cluster":
       return i18n.t("tabs.cluster", { conn });
+    case "nodes":
+      return i18n.t("tabs.nodes", { conn });
   }
 }
 

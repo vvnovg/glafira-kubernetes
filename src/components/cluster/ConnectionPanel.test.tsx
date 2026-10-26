@@ -16,13 +16,14 @@ vi.mock("../../api/client", async (importOriginal) => {
       cancelOauthLogin: vi.fn(),
       setConnectionToken: vi.fn(),
       oauthTokenPage: vi.fn(),
+      getClusterOverview: vi.fn(),
     },
   };
 });
 
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api } from "../../api/client";
-import type { ConnectionInfo, ConnectionProfile } from "../../api/types";
+import type { ClusterOverview, ConnectionInfo, ConnectionProfile } from "../../api/types";
 import { useWorkspace } from "../../state/workspace";
 import { newProfile } from "../connections/profile";
 import { ConnectionPanel } from "./ConnectionPanel";
@@ -59,8 +60,21 @@ const EXEC: ConnectionProfile["auth"] = {
 
 const EXEC_FAILED = { code: "AUTH_FAILED", key: "errors.exec.failed", params: { command: "kubelogin", code: "1" }, message: "x", retryable: false };
 
+/** Обзор кластера под сведениями о подключении; его проверяет ClusterOverview.test.tsx. */
+const OVERVIEW: ClusterOverview = {
+  platform: INFO.platform,
+  serverVersion: "v1.32.5",
+  readyz: { ok: true, failed: [] },
+  nodes: { data: { total: 3, ready: 3, roles: [] } },
+  ingressClasses: { data: [] },
+  gatewayClasses: null,
+  projects: { data: { count: 2, more: false } },
+  platformDetails: null,
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(api.getClusterOverview).mockResolvedValue(OVERVIEW);
   vi.mocked(api.cancelOauthLogin).mockResolvedValue(true);
   useWorkspace.setState({ tabs: [], activeId: null });
 });
@@ -79,6 +93,23 @@ describe("ConnectionPanel", () => {
     expect(screen.getByText("✅ Список проектов")).toBeInTheDocument();
     expect(screen.getByText("— Ноды")).toBeInTheDocument();
     expect(screen.getByText("2 группы")).toBeInTheDocument();
+  });
+
+  it("срок токена и предупреждение за час, кнопка нод при правах на ноды", async () => {
+    const soon = Math.floor(Date.now() / 1000) + 600;
+    vi.mocked(api.listConnections).mockResolvedValue([profile({ method: "browser" })]);
+    vi.mocked(api.connect).mockResolvedValue({
+      ...INFO,
+      tokenExpiresAt: soon,
+      capabilities: { ...INFO.capabilities, listNodes: true },
+    });
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionPanel connectionId="c1" />);
+    expect(await screen.findByText("Токен истекает меньше чем через час — скоро нужно будет войти снова")).toBeInTheDocument();
+    expect(screen.getByText("Токен действует до")).toBeInTheDocument();
+    expect(await screen.findByText("Обзор кластера")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Ноды" }));
+    expect(useWorkspace.getState().tabs[0]).toMatchObject({ kind: "nodes", connectionId: "c1" });
   });
 
   it("Kubernetes: платформа с дистрибутивом, Gateway API, без прав OpenShift", async () => {
