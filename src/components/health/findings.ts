@@ -7,6 +7,12 @@ export const SEVERITIES: Severity[] = ["critical", "warning", "info"];
 const str = (v: unknown) => (typeof v === "string" ? v : "");
 const list = (v: unknown) => (Array.isArray(v) ? v.map(String).join(", ") : "");
 
+/** Сколько пробелов `check.partial` показывает текст; в `params` их список целиком (как `MAX_LISTED` в Rust). */
+export const GAPS_SHOWN = 20;
+
+/** Первые `GAPS_SHOWN` пробелов, дальше «…». */
+const gapsText = (v: unknown) => (Array.isArray(v) ? `${list(v.slice(0, GAPS_SHOWN))}${v.length > GAPS_SHOWN ? ", …" : ""}` : "");
+
 /** Объект словами: «Deployment team-a/web», «под team-a/web-1», «нода w1», «кластер». */
 export function objectText(target: HealthTarget, t: TFunction): string {
   // Не `ns`: так i18next называет пространство имён словаря.
@@ -46,7 +52,7 @@ export function findingParams(f: Finding, t: TFunction): Record<string, string |
     }
     if (f.params.podLimit === true) parts.push(t("health.partialParts.pods"));
     if (f.params.timedOut === true) parts.push(t("health.partialParts.timedOut"));
-    if (Array.isArray(f.params.gaps) && f.params.gaps.length > 0) parts.push(t("health.partialParts.gaps", { gaps: list(f.params.gaps) }));
+    if (Array.isArray(f.params.gaps) && f.params.gaps.length > 0) parts.push(t("health.partialParts.gaps", { gaps: gapsText(f.params.gaps) }));
     p.parts = parts.join("; ");
   }
   return p;

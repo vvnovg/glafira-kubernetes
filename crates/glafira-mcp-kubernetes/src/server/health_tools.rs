@@ -170,17 +170,27 @@ fn mask_findings(m: &Masker, findings: &mut [HealthFinding]) {
 /// Находка о неполной проверке.
 const CHECK_PARTIAL: &str = "check.partial";
 
+/// Сколько пробелов `check.partial` видит модель; столько же показывает приложение.
+const MAX_LISTED_GAPS: usize = 20;
+
 /// Проверку мог запустить человек по большему числу проектов, чем видит LLM, и приложение
 /// отдаёт её целиком. Здесь она сужается до области подключения: проекты вне её неотличимы от
-/// отсутствующих (спец. §10.2). Область «все проекты» проверку не меняет.
+/// отсутствующих (спец. §10.2). Область «все проекты» проверку не сужает.
 ///
 /// Находки вне области и чужие проекты в `scope.projects` отбрасываются. `scope.projects_total`
 /// считает проекты области: проверенные и не проверенные из-за предела, но не больше самой
 /// области. `scope.pods` и `scope.nodes` — итог всей проверки, их число проекта не называет и
 /// остаётся прежним. `incomplete` и находка `check.partial` в приложении возникают по одному
 /// условию: если находка была и после сужения её не осталось, проверка для LLM полная.
+/// В любой области пробелы `check.partial` сужаются по полному списку и лишь затем обрезаются
+/// до `MAX_LISTED_GAPS` (`limit_partial`).
 fn limit_to_scope(run: &mut HealthRun, scope: &Scope) {
     let Some(allowed) = &scope.namespaces else {
+        for f in &mut run.findings {
+            if f.rule_id == CHECK_PARTIAL {
+                limit_partial(f, None, None);
+            }
+        }
         return;
     };
     let had_partial = run.findings.iter().any(|f| f.rule_id == CHECK_PARTIAL);
@@ -195,40 +205,43 @@ fn limit_to_scope(run: &mut HealthRun, scope: &Scope) {
     // Числа в `check.partial` пересчитываются, только если проверка охватила чужие проекты.
     let counts = foreign.then_some((checked, total));
     run.findings
-        .retain_mut(|f| f.rule_id != CHECK_PARTIAL || limit_partial(f, allowed, counts));
+        .retain_mut(|f| f.rule_id != CHECK_PARTIAL || limit_partial(f, Some(allowed), counts));
     if had_partial && !run.findings.iter().any(|f| f.rule_id == CHECK_PARTIAL) {
         run.incomplete = false;
     }
 }
 
-/// `check.partial` без чужих проектов: пробелы `<проект>/<часть>: <код>` вне области убраны,
-/// `gapCount` уменьшен на них, `projectsChecked`, `projectsTotal` и `projectLimit` — по
-/// проектам области (`counts`). Если текст изменился, `details` собирается заново из `params`.
+/// `check.partial` для модели. В `params` приложение кладёт список пробелов целиком
+/// (`<проект>/<часть>: <код>` или `<часть>: <код>`). Если задана область `allowed`, пробелы чужих
+/// проектов убираются из всего списка, и `gapCount` считается заново по оставшимся — иначе при
+/// длинном списке чужие пробелы, попавшие в первые 20, вытеснили бы пробелы области, а их число
+/// выдало бы чужие проекты. Только потом список обрезается до `MAX_LISTED_GAPS`; `gapCount`
+/// остаётся полным числом пробелов. `projectsChecked`, `projectsTotal` и `projectLimit` пересчитываются
+/// по проектам области (`counts`). Если `params` изменились, `details` собирается заново.
 /// `false` — находка осталась без причины (ни предела, ни дедлайна, ни пробелов) и отбрасывается:
 /// у проверки только по проектам области её не было бы.
 fn limit_partial(
     f: &mut HealthFinding,
-    allowed: &BTreeSet<String>,
+    allowed: Option<&BTreeSet<String>>,
     counts: Option<(usize, usize)>,
 ) -> bool {
     let before = f.params.clone();
-    let removed = match f.params.get_mut("gaps") {
-        Some(Value::Array(gaps)) => {
-            let listed = gaps.len();
+    let mut narrowed = None;
+    if let Some(Value::Array(gaps)) = f.params.get_mut("gaps") {
+        if let Some(allowed) = allowed {
             gaps.retain(|g| {
                 g.as_str()
                     .and_then(|g| g.split_once('/'))
                     .is_none_or(|(ns, _)| allowed.contains(ns))
             });
-            listed - gaps.len()
+            narrowed = Some(gaps.len());
         }
-        _ => 0,
-    };
-    if removed > 0
-        && let Some(n) = f.params.get("gapCount").and_then(Value::as_u64)
+        gaps.truncate(MAX_LISTED_GAPS);
+    }
+    if let Some(n) = narrowed
+        && f.params.contains_key("gapCount")
     {
-        f.params
-            .insert("gapCount".into(), json!(n.saturating_sub(removed as u64)));
+        f.params.insert("gapCount".into(), json!(n));
     }
     if let Some((checked, total)) = counts {
         for (key, value) in [
@@ -286,18 +299,26 @@ fn partial_details(p: &Map<String, Value>) -> String {
     if flag("timedOut") {
         parts.push("the check stopped at its 45 s deadline".to_string());
     }
-    if p.get("gapCount").and_then(Value::as_u64).unwrap_or(0) > 0 {
-        let gaps = match p.get("gaps") {
-            Some(Value::Array(items)) => items
-                .iter()
-                .map(|g| match g {
-                    Value::String(s) => s.clone(),
-                    v => v.to_string(),
-                })
-                .collect::<Vec<_>>()
-                .join(", "),
-            _ => String::new(),
+    let counted = p.get("gapCount").and_then(Value::as_u64).unwrap_or(0);
+    if counted > 0 {
+        let (mut gaps, shown) = match p.get("gaps") {
+            Some(Value::Array(items)) => (
+                items
+                    .iter()
+                    .map(|g| match g {
+                        Value::String(s) => s.clone(),
+                        v => v.to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                items.len() as u64,
+            ),
+            _ => (String::new(), 0),
         };
+        // Показано меньше, чем пробелов (список обрезан до 20): как в тексте приложения, «…».
+        if shown > 0 && counted > shown {
+            gaps.push_str(", …");
+        }
         parts.push(format!("not read: {gaps}"));
     }
     match parts.is_empty() {
@@ -664,6 +685,12 @@ mod tests {
             partial_details(&Map::new()),
             "Some objects were not checked: findings may be missing for them."
         );
+        // Показано меньше, чем пробелов: список заканчивается многоточием.
+        let more = json!({"gaps": ["a: X", "b: X"], "gapCount": 3});
+        assert_eq!(
+            partial_details(more.as_object().unwrap()),
+            "Some objects were not checked: not read: a: X, b: X, …. Findings may be missing for them."
+        );
     }
 
     #[test]
@@ -734,6 +761,97 @@ mod tests {
         run.incomplete = true;
         limit_to_scope(&mut run, &Scope::default());
         assert!(run.incomplete && run.findings.len() == 1);
+    }
+
+    /// Чужие пробелы идут первыми: 30 чужих, затем 25 пробелов проекта `a` и пробел без проекта.
+    fn many_gaps() -> Vec<String> {
+        let mut gaps: Vec<String> = (0..30)
+            .map(|i| format!("b/part{i:02}: FORBIDDEN"))
+            .collect();
+        gaps.extend((0..25).map(|i| format!("a/part{i:02}: FORBIDDEN")));
+        gaps.push("nodes: FORBIDDEN".into());
+        gaps
+    }
+
+    fn many_gaps_run() -> HealthRun {
+        let gaps = many_gaps();
+        let f = partial(
+            json!({"projectLimit": false, "projectsChecked": 2, "projectsTotal": 2,
+                   "podLimit": false, "timedOut": false,
+                   "gaps": gaps, "gapCount": gaps.len()}),
+            "text of the app",
+        );
+        run_of(&["a", "b"], 2, f)
+    }
+
+    #[test]
+    fn gaps_are_narrowed_on_the_full_list_and_then_cut_for_the_model() {
+        let mut run = many_gaps_run();
+        limit_to_scope(&mut run, &scope_of(&["a"]));
+        let f = &run.findings[0];
+        // В области 26 пробелов (25 проекта и один без проекта); модель видит первые 20 из них.
+        assert_eq!(f.params["gapCount"], 26);
+        let listed: Vec<_> = f.params["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g.as_str().unwrap().to_string())
+            .collect();
+        let expected: Vec<_> = (0..20)
+            .map(|i| format!("a/part{i:02}: FORBIDDEN"))
+            .collect();
+        assert_eq!(listed, expected);
+        assert!(
+            f.details.contains("a/part19: FORBIDDEN, …. Findings"),
+            "{}",
+            f.details
+        );
+        assert!(!f.details.contains("a/part20"), "{}", f.details);
+        let text = serde_json::to_string(&run.findings).unwrap();
+        assert!(
+            !text.contains("b/part") && !text.contains("\"b\""),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn foreign_gaps_filling_the_first_twenty_do_not_hide_the_ones_in_the_scope() {
+        // Область из одного пробела после 30 чужих: прежде список из 20 был бы целиком чужим.
+        let mut gaps: Vec<String> = (0..30)
+            .map(|i| format!("b/part{i:02}: FORBIDDEN"))
+            .collect();
+        gaps.push("a/secrets: FORBIDDEN".into());
+        let f = partial(
+            json!({"projectLimit": false, "projectsChecked": 2, "projectsTotal": 2,
+                   "podLimit": false, "timedOut": false,
+                   "gaps": gaps, "gapCount": 31}),
+            "text of the app",
+        );
+        let mut run = run_of(&["a", "b"], 2, f);
+        limit_to_scope(&mut run, &scope_of(&["a"]));
+        let f = &run.findings[0];
+        assert_eq!(f.params["gapCount"], 1);
+        assert_eq!(f.params["gaps"], json!(["a/secrets: FORBIDDEN"]));
+        assert_eq!(
+            f.details,
+            "Some objects were not checked: not read: a/secrets: FORBIDDEN. Findings may be missing for them."
+        );
+    }
+
+    #[test]
+    fn the_whole_scope_gets_the_first_twenty_gaps_and_the_full_count() {
+        let mut run = many_gaps_run();
+        limit_to_scope(&mut run, &Scope::default());
+        let f = &run.findings[0];
+        assert_eq!(f.params["gapCount"], 56);
+        let gaps = f.params["gaps"].as_array().unwrap();
+        assert_eq!(gaps.len(), 20);
+        assert_eq!(gaps[0], "b/part00: FORBIDDEN");
+        assert!(
+            f.details.contains("b/part19: FORBIDDEN, …. Findings"),
+            "{}",
+            f.details
+        );
     }
 
     #[test]

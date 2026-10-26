@@ -112,7 +112,10 @@ pub fn check(s: &ClusterSnapshot, out: &mut Findings) {
     }
 }
 
-/// `check.partial`: что не проверено и почему.
+/// `check.partial`: что не проверено и почему. `gaps` — список пробелов целиком (проектов не
+/// больше 50, частей на проект около дюжины): шлюз MCP сужает его по области LLM до обрезки, иначе
+/// пробелы вне области, попавшие в первые 20, вытеснили бы пробелы области. Двадцатью обрезают
+/// только то, что показывают: тексты находки в приложении и ответ модели.
 pub fn partial(s: &ClusterSnapshot, out: &mut Findings) {
     let c = &s.coverage;
     if !c.partial() {
@@ -136,7 +139,7 @@ pub fn partial(s: &ClusterSnapshot, out: &mut Findings) {
             "projectLimit": c.projects_checked < c.projects_total,
             "podLimit": c.pod_limit,
             "timedOut": c.timed_out,
-            "gaps": listed(&gaps),
+            "gaps": gaps,
             "gapCount": gaps.len(),
         }),
     );
@@ -364,5 +367,31 @@ mod tests {
             ),
             (Some(true), Some(true))
         );
+    }
+
+    #[test]
+    fn partial_keeps_the_full_list_of_gaps() {
+        // Список целиком: шлюз MCP сужает его по области LLM, а видимыми остаются первые 20 —
+        // это уже дело текстов (приложение) и шлюза (модель).
+        let mut s = ClusterSnapshot::empty(NOW, PlatformKind::Kubernetes);
+        s.coverage = Coverage {
+            projects_total: 40,
+            projects_checked: 40,
+            pod_limit: false,
+            timed_out: false,
+            gaps: (0..40)
+                .map(|i| Gap {
+                    part: "secrets".into(),
+                    namespace: Some(format!("team-{i:02}")),
+                    code: "FORBIDDEN".into(),
+                })
+                .collect(),
+        };
+        let v = run(&s, Environment::Prod);
+        let gaps = v[0].params["gaps"].as_array().unwrap();
+        assert_eq!(gaps.len(), 40);
+        assert_eq!(v[0].params["gapCount"], 40);
+        assert_eq!(gaps[0], "team-00/secrets: FORBIDDEN");
+        assert_eq!(gaps[39], "team-39/secrets: FORBIDDEN");
     }
 }

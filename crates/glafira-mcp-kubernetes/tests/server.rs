@@ -1828,6 +1828,62 @@ async fn a_run_wider_than_the_llm_scope_does_not_name_foreign_projects() {
     assert!(!text.contains("team-b"), "{text}");
 }
 
+/// Чужие пробелы (team-b) идут первыми и заполняют первые двадцать; в области team-a их 25
+/// и ещё один без проекта.
+fn many_gaps() -> Vec<String> {
+    let mut gaps: Vec<String> = (0..30)
+        .map(|i| format!("team-b/part{i:02}: FORBIDDEN"))
+        .collect();
+    gaps.extend((0..25).map(|i| format!("team-a/part{i:02}: FORBIDDEN")));
+    gaps.push("nodes: FORBIDDEN".into());
+    gaps
+}
+
+#[tokio::test]
+async fn gaps_of_a_wide_run_are_narrowed_on_the_full_list_before_they_are_cut() {
+    let gaps = many_gaps();
+    let params = partial_params(json!(gaps));
+    let mut run = wide_run(&["team-a", "team-b"], 2, params, "text of the app");
+    run.incomplete = true;
+    let e = env_over(Arc::new(Odd {
+        fake: Fake::new(),
+        mode: Mode::Run(Box::new(run)),
+    }))
+    .await;
+    let c = client(&e.ep).await;
+    let v = ok(call(&c, "health_check", json!({"connectionId": "c1"})).await);
+    let partial = &v["findings"]["items"][0];
+    assert_eq!(partial["ruleId"], "check.partial");
+    // В области 26 пробелов; видны первые 20 — все из team-a.
+    assert_eq!(partial["params"]["gapCount"], 26);
+    let listed: Vec<_> = partial["params"]["gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g.as_str().unwrap().to_string())
+        .collect();
+    let expected: Vec<_> = (0..20)
+        .map(|i| format!("team-a/part{i:02}: FORBIDDEN"))
+        .collect();
+    assert_eq!(listed, expected);
+    let details = partial["details"].as_str().unwrap();
+    assert!(
+        details.contains("not read: team-a/part00: FORBIDDEN, ")
+            && details.contains("part19: FORBIDDEN, …."),
+        "{details}"
+    );
+    assert_eq!(v["incomplete"], true);
+    let text = serde_json::to_string(&v).unwrap();
+    assert!(!text.contains("team-b"), "{text}");
+
+    // Область «все проекты»: число — всё, список — первые двадцать.
+    let v = ok(call(&c, "health_check", json!({"connectionId": "c2"})).await);
+    let partial = &v["findings"]["items"][0];
+    assert_eq!(partial["params"]["gapCount"], 56);
+    assert_eq!(partial["params"]["gaps"].as_array().unwrap().len(), 20);
+    assert_eq!(partial["params"]["gaps"][0], "team-b/part00: FORBIDDEN");
+}
+
 #[tokio::test]
 async fn a_run_over_all_projects_is_returned_as_it_is() {
     let params = partial_params(json!(["team-b/secrets: FORBIDDEN", "nodes: FORBIDDEN"]));

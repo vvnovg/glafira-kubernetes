@@ -65,6 +65,14 @@ describe("findingTexts", () => {
     expect(findingTexts(partial, t).details).toBe(
       "Часть объектов не проверена: проверено только 50 из 70 проектов (предел 50); проверка остановилась по пределу 45 с; не прочитано: nodes: FORBIDDEN. Находок по ним может не хватать.",
     );
+    // Список пробелов в params целиком; в тексте — первые 20 и «…».
+    const gapsOf = (n: number) => Array.from({ length: n }, (_, i) => `team-${String(i).padStart(2, "0")}/secrets: FORBIDDEN`);
+    const many = (n: number) => finding("check.partial", "info", { kind: "cluster" }, { gaps: gapsOf(n), gapCount: n });
+    const shown = (n: number) => findingTexts(many(n), t).details;
+    expect(shown(20)).toContain("team-19/secrets: FORBIDDEN. Находок");
+    expect(shown(20)).not.toContain("…");
+    expect(shown(25)).toContain("team-19/secrets: FORBIDDEN, …. Находок");
+    expect(shown(25)).not.toContain("team-20");
     const operators = finding("cluster.operatorDegraded", "critical", { kind: "cluster" }, {
       operators: [{ name: "dns", degraded: true }],
       names: ["dns"],

@@ -4,6 +4,7 @@
 use serde_json::Value;
 
 use super::model::{Finding, TargetKind};
+use super::rules::MAX_LISTED;
 
 fn text(v: &Value) -> String {
     match v {
@@ -18,6 +19,23 @@ fn list(f: &Finding, name: &str) -> String {
         Some(Value::Array(items)) => items.iter().map(text).collect::<Vec<_>>().join(", "),
         _ => String::new(),
     }
+}
+
+/// Пробелы `check.partial`: в `params` их список целиком, показываются первые `MAX_LISTED`, дальше «…».
+fn gaps(f: &Finding) -> String {
+    let Some(Value::Array(items)) = f.params.get("gaps") else {
+        return String::new();
+    };
+    let mut shown = items
+        .iter()
+        .take(MAX_LISTED)
+        .map(text)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if items.len() > MAX_LISTED {
+        shown.push_str(", …");
+    }
+    shown
 }
 
 fn param(f: &Finding, name: &str) -> String {
@@ -364,7 +382,7 @@ pub fn english(f: &Finding) -> (String, String) {
                     parts.push("the check stopped at its 45 s deadline".into());
                 }
                 if f.param_i64("gapCount").unwrap_or(0) > 0 {
-                    parts.push(format!("not read: {}", list(f, "gaps")));
+                    parts.push(format!("not read: {}", gaps(f)));
                 }
                 match parts.is_empty() {
                     true => "Some objects were not checked: findings may be missing for them.".into(),
@@ -451,5 +469,30 @@ mod tests {
             d.contains("45 s deadline") && d.contains("not read: nodes: FORBIDDEN"),
             "{d}"
         );
+    }
+
+    #[test]
+    fn partial_text_shows_the_first_twenty_gaps_and_an_ellipsis() {
+        let partial = |n: usize| {
+            let gaps: Vec<String> = (0..n)
+                .map(|i| format!("team-{i:02}/secrets: FORBIDDEN"))
+                .collect();
+            Finding::new(
+                "check.partial",
+                Severity::Info,
+                Target::cluster(),
+                None,
+                serde_json::json!({ "projectLimit": false, "podLimit": false, "timedOut": false,
+                    "gaps": gaps, "gapCount": n }),
+            )
+        };
+        // Ровно 20 — без многоточия.
+        let (_, d) = english(&partial(20));
+        assert!(d.contains("team-19/secrets: FORBIDDEN. Findings"), "{d}");
+        assert!(!d.contains('…'), "{d}");
+        // Больше 20 — первые 20 и «…»; двадцать первого в тексте нет.
+        let (_, d) = english(&partial(25));
+        assert!(d.contains("team-19/secrets: FORBIDDEN, …. Findings"), "{d}");
+        assert!(!d.contains("team-20"), "{d}");
     }
 }
