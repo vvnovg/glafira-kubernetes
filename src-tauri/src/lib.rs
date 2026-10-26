@@ -23,11 +23,34 @@ pub mod tls;
 pub mod watch;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tauri::{Emitter, Manager};
 
 use crate::secrets::KeyringStore;
 use crate::state::AppState;
+
+/// Сколько выход из приложения ждёт остановку MCP-сервера (сессии, `mcp.json`).
+const MCP_EXIT_GRACE: Duration = Duration::from_secs(2);
+
+/// При выходе: MCP-сервер останавливается, свой `mcp.json` удаляется — шим не пойдёт по
+/// мёртвому адресу.
+fn shutdown_mcp<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    let mcp = app
+        .state::<Arc<crate::mcp::McpController>>()
+        .inner()
+        .clone();
+    let stopped = tauri::async_runtime::block_on(async {
+        tokio::time::timeout(MCP_EXIT_GRACE, mcp.shutdown())
+            .await
+            .is_ok()
+    });
+    if !stopped {
+        tracing::warn!(
+            "mcp server did not stop within {MCP_EXIT_GRACE:?}: exiting without waiting"
+        );
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -52,7 +75,17 @@ pub fn run() {
                     tracing::warn!("health event not sent: {e}");
                 }
             }));
+            if crate::mcp::files::data_dir().as_deref() != Some(dir.as_path()) {
+                tracing::warn!(
+                    shim = ?crate::mcp::files::data_dir(),
+                    "mcp: the shim looks for mcp.json in another data directory"
+                );
+            }
+            let mcp = crate::mcp::McpController::new(st.clone(), &dir);
+            mcp.set_ui(Box::new(crate::mcp::TauriUi(app.handle().clone())));
             app.manage(st);
+            app.manage(mcp.clone());
+            tauri::async_runtime::spawn(async move { mcp.apply().await });
             Ok(())
         })
         // Окно одно, и его каналы сессий живут, пока жива страница. Перезагрузка (Cmd+R, полная
@@ -118,7 +151,20 @@ pub fn run() {
             commands::health::set_annotation_status,
             commands::health::delete_annotation,
             commands::health::delete_all_annotations,
+            commands::mcp::get_mcp_status,
+            commands::mcp::set_mcp_enabled,
+            commands::mcp::answer_mcp_approval,
+            commands::mcp::revoke_mcp_client,
+            commands::mcp::disconnect_mcp_sessions,
+            commands::mcp::get_mcp_audit,
+            commands::mcp::get_mcp_client_configs,
+            commands::mcp::reveal_mcp_audit,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while building tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                shutdown_mcp(app);
+            }
+        });
 }

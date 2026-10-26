@@ -36,7 +36,7 @@ http = "1"
 secrecy = "0.10"
 base64 = "0.22"
 regex = "1"
-tokio = { version = "1", features = ["rt", "macros", "time", "net", "io-util", "sync", "process"] }
+tokio = { version = "1", features = ["rt", "macros", "time", "net", "io-util", "io-std", "sync", "process"] }
 tokio-util = "0.7"
 futures = "0.3"
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "form", "http2", "system-proxy"] }

@@ -164,6 +164,12 @@
     },
     "health": {
       "annotationNotFound": "Замечание удалено или истёк его срок"
+    },
+    "mcp": {
+      "startFailed": "MCP-сервер не запустился: {{error}}",
+      "disabledByPolicy": "MCP отключён вашей организацией",
+      "noExe": "Не удалось найти исполняемый файл Glafira: {{error}}",
+      "auditMissing": "Журнал MCP пока недоступен: {{error}}"
     }
   },
   "messages": {

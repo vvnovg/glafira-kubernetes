@@ -164,6 +164,12 @@
     },
     "health": {
       "annotationNotFound": "The note was deleted or has expired"
+    },
+    "mcp": {
+      "startFailed": "The MCP server did not start: {{error}}",
+      "disabledByPolicy": "MCP is disabled by your organization",
+      "noExe": "Cannot find the Glafira executable: {{error}}",
+      "auditMissing": "The MCP log is not available yet: {{error}}"
     }
   },
   "messages": {

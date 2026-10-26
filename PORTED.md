@@ -150,3 +150,7 @@
 | `src-tauri/src/mcp/files.rs` | `src-tauri/src/mcp/files.rs` | `8bbd0bd` | адаптирован: ссылка на спеку |
 | `src-tauri/src/mcp/approvals.rs` | `src-tauri/src/mcp/approvals.rs` | `8bbd0bd` | адаптирован: крейт glafira-mcp-core, ссылка на спеку |
 | `src-tauri/src/mcp/backend.rs` | `src-tauri/src/mcp/backend.rs` | `8bbd0bd` | адаптирован: чтения Kubernetes через ReadClient, область llmNamespaces, проверка по проектам, объекты Kubernetes |
+| `src-tauri/src/mcp/mod.rs` | `src-tauri/src/mcp/mod.rs` | `8bbd0bd` | адаптирован: имена Kubernetes, сторожок «через MCP кластер не изменить» |
+| `src-tauri/src/mcp/controller.rs` | `src-tauri/src/mcp/controller.rs` | `8bbd0bd` | адаптирован: крейты glafira-mcp-core и glafira-mcp-kubernetes, имя продукта в адресе |
+| `src-tauri/src/mcp/shim.rs` | `src-tauri/src/mcp/shim.rs` | `8bbd0bd` | адаптирован: имя продукта |
+| `src-tauri/src/commands/mcp.rs` | `src-tauri/src/commands/mcp.rs` | `8bbd0bd` | адаптирован: ссылка на спеку |
