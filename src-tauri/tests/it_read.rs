@@ -18,7 +18,7 @@ use glafira_kubernetes_lib::k8s::{
     access, configs, events, network, overview, projects, quotas, storage, workloads, yaml,
 };
 use glafira_kubernetes_lib::logs::{self, KubeLogs, LogEvent, LogParams, Matcher};
-use glafira_kubernetes_lib::sessions::Sink;
+use glafira_kubernetes_lib::sessions::{Sink, StreamClient};
 use glafira_kubernetes_lib::watch::{self, Row, RowChange, WatchEvent, WatchKind};
 use tokio_util::sync::CancellationToken;
 
@@ -375,7 +375,7 @@ async fn logs_of_a_crashed_and_of_a_running_container() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("crash.log");
     let source = KubeLogs {
-        reader: r.clone(),
+        client: StreamClient::fixed(r.clone()),
         params: params(&crash, true, false, None),
     };
     // Между перезапусками (статус Error) «предыдущий» запуск kubelet уже мог убрать, и вместо лога
@@ -403,7 +403,7 @@ async fn logs_of_a_crashed_and_of_a_running_container() {
     let cancel = CancellationToken::new();
     // Хвост — одна строка: остальные две из трёх приходят потоком, а не из накопленного.
     let follow = KubeLogs {
-        reader: r.clone(),
+        client: StreamClient::fixed(r.clone()),
         params: params(&logger, false, true, Some(1)),
     };
     let task = tokio::spawn(logs::run(
@@ -462,9 +462,15 @@ async fn watch_sees_a_new_pod() {
     let sink: Collected<WatchEvent> = Collected::default();
     let cancel = CancellationToken::new();
     let task = tokio::spawn(watch::run(
-        watch::sources(&r, NS, WatchKind::Pods, None, &c.info.api_groups),
+        watch::sources(
+            &StreamClient::fixed(r.clone()),
+            NS,
+            WatchKind::Pods,
+            None,
+            &c.info.api_groups,
+        ),
         watch::poll(
-            r.clone(),
+            StreamClient::fixed(r.clone()),
             NS.into(),
             WatchKind::Pods,
             None,

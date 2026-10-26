@@ -63,6 +63,17 @@ describe("PodList", () => {
     expect(useWorkspace.getState().tabs[0]).toMatchObject({ kind: "pod", connectionId: "c1", namespace: "team-a", name: "web-a" });
   });
 
+  it("ошибка до первого списка видна рядом с «Загрузка…», пока watcher пробует снова", async () => {
+    renderWithClient(<PodList connectionId="c1" namespace="team-a" />);
+    await waitFor(() => expect(api.startWatch).toHaveBeenCalledTimes(1));
+    act(() => emit({ type: "error", error: { code: "TIMEOUT", key: "errors.k8s.timeout", message: "t", retryable: true }, fatal: false }));
+    expect(screen.getByText("Загрузка…")).toBeInTheDocument();
+    expect(screen.getByText("Сервер не ответил вовремя")).toHaveClass("warn");
+    act(() => emit({ type: "reset", items: [podRow("web-a")], errors: [] }));
+    expect(screen.queryByText("Загрузка…")).not.toBeInTheDocument();
+    expect(screen.queryByText("Сервер не ответил вовремя")).not.toBeInTheDocument();
+  });
+
   it("поды CronJob читаются списком, без watch", async () => {
     vi.mocked(api.listPods).mockResolvedValue({ items: [podRow("report-1-x", { owner: { kind: "Job", name: "report-1" } })], truncated: false });
     renderWithClient(<PodList connectionId="c1" namespace="team-a" workload={{ kind: "CronJob", name: "report" }} />);

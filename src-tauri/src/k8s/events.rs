@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::AppResult;
 use crate::k8s::pods::OwnerRef;
-use crate::k8s::read::{Listed, ReadClient};
+use crate::k8s::read::{Listed, ReadClient, check_field_value};
 use crate::k8s::view::seconds;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -186,12 +186,17 @@ pub fn sort_events(rows: &mut [EventRow]) {
 }
 
 /// События проекта или объекта. События пода выбираются на сервере (`fieldSelector`),
-/// события workload'а — по объекту и именам его детей (`concerns`).
+/// события workload'а — по объекту и именам его детей (`concerns`). Вид и имя объекта из webview
+/// проверяются до запроса (`check_field_value`): `,` и `=` дописали бы к выборке свои условия.
 pub async fn list_events(
     r: &ReadClient,
     namespace: &str,
     object: Option<&EventObject>,
 ) -> AppResult<Listed<EventRow>> {
+    if let Some(o) = object {
+        check_field_value(&o.kind)?;
+        check_field_value(&o.name)?;
+    }
     let lp = match object {
         Some(o) if !has_children(&o.kind) => ListParams::default().fields(&format!(
             "involvedObject.kind={},involvedObject.name={}",
@@ -526,5 +531,33 @@ mod tests {
             seen[0].uri
         );
         assert!(!seen[1].uri.contains("fieldSelector"));
+    }
+
+    /// Вид или имя, которые дописали бы к `fieldSelector` свои условия (или ушли бы в путь), —
+    /// ошибка до запроса.
+    #[tokio::test]
+    async fn a_bad_object_of_events_is_rejected_before_any_request() {
+        let (client, server) = mock_client(|_| panic!("запросов быть не должно"));
+        let r = ReadClient::new(client, Duration::from_secs(5));
+        for (kind, name) in [
+            ("Pod", "web-1,involvedObject.namespace=kube-system"),
+            ("Pod", "web=1"),
+            ("Pod,type=Warning", "web-1"),
+            ("Pod", "../web-1"),
+            ("Deployment", "web,x"),
+        ] {
+            let o = EventObject {
+                kind: kind.into(),
+                name: name.into(),
+            };
+            let e = list_events(&r, "team-a", Some(&o)).await.unwrap_err();
+            assert_eq!(
+                (e.code, e.key.as_str()),
+                (crate::error::ErrorCode::InvalidInput, "errors.k8s.badName"),
+                "{kind} {name}"
+            );
+        }
+        drop(r);
+        assert!(server.await.unwrap().is_empty());
     }
 }

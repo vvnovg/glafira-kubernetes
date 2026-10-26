@@ -19,8 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::k8s::errors::{breaks_client, chain_text, from_transport_text, timeout};
-use crate::k8s::read::ReadClient;
-use crate::sessions::{BATCH_WINDOW, Batch, Sink};
+use crate::sessions::{BATCH_WINDOW, Batch, Sink, StreamClient};
 use crate::storage::fs::AtomicFile;
 
 /// Сколько строк с конца читается, если не задано ни начало, ни число строк.
@@ -251,11 +250,23 @@ pub trait LogSource: Send + Sync {
     fn read_timeout(&self) -> Option<Duration> {
         None
     }
+
+    /// Клиент заново перед тем, как открыть поток снова (`StreamClient::refresh`): follow живёт
+    /// дольше учётных данных exec-плагина. По умолчанию клиент один на всю сессию.
+    fn refresh(&self) -> BoxFuture<'_, AppResult<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Новый клиент после ошибки `error`, с которой этот дальше не работает
+    /// (`StreamClient::renew`). `false` — заменить нечем.
+    fn renew<'a>(&'a self, _error: &'a AppError) -> BoxFuture<'a, AppResult<bool>> {
+        Box::pin(async { Ok(false) })
+    }
 }
 
 /// Лог контейнера через API-сервер.
 pub struct KubeLogs {
-    pub reader: ReadClient,
+    pub client: StreamClient,
     pub params: LogParams,
 }
 
@@ -291,7 +302,8 @@ impl KubeLogs {
         Box::pin(async move {
             let lp = self.kube_params(since);
             let r = self
-                .reader
+                .client
+                .reader()
                 .log_stream(&self.params.namespace, &self.params.pod, &lp)
                 .await?;
             Ok(lossy_lines(r, cap))
@@ -312,7 +324,15 @@ impl LogSource for KubeLogs {
     }
 
     fn read_timeout(&self) -> Option<Duration> {
-        Some(self.reader.timeout())
+        Some(self.client.reader().timeout())
+    }
+
+    fn refresh(&self) -> BoxFuture<'_, AppResult<()>> {
+        Box::pin(self.client.refresh())
+    }
+
+    fn renew<'a>(&'a self, error: &'a AppError) -> BoxFuture<'a, AppResult<bool>> {
+        Box::pin(self.client.renew(error))
     }
 
     /// Прежний экземпляр контейнера (`previous`) уже не работает: его лог кончается вместе с
@@ -323,7 +343,8 @@ impl LogSource for KubeLogs {
                 return Ok(false);
             }
             let pod: Pod = self
-                .reader
+                .client
+                .reader()
                 .get(&self.params.namespace, &self.params.pod)
                 .await?;
             let statuses = pod
@@ -377,6 +398,14 @@ impl<S: LogSource, F: Fn(&AppError) + Send + Sync> LogSource for Reported<S, F> 
     fn read_timeout(&self) -> Option<Duration> {
         self.source.read_timeout()
     }
+
+    fn refresh(&self) -> BoxFuture<'_, AppResult<()>> {
+        self.source.refresh()
+    }
+
+    fn renew<'a>(&'a self, error: &'a AppError) -> BoxFuture<'a, AppResult<bool>> {
+        self.source.renew(error)
+    }
 }
 
 /// `since_time` — время RFC 3339. Неверное время иначе молча читало бы весь лог.
@@ -417,6 +446,29 @@ fn read_error(e: &std::io::Error) -> AppError {
     }
 }
 
+/// Поток оборвал таймаут чтения клиента: `TimedOut` где-то в цепочке ошибки (hyper-timeout
+/// кладёт его под ошибку hyper, а kube — под `io::Error::other`).
+fn idle_timed_out(e: &std::io::Error) -> bool {
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(err) = cur {
+        if err
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::TimedOut)
+        {
+            return true;
+        }
+        // `io::Error::source` пропускает обёрнутую ошибку и сразу отдаёт её источник.
+        cur = match err
+            .downcast_ref::<std::io::Error>()
+            .and_then(|io| io.get_ref())
+        {
+            Some(inner) => Some(inner as &(dyn std::error::Error + 'static)),
+            None => err.source(),
+        };
+    }
+    false
+}
+
 /// Следующая строка потока; не пришла к `deadline` — ошибка `TimedOut`.
 async fn next_before(
     stream: &mut BoxStream<'static, std::io::Result<String>>,
@@ -450,33 +502,64 @@ pub async fn run(
     let mut since: Option<Timestamp> = None;
     let mut lost_at: Option<Instant> = None;
     let mut attempt = 0;
+    // Поток открывается снова молча (`Reconnecting` не ушёл): прежний простоял без данных до
+    // таймаута чтения клиента.
+    let mut quiet = false;
     // Без follow строка ждётся не дольше таймаута запроса.
     let idle = if follow { None } else { source.read_timeout() };
     loop {
-        let opened = tokio::select! {
-            _ = cancel.cancelled() => return,
-            s = source.open(since) => s,
+        let reopening = lost_at.is_some();
+        // Поток открывается снова: follow мог прожить дольше учётных данных exec-плагина, и клиент
+        // берётся заново. Не вышло — как ошибка открытия, но клиент не меняется.
+        let refreshed = match reopening {
+            true => tokio::select! {
+                _ = cancel.cancelled() => return,
+                r = source.refresh() => r,
+            },
+            false => Ok(()),
+        };
+        let opened = match &refreshed {
+            Ok(()) => tokio::select! {
+                _ = cancel.cancelled() => return,
+                s = source.open(since) => s,
+            },
+            Err(e) => Err(e.clone()),
         };
         let mut stream = match opened {
             Ok(s) => s,
-            // Пода больше нет (удалили, пока шло переподключение): лог кончился.
-            Err(error) if lost_at.is_some() && error.code == ErrorCode::NotFound => {
-                sink.send(LogEvent::End { scanned, shown });
-                return;
-            }
-            // Первое открытие не повторяется. Учётные данные, TLS и права повтор не починит:
-            // их ошибка сразу, а не `errors.logs.lost` через минуту.
-            Err(error)
-                if lost_at.is_none()
-                    || breaks_client(error.code)
-                    || error.code == ErrorCode::Forbidden =>
-            {
-                sink.send(LogEvent::Error { error });
-                return;
-            }
-            Err(_) => {
+            Err(error) => {
+                // Кластер не принял клиент, которым открывали (учётные данные истекли, а срока
+                // exec-плагин не сообщил): поток открывается снова новым клиентом.
+                if reopening && refreshed.is_ok() && breaks_client(error.code) {
+                    let renewed = tokio::select! {
+                        _ = cancel.cancelled() => return,
+                        r = source.renew(&error) => r,
+                    };
+                    if matches!(renewed, Ok(true)) {
+                        continue;
+                    }
+                }
+                // Пода больше нет (удалили, пока шло переподключение): лог кончился.
+                if reopening && error.code == ErrorCode::NotFound {
+                    sink.send(LogEvent::End { scanned, shown });
+                    return;
+                }
+                // Первое открытие не повторяется. Учётные данные, TLS и права повтор не
+                // починит: их ошибка сразу, а не `errors.logs.lost` через минуту.
+                if !reopening || breaks_client(error.code) || error.code == ErrorCode::Forbidden {
+                    sink.send(LogEvent::Error { error });
+                    return;
+                }
                 if lost_at.is_some_and(|t| t.elapsed() >= RECONNECT_FOR) {
                     sink.send(LogEvent::Error { error: lost() });
+                    return;
+                }
+                // Молча открыть поток снова не вышло: теперь это обрыв, и интерфейс о нём знает.
+                if std::mem::take(&mut quiet)
+                    && !sink.send(LogEvent::Reconnecting {
+                        since: last.map(|t| t.to_string()),
+                    })
+                {
                     return;
                 }
                 tokio::select! {
@@ -488,8 +571,9 @@ pub async fn run(
             }
         };
         // Поток открылся после `Reconnecting` — даже если он молчит, интерфейс не должен
-        // оставаться в «переподключении» до первой строки.
-        if lost_at.is_some() {
+        // оставаться в «переподключении» до первой строки. После молчаливого открытия
+        // сообщать нечего.
+        if reopening && !std::mem::take(&mut quiet) {
             sent = (scanned, shown);
             if !sink.send(LogEvent::Lines {
                 lines: Vec::new(),
@@ -597,7 +681,8 @@ pub async fn run(
         }
         // Поток продержался дольше `RECONNECT_FOR` — соединение восстанавливалось, даже если
         // строк не было: контейнер молчит, а прокси рвёт соединения без данных.
-        if opened_at.elapsed() >= RECONNECT_FOR {
+        let lived = opened_at.elapsed() >= RECONNECT_FOR;
+        if lived {
             lost_at = None;
             attempt = 0;
         }
@@ -610,6 +695,13 @@ pub async fn run(
         since = Some(last.map_or_else(Timestamp::now, |t| {
             Timestamp::from_second(t.as_second()).unwrap_or(t)
         }));
+        // Долгий поток кончился таймаутом чтения клиента (`READ_TIMEOUT`): контейнер молчал
+        // почти 5 минут или соединение умерло (сон, смена сети). Поток открывается снова сразу и
+        // без `Reconnecting`; если открыть не выйдет, `Reconnecting` уйдёт тогда.
+        if lived && failure.as_ref().is_some_and(idle_timed_out) {
+            quiet = true;
+            continue;
+        }
         if !sink.send(LogEvent::Reconnecting {
             since: last.map(|t| t.to_string()),
         }) {
@@ -688,6 +780,7 @@ async fn blocking<T: Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::k8s::read::ReadClient;
     use crate::sessions::Collect;
     use std::sync::Mutex;
 
@@ -993,6 +1086,11 @@ mod tests {
         since: std::sync::Arc<Mutex<Vec<Option<Timestamp>>>>,
         running: Option<AppResult<bool>>,
         timeout: Option<Duration>,
+        /// Клиент можно заменить (`renew`).
+        renewable: bool,
+        /// Сколько раз клиент брали заново (`refresh`) и меняли (`renew`).
+        refreshes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        renews: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl Steps {
@@ -1002,6 +1100,9 @@ mod tests {
                 since: Default::default(),
                 running: Some(Ok(true)),
                 timeout: None,
+                renewable: false,
+                refreshes: Default::default(),
+                renews: Default::default(),
             }
         }
     }
@@ -1033,6 +1134,21 @@ mod tests {
 
         fn read_timeout(&self) -> Option<Duration> {
             self.timeout
+        }
+
+        fn refresh(&self) -> BoxFuture<'_, AppResult<()>> {
+            self.refreshes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(()) })
+        }
+
+        fn renew<'a>(&'a self, _error: &'a AppError) -> BoxFuture<'a, AppResult<bool>> {
+            if self.renewable {
+                self.renews
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            let renewed = self.renewable;
+            Box::pin(async move { Ok(renewed) })
         }
     }
 
@@ -1205,6 +1321,94 @@ mod tests {
         assert_eq!(texts(&events), ["one", "<reconnecting>", "<reconnecting>"]);
     }
 
+    /// Ошибка таймаута чтения клиента, как её отдаёт kube: `io::Error::other` над ошибкой hyper,
+    /// источник которой — `TimedOut` от hyper-timeout.
+    fn idle() -> std::io::Error {
+        #[derive(Debug)]
+        struct Hyper(std::io::Error);
+        impl std::fmt::Display for Hyper {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("error reading a body from connection")
+            }
+        }
+        impl std::error::Error for Hyper {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        std::io::Error::other(Hyper(std::io::ErrorKind::TimedOut.into()))
+    }
+
+    /// Строка, а через `after` — таймаут чтения клиента.
+    fn idle_after(after: Duration, line: &str) -> Lines {
+        lines(&[line])
+            .chain(futures::stream::once(async move {
+                tokio::time::sleep(after).await;
+                Err(idle())
+            }))
+            .boxed()
+    }
+
+    /// Follow молчащего контейнера кончается таймаутом чтения клиента раз в ~5 минут: поток,
+    /// проживший дольше `RECONNECT_FOR`, открывается снова молча — без `Reconnecting` и пустого
+    /// `Lines`. Не открылся — `Reconnecting` уходит тогда. Короткий поток с той же ошибкой — обрыв.
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_follow_stream_reopens_silently() {
+        let (one, two) = (format!("{T1} one"), format!("{T3} two"));
+        let long = Duration::from_secs(300);
+        let quiet = Steps::new(vec![Ok(idle_after(long, &one)), Ok(held(&[&two]))]);
+        let wait = Duration::from_secs(320);
+        assert_eq!(
+            trace(&run_for(quiet, true, wait).await),
+            ["L1:1/1", "L1:2/2"]
+        );
+
+        let refused = || crate::k8s::errors::from_transport_text("connection refused");
+        let failing = Steps::new(vec![
+            Ok(idle_after(long, &one)),
+            Err(refused()),
+            Ok(held(&[&two])),
+        ]);
+        assert_eq!(
+            trace(&run_for(failing, true, wait).await),
+            ["L1:1/1", "R", "L0:1/1", "L1:2/2"]
+        );
+
+        let short = Steps::new(vec![
+            Ok(idle_after(Duration::from_secs(10), &one)),
+            Ok(held(&[&two])),
+        ]);
+        assert_eq!(
+            trace(&run_for(short, true, wait).await),
+            ["L1:1/1", "R", "L0:1/1", "L1:2/2"]
+        );
+    }
+
+    /// Каждое повторное открытие берёт клиент заново (`refresh`: follow живёт дольше учётных
+    /// данных exec-плагина), а если кластер не принял и его — новый клиент (`renew`), и лог идёт
+    /// дальше.
+    #[tokio::test(start_paused = true)]
+    async fn a_reconnect_takes_a_fresh_client_and_a_new_one_after_a_rejection() {
+        let mut source = Steps::new(vec![
+            Ok(lines(&[&format!("{T1} one")])),
+            Err(status(401)),
+            Ok(held(&[&format!("{T3} two")])),
+        ]);
+        source.renewable = true;
+        let (refreshes, renews) = (source.refreshes.clone(), source.renews.clone());
+        assert_eq!(
+            texts(&run_for(source, true, Duration::from_secs(20)).await),
+            ["one", "<reconnecting>", "two"]
+        );
+        let count =
+            |n: &std::sync::atomic::AtomicUsize| n.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            (count(&refreshes), count(&renews)),
+            (2, 1),
+            "первое открытие клиент не берёт заново"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn reconnect_starts_from_the_latest_line() {
         let source = Steps::new(vec![Ok(lines(&[
@@ -1301,7 +1505,7 @@ mod tests {
             }
         });
         let logs = KubeLogs {
-            reader: ReadClient::new(client, Duration::from_secs(5)),
+            client: StreamClient::fixed(ReadClient::new(client, Duration::from_secs(5))),
             params: LogParams {
                 connection_id: "a".into(),
                 namespace: "team-a".into(),
@@ -1418,7 +1622,7 @@ mod tests {
         });
         let reader = ReadClient::new(client, Duration::from_secs(5));
         let logs = KubeLogs {
-            reader: reader.clone(),
+            client: StreamClient::fixed(reader.clone()),
             params: LogParams {
                 connection_id: "a".into(),
                 namespace: "team-a".into(),
@@ -1437,7 +1641,7 @@ mod tests {
             "прежний экземпляр контейнера не работает"
         );
         let current = KubeLogs {
-            reader,
+            client: StreamClient::fixed(reader),
             params: LogParams {
                 previous: false,
                 ..logs.params.clone()

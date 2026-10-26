@@ -4,17 +4,24 @@ import { formatAge } from "../../lib/age";
 
 /**
  * Условия, у которых проблема — `True`: давление на ноде, нет сети ноды, сбой реплик, неудавшееся задание и его
- * цель, отключение пода, упор HPA в предел. У остальных проблема — `False`.
+ * цель. У остальных проблема — `False`.
  */
-const TRUE_IS_PROBLEM = /Pressure$|^(NetworkUnavailable|ReplicaFailure|Failed|FailureTarget|DisruptionTarget|ScalingLimited)$/;
+const TRUE_IS_PROBLEM = /Pressure$|^(NetworkUnavailable|ReplicaFailure|Failed|FailureTarget)$/;
+
+/**
+ * Условия, у которых `True` — повод присмотреться, а не сбой: под отключают (вытеснение, освобождение ноды, сдвиг
+ * планировщика), HPA упёрся в предел реплик.
+ */
+const TRUE_IS_WARNING = /^(DisruptionTarget|ScalingLimited)$/;
 
 /** Завершённый под (Job, init-контейнеры) не готов, но здоровый: kubelet ставит `Ready` и `ContainersReady` в `False` с этой причиной. */
 const COMPLETED = "PodCompleted";
 
-/** Класс статуса: проблемное состояние — `problem`, неизвестное — `warn`, нормальное — без класса. */
+/** Класс статуса: проблемное состояние — `problem`, неизвестное и стоящее внимания — `warn`, нормальное — без класса. */
 function statusClass(c: ConditionView): string | undefined {
   if (c.status !== "True" && c.status !== "False") return "warn";
   if (c.status === "False" && c.reason === COMPLETED) return undefined;
+  if (TRUE_IS_WARNING.test(c.type)) return c.status === "True" ? "warn" : undefined;
   const bad = TRUE_IS_PROBLEM.test(c.type) ? "True" : "False";
   return c.status === bad ? "problem" : undefined;
 }

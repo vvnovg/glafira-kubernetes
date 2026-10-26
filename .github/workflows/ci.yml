@@ -55,7 +55,7 @@ jobs:
       - name: Стенд — учётные записи и объекты проекта team-a
         run: dev/kind/setup.sh
       - name: Тесты Rust (unit + интеграционные)
-        timeout-minutes: 20
+        timeout-minutes: 30
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib --tests
         env:
           GO_IT_KUBECONFIG: ${{ github.workspace }}/dev/kind/out/kubeconfig

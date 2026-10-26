@@ -78,14 +78,15 @@ fn names(list: &Option<Vec<String>>, value: &str) -> bool {
     list.iter().flatten().any(|x| x == "*" || x == value)
 }
 
-/// Подходит ли ресурс правила: точное имя, `*` или для подресурса `pods/log` — `pods/*`, `*/log`.
+/// Подходит ли ресурс правила — как в RBAC Kubernetes (`ResourceMatches`): точное имя, `*` или
+/// для подресурса `pods/log` — `*/log`. `pods/*` RBAC не раскрывает: это имя ресурса, а не шаблон.
 fn resource_matches(list: &Option<Vec<String>>, resource: &str) -> bool {
     list.iter().flatten().any(|x| {
         x == "*"
             || x == resource
             || resource
                 .split_once('/')
-                .is_some_and(|(main, sub)| *x == format!("{main}/*") || *x == format!("*/{sub}"))
+                .is_some_and(|(_, sub)| *x == format!("*/{sub}"))
     })
 }
 
@@ -238,6 +239,11 @@ mod tests {
             "только отдельный объект"
         );
         assert!(!allows(&rules, "list", "", "configmaps"));
+        // `*` подходит и подресурсу, а `pods/*` — нет: RBAC сравнивает его как имя.
+        assert!(allows(&rules, "list", "apps", "deployments/scale"));
+        let only_star = [rule(&["get"], &[""], &["pods/*"])];
+        assert!(!allows(&only_star, "get", "", "pods/log"));
+        assert!(!allows(&only_star, "get", "", "pods"));
         let a = access_from_rules(&rules, false);
         assert_eq!(a.resources.len(), RESOURCES.len());
         assert_eq!(

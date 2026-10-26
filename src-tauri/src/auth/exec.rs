@@ -843,12 +843,14 @@ fn plugin_path(command: &Path, dirs: &[PathBuf]) -> Option<String> {
         .map(|p| p.to_string_lossy().to_string())
 }
 
-/// Группа процессов плагина (на unix — своя, `process_group(0)`). Если ожидание прервано
-/// (отмена, таймаут, сбой), завершается вся группа: и плагин, и то, что он запустил (`sleep`,
-/// браузер, вспомогательные процессы), — `kill_on_drop` завершил бы только сам плагин. На
-/// Windows завершается только процесс плагина.
+/// Группа процессов плагина (своя, `process_group(0)`). Если ожидание прервано (отмена, таймаут,
+/// сбой), завершается вся группа: и плагин, и то, что он запустил (`sleep`, браузер,
+/// вспомогательные процессы), — `kill_on_drop` завершил бы только сам плагин. Только на unix: на
+/// Windows группы нет, и завершается только процесс плагина (`kill_on_drop`).
+#[cfg(unix)]
 struct PluginGroup(Option<u32>);
 
+#[cfg(unix)]
 impl PluginGroup {
     /// Плагин завершился сам: его группу не трогаем.
     fn release(mut self) {
@@ -856,9 +858,9 @@ impl PluginGroup {
     }
 }
 
+#[cfg(unix)]
 impl Drop for PluginGroup {
     fn drop(&mut self) {
-        #[cfg(unix)]
         if let Some(pid) = self.0.and_then(|p| libc::pid_t::try_from(p).ok()) {
             // SAFETY: killpg только посылает сигнал группе, которую создали для плагина;
             // если её уже нет, вызов вернёт ESRCH.
@@ -920,6 +922,7 @@ pub async fn run(
         )
     };
     let child = cmd.spawn().map_err(start_error)?;
+    #[cfg(unix)]
     let group = PluginGroup(child.id());
     let output = tokio::select! {
         out = child.wait_with_output() => out.map_err(start_error)?,
@@ -934,6 +937,7 @@ pub async fn run(
             ));
         }
     };
+    #[cfg(unix)]
     group.release();
     // Значения секретных переменных и аргументов не попадают в текст ошибок.
     let secrets = secret_values(e);

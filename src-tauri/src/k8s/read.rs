@@ -124,12 +124,25 @@ pub fn check_name(name: &str) -> AppResult<()> {
     if ok {
         return Ok(());
     }
-    Err(crate::app_err!(
+    Err(bad_name(name))
+}
+
+/// Вид или имя объекта для `fieldSelector` (`involvedObject.name=…`): имя по `check_name` и без
+/// `,` и `=` — они добавили бы к выборке свои условия.
+pub fn check_field_value(value: &str) -> AppResult<()> {
+    if value.contains([',', '=']) {
+        return Err(bad_name(value));
+    }
+    check_name(value)
+}
+
+fn bad_name(name: &str) -> AppError {
+    crate::app_err!(
         ErrorCode::InvalidInput,
         "errors.k8s.badName",
         "“{{name}}” is not a valid object name",
         name = name.escape_debug()
-    ))
+    )
 }
 
 /// Клиент только для чтения поверх `kube::Client` подключения.

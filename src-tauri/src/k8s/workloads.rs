@@ -24,10 +24,8 @@ use crate::k8s::selectors::{map_selector_string, selector_matches, selector_stri
 use crate::k8s::view::{
     ConditionView, Part, conditions, conditions_of, created, int_or_string, name, seconds,
 };
+use crate::k8s::yaml::redact_annotations;
 use crate::platform::ApiGroups;
-
-/// Аннотация, которую интерфейс не показывает: в ней полная копия объекта.
-const LAST_APPLIED: &str = "kubectl.kubernetes.io/last-applied-configuration";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum WorkloadKind {
@@ -614,7 +612,7 @@ pub struct WorkloadDetails {
     pub strategy: Option<String>,
     pub containers: Vec<ContainerSpecView>,
     pub labels: BTreeMap<String, String>,
-    /// Без `kubectl.kubernetes.io/last-applied-configuration`.
+    /// Как в YAML (`redact_annotations`): без копий объекта, `change-cause` с секретом — `***`.
     pub annotations: BTreeMap<String, String>,
     /// Только у CronJob: идущие Job.
     pub active_jobs: Vec<String>,
@@ -833,7 +831,7 @@ pub async fn get_workload(
     };
     let (hpa, pdb, history) = tokio::join!(hpa, pdb, history(r, namespace, &p));
     let mut annotations = p.meta.annotations.clone().unwrap_or_default();
-    annotations.remove(LAST_APPLIED);
+    redact_annotations(&mut annotations);
     Ok(WorkloadDetails {
         conditions: p.conditions.clone(),
         selector: p.selector.clone(),
@@ -1048,7 +1046,10 @@ mod tests {
             Some("RollingUpdate (maxSurge 1, maxUnavailable 0)")
         );
         assert_eq!(d.containers.len(), 1);
-        assert!(!d.annotations.contains_key(LAST_APPLIED));
+        assert!(
+            !d.annotations
+                .contains_key("kubectl.kubernetes.io/last-applied-configuration")
+        );
         assert_eq!(d.annotations["deployment.kubernetes.io/revision"], "3");
         let hpa = d.hpa.data.unwrap().unwrap();
         assert_eq!((hpa.min_replicas, hpa.max_replicas), (Some(2), 10));
@@ -1068,6 +1069,41 @@ mod tests {
         assert!(seen.iter().any(
             |s| s.path().ends_with("/replicasets") && s.uri.contains("labelSelector=app%3Dweb")
         ));
+    }
+
+    /// «Обзор» workload'а скрывает в аннотациях то же, что YAML: копии объекта с литеральными
+    /// env и команду `--record` с секретом.
+    #[tokio::test]
+    async fn workload_annotations_without_copies_and_secret_change_cause() {
+        let (client, _server) = mock_client(|s| match s.path() {
+            "/apis/apps/v1/namespaces/team-a/deployments/web" => {
+                let mut d = deployment("web", 1, 1);
+                d["metadata"]["annotations"] = serde_json::json!({
+                    "deployment.kubernetes.io/revision": "3",
+                    "kapp.k14s.io/original": "{\"kind\":\"Deployment\",\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"env\":[{\"name\":\"DB_PASSWORD\",\"value\":\"s3cr3t\"}]}]}}}}",
+                    "objectset.rio.cattle.io/applied": "DB_PASSWORD=s3cr3t",
+                    "kubernetes.io/change-cause": "kubectl set env deploy/web API_TOKEN=x --record=true"});
+                (200, d)
+            }
+            p if p.ends_with("s") => (200, list("X", vec![])),
+            other => status(404, "NotFound", other),
+        });
+        let d = get_workload(&reader(client), "team-a", WorkloadKind::Deployment, "web")
+            .await
+            .unwrap();
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(
+            !json.contains("s3cr3t") && !json.contains("API_TOKEN=x"),
+            "{json}"
+        );
+        assert!(
+            !d.annotations.contains_key("kapp.k14s.io/original")
+                && !d
+                    .annotations
+                    .contains_key("objectset.rio.cattle.io/applied")
+        );
+        assert_eq!(d.annotations["kubernetes.io/change-cause"], "***");
+        assert_eq!(d.annotations["deployment.kubernetes.io/revision"], "3");
     }
 
     #[tokio::test]

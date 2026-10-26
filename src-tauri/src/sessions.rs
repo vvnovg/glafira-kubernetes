@@ -6,9 +6,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures::future::BoxFuture;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use crate::error::{AppError, AppResult};
+use crate::k8s::errors::breaks_client;
+use crate::k8s::pool::Connected;
+use crate::k8s::read::ReadClient;
 use crate::sync::MutexExt;
 
 /// Идущие сессии по id.
@@ -98,6 +103,121 @@ pub struct SessionGuard {
 impl Drop for SessionGuard {
     fn drop(&mut self) {
         self.sessions.remove(&self.id);
+    }
+}
+
+/// Чаще одного раза за столько поток не берёт новый клиент (`StreamClient::renew`): если кластер
+/// не принял и новый клиент (токен отозван, учётные данные не те), замена не поможет, и сессия
+/// кончается ошибкой.
+pub const RENEW_AGAIN: Duration = Duration::from_secs(60);
+
+/// Клиент подключения для потока сессии, который открывается заново (`commands::sessions`:
+/// `AppState::connected` без `fresh`). `broken` — клиент, которым поток читал, и ошибка, с
+/// которой он дальше не работает (`breaks_client`): до подключения его надо сбросить.
+pub type Connect = Arc<
+    dyn Fn(Option<(Arc<Connected>, AppError)>) -> BoxFuture<'static, AppResult<Arc<Connected>>>
+        + Send
+        + Sync,
+>;
+
+/// Клиент, которым читает один поток сессии watch или логов (спец. §4.1). Сессия живёт дольше
+/// учётных данных exec-плагина (EKS — около 15 минут, kubelogin — час), а `kube::Client` их не
+/// обновляет: токен в нём постоянный. Поэтому поток, который открывается снова, берёт клиент у
+/// `connect`: перед открытием — `refresh` (тот же клиент, пока он годен, а истекающие учётные
+/// данные плагин выдаёт заново — одной попыткой на всех ожидающих), после ошибки, с которой клиент
+/// дальше не работает, — `renew` (этот клиент сбрасывается, и подключение — заново). У каждого
+/// потока свой `StreamClient` (`fork`): сбросить надо клиент, которым читал этот поток, а не тот,
+/// к которому уже подключился соседний. Без `connect` (`fixed`: тесты, сохранение лога) клиент
+/// один на всю сессию.
+pub struct StreamClient {
+    current: Mutex<Current>,
+    connect: Option<Connect>,
+}
+
+struct Current {
+    reader: ReadClient,
+    /// Подключение, которому принадлежит `reader`; у `fixed` его нет.
+    used: Option<Arc<Connected>>,
+    /// Когда поток в последний раз взял новый клиент (`renew`).
+    renewed: Option<Instant>,
+}
+
+impl StreamClient {
+    /// Один клиент на всю сессию.
+    pub fn fixed(reader: ReadClient) -> Self {
+        Self {
+            current: Mutex::new(Current {
+                reader,
+                used: None,
+                renewed: None,
+            }),
+            connect: None,
+        }
+    }
+
+    /// Сначала клиент `used`, при открытии заново — от `connect`.
+    pub fn new(used: Arc<Connected>, connect: Connect) -> Self {
+        Self {
+            current: Mutex::new(Current {
+                reader: used.reader(),
+                used: Some(used),
+                renewed: None,
+            }),
+            connect: Some(connect),
+        }
+    }
+
+    /// Клиент ещё одного потока той же сессии: сейчас — тот же, дальше — свой.
+    pub fn fork(&self) -> Self {
+        let c = self.current.lock_safe();
+        Self {
+            current: Mutex::new(Current {
+                reader: c.reader.clone(),
+                used: c.used.clone(),
+                renewed: None,
+            }),
+            connect: self.connect.clone(),
+        }
+    }
+
+    pub fn reader(&self) -> ReadClient {
+        self.current.lock_safe().reader.clone()
+    }
+
+    fn set(&self, c: Arc<Connected>) {
+        let mut current = self.current.lock_safe();
+        current.reader = c.reader();
+        current.used = Some(c);
+    }
+
+    /// Клиент заново перед тем, как открыть поток снова: сессия могла прожить дольше учётных
+    /// данных. Ошибка — подключиться не удалось.
+    pub async fn refresh(&self) -> AppResult<()> {
+        if let Some(connect) = &self.connect {
+            self.set(connect(None).await?);
+        }
+        Ok(())
+    }
+
+    /// Новый клиент после ошибки `error`, с которой этот дальше не работает. `false` — заменить
+    /// нечем: ошибка не о клиенте, клиент один на сессию или его меняли меньше `RENEW_AGAIN`
+    /// назад; тогда поток кончается ошибкой `error`.
+    pub async fn renew(&self, error: &AppError) -> AppResult<bool> {
+        let Some(connect) = &self.connect else {
+            return Ok(false);
+        };
+        let broken = {
+            let mut current = self.current.lock_safe();
+            if !breaks_client(error.code)
+                || current.renewed.is_some_and(|t| t.elapsed() < RENEW_AGAIN)
+            {
+                return Ok(false);
+            }
+            current.renewed = Some(Instant::now());
+            current.used.clone().map(|used| (used, error.clone()))
+        };
+        self.set(connect(broken).await?);
+        Ok(true)
     }
 }
 

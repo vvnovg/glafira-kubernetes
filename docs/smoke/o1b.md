@@ -27,10 +27,12 @@ kind (`dev/kind/README.md`, объекты проекта `team-a` из `dev/kin
    предупреждение «Токен истекает меньше чем через час…»: оно появляется само, без перезапуска и обновления вкладки.
    Когда срок вышел — «Срок токена истёк — войдите снова» и рядом «Подключиться заново». Для этих двух проверок нужен
    короткий OAuth-токен: под `kubeadmin` `oc patch oauthclient openshift-cli-client --type merge -p
-   '{"accessTokenMaxAgeSeconds":600}'` и заново «Войти через браузер» у `crc` — предупреждение сразу, «истёк» через
-   10 минут (с `4200` — предупреждение через 10 минут). Вернуть: `oc patch oauthclient openshift-cli-client --type json
-   -p '[{"op":"remove","path":"/accessTokenMaxAgeSeconds"}]'`. Токен ServiceAccount (`oc create token --duration=…`)
-   не подходит: срок Glafira читает только у OAuth-токенов (`useroauthaccesstokens`).
+   '{"accessTokenMaxAgeSeconds":600}'`, затем перевести `crc` в состояние входа — отозвать его токен (`oc get
+   useroauthaccesstokens`, `oc delete useroauthaccesstoken <имя>`, на вкладке `crc` — «Подключиться заново»: «Сессия
+   истекла») или удалить подключение и создать его заново — и только тогда «Войти через браузер»: предупреждение
+   сразу, «истёк» через 10 минут (с `4200` — предупреждение через 10 минут). Вернуть: `oc patch oauthclient
+   openshift-cli-client --type json -p '[{"op":"remove","path":"/accessTokenMaxAgeSeconds"}]'`. Токен ServiceAccount
+   (`oc create token --duration=…`) не подходит: срок Glafira читает только у OAuth-токенов (`useroauthaccesstokens`).
 6. Дерево. У подключения — «Кластер», «Проекты» (раскрываются по щелчку) и «Ноды» (если вкладка подключения уже
    открыта и права есть). У `dev-token` в «Проекты» — «Кластер не даёт список проектов — показаны проекты из профиля» и
    «★ team-a». У `crc` с десятками проектов — фильтр проектов, избранные (★) сверху.
@@ -57,16 +59,16 @@ kind (`dev/kind/README.md`, объекты проекта `team-a` из `dev/kin
     Под `crash-…` → «Предыдущий запуск»: «starting» и «boom», «Следить за новыми строками» недоступна, подсказка у неё —
     «Предыдущий запуск уже завершён — следить не за чем». «Сохранить в файл…» → файл с теми же строками целиком
     (`ls -l` — `-rw-------`), сообщение «Сохранено строк: N — путь».
-14. Обрыв логов. Соединение нужно именно оборвать: у потока follow нет таймаута простоя, а `docker pause` держит
-    TCP-соединение открытым, и обрыва не видно. В режиме слежения у пода `logger-…` перезапустить API-сервер kind
-    (поды при этом работают дальше): `docker exec glafira-control-plane sh -c 'crictl stop $(crictl ps -q --name
+14. Обрыв логов. Соединение нужно именно оборвать: `docker pause` держит TCP-соединение открытым, и обрыв виден только
+    через таймаут чтения (почти 5 минут). В режиме слежения у пода `logger-…` перезапустить API-сервер kind (поды при
+    этом работают дальше): `docker exec glafira-control-plane sh -c 'crictl stop $(crictl ps -q --name
     kube-apiserver)'`. Через секунды — «соединение потеряно — переподключение…»; kubelet поднимает API-сервер обычно за
     10–40 с, и в пределах 60 с статус снова «идёт поток» (даже если новых строк ещё нет), строки `line N` продолжаются
-    с той же нумерации без повторов. Предел 60 с: `docker exec glafira-control-plane mv
-    /etc/kubernetes/manifests/kube-apiserver.yaml /root/` — API-сервер остановлен и не поднимается; через минуту —
-    ошибка «Поток логов прервался и не восстановился за 60 с». Вернуть: `docker exec glafira-control-plane mv
-    /root/kube-apiserver.yaml /etc/kubernetes/manifests/`. `kubectl -n team-a delete pod <под logger>` во время
-    слежения — статус «конец лога», без ошибки.
+    с той же нумерации без повторов. `kubectl -n team-a delete pod <под logger>` во время слежения — статус «конец
+    лога», без ошибки. Предел 60 с: открыть логи нового пода `logger-…` со слежением, затем `docker exec
+    glafira-control-plane mv /etc/kubernetes/manifests/kube-apiserver.yaml /root/` — API-сервер остановлен и не
+    поднимается; через минуту — ошибка «Поток логов прервался и не восстановился за 60 с». Вернуть: `docker exec
+    glafira-control-plane mv /root/kube-apiserver.yaml /etc/kubernetes/manifests/`.
 15. Сеть. «Сеть» в `team-a`: Service web — «Готовые endpoints» 2/2; Ingress web — `web.example.test/ → web:80`; Routes
     и Gateway на kind нет. На OpenShift: Routes с «Принят» ✅ и сроком сертификата (меньше 30 дней — выделен, истёкший —
     красным и «— истёк»); Ingress с «Routes из этого Ingress».
@@ -76,8 +78,10 @@ kind (`dev/kind/README.md`, объекты проекта `team-a` из `dev/kin
     предупреждение (жёлтым, не красным), «Кем смонтирован» — «—». «Квоты»: compute — pods и requests.cpu с процентами,
     LimitRange defaults.
 17. Истечение сессии. Подключение с токеном: отозвать токен (`oc delete useroauthaccesstoken …` или подождать) —
-    вкладки проекта показывают ошибку с «Войти снова»; кнопка открывает вкладку подключения; после «Сохранить токен» с
-    новым токеном вкладки проекта перечитываются сами, логи и списки начинаются заново.
+    вкладки проекта показывают ошибку с «Войти снова»; кнопка подключается заново и открывает вкладку подключения, там —
+    «Сессия истекла» и способы войти; после «Сохранить токен» с новым токеном вкладки проекта перечитываются сами, логи
+    и списки начинаются заново. У подключения с exec-плагином «Войти снова» запускает плагин снова, и при удаче вкладки
+    перечитываются сами, без шагов на вкладке подключения.
 18. Exec-плагин (долги O1a). Подключение с exec-плагином (скрипт, который ждёт 30 с): открыть сразу проект — плагин
     запускается один раз (в `ps` один процесс), все подвкладки ждут его. «Отменить» на вкладке подключения отменяет
     ожидание у всех вкладок, а процессы, которые запустил плагин (`sleep` в скрипте), завершаются. Проверка подключения в
@@ -99,3 +103,19 @@ kind (`dev/kind/README.md`, объекты проекта `team-a` из `dev/kin
     вкладку, `kubectl -n team-a create service clusterip probe --tcp=80`, через 30 с вернуться — `probe` появляется не сразу,
     а через интервал (или по «Обновить»): пока вкладка была скрыта, «Сеть» не перечитывалась. После —
     `kubectl -n team-a delete service probe`, `kubectl -n team-a scale deploy/web --replicas=2`.
+24. Exec-плагин и срок учётных данных (kind). Подключение с exec-плагином — скриптом `kubectl` с аргументами
+    `oidc-login get-token`, как в пункте 18, который выдаёт токен ServiceAccount на 10 минут и срок через 2 минуты и
+    отмечает каждый запуск (macOS; `<kubectl>` — путь к настоящему kubectl):
+
+    ```sh
+    #!/bin/sh
+    echo "$(date) run" >> /tmp/glafira-exec.log
+    t=$(KUBECONFIG=<путь>/dev/kind/out/kubeconfig <kubectl> --context admin -n team-a create token glafira-dev --duration=10m)
+    printf '{"apiVersion":"client.authentication.k8s.io/v1","kind":"ExecCredential","status":{"token":"%s","expirationTimestamp":"%s"}}' \
+      "$t" "$(date -u -v+2M +%Y-%m-%dT%H:%M:%SZ)"
+    ```
+
+    Открыть проект `team-a` → «Поды» (watch) и логи пода `logger-…` со слежением и оставить на 12–15 минут — дольше
+    жизни токена ServiceAccount: в `/tmp/glafira-exec.log` появляются новые запуски, после 10-й минуты `kubectl -n
+    team-a delete pod <под web>` — список подов меняется сам, лог идёт дальше; ни «Сессия истекла», ни ошибки входа ни в
+    списке, ни в логе. На EKS (`aws eks get-token`, токен около 15 минут) — то же за 20 минут.

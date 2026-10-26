@@ -1,7 +1,14 @@
-import { screen } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderWithClient } from "../../test/render";
+
+vi.mock("../../api/client", async (importOriginal) => {
+  const orig = await importOriginal<typeof import("../../api/client")>();
+  return { ...orig, api: { connect: vi.fn() } };
+});
+
+import { api } from "../../api/client";
 import type { AppError } from "../../api/types";
 import { useWorkspace } from "../../state/workspace";
 import { PartView } from "./PartView";
@@ -15,7 +22,12 @@ const FORBIDDEN: AppError = {
   retryable: false,
 };
 
-beforeEach(() => useWorkspace.setState({ tabs: [], activeId: null }));
+const SESSION_EXPIRED: AppError = { code: "SESSION_EXPIRED", key: "errors.k8s.unauthorized", message: "x", retryable: false };
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  useWorkspace.setState({ tabs: [], activeId: null });
+});
 
 describe("PartView и ReadError", () => {
   it("часть экрана: данные, «—» с причиной без прав, баннер при ошибке", () => {
@@ -27,16 +39,29 @@ describe("PartView и ReadError", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("Сервер не ответил вовремя");
   });
 
-  it("истёкшая сессия ведёт на вкладку подключения, удалённый объект — пояснение", async () => {
+  it("истёкшая сессия: «Войти снова» подключается заново и открывает вкладку подключения, где ждёт ошибка входа", async () => {
+    vi.mocked(api.connect).mockRejectedValue(SESSION_EXPIRED);
     const user = userEvent.setup();
-    const { rerender } = renderWithClient(
-      <ReadError error={{ code: "SESSION_EXPIRED", key: "errors.k8s.unauthorized", message: "x", retryable: false }} connectionId="c1" />,
-    );
+    const { client } = renderWithClient(<ReadError error={SESSION_EXPIRED} connectionId="c1" />);
     await user.click(screen.getByRole("button", { name: "Войти снова" }));
+    await waitFor(() => expect(api.connect).toHaveBeenCalledWith("c1", true));
     expect(useWorkspace.getState().tabs[0]).toMatchObject({ kind: "cluster", connectionId: "c1" });
-    rerender(<ReadError error={{ code: "NOT_FOUND", key: "errors.k8s.notFound", message: "x", retryable: false }} connectionId="c1" />);
+    // Ошибка подключения — в запросе вкладки подключения: там видны способы войти.
+    await waitFor(() => expect(client.getQueryState(["connection", "c1"])?.error).toEqual(SESSION_EXPIRED));
+  });
+
+  it("пока идёт подключение, «Войти снова» недоступна; объект удалён — пояснение; нет прав — без «Повторить»", async () => {
+    vi.mocked(api.connect).mockReturnValue(new Promise(() => undefined));
+    const user = userEvent.setup();
+    const signIn = renderWithClient(<ReadError error={SESSION_EXPIRED} connectionId="c1" />);
+    await user.click(screen.getByRole("button", { name: "Войти снова" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Войти снова" })).toBeDisabled());
+    expect(api.connect).toHaveBeenCalledTimes(1);
+    signIn.unmount();
+    const gone = renderWithClient(<ReadError error={{ code: "NOT_FOUND", key: "errors.k8s.notFound", message: "x", retryable: false }} connectionId="c1" />);
     expect(screen.getByText("Объект удалён или переименован — закройте вкладку")).toBeInTheDocument();
-    rerender(<ReadError error={FORBIDDEN} connectionId="c1" onRetry={() => undefined} />);
+    gone.unmount();
+    renderWithClient(<ReadError error={FORBIDDEN} connectionId="c1" onRetry={() => undefined} />);
     expect(screen.queryByRole("button", { name: "Повторить" })).not.toBeInTheDocument();
   });
 });

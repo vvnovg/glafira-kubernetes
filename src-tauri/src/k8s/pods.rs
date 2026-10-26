@@ -14,6 +14,7 @@ use crate::k8s::containers::{ContainerSpecView, container_view};
 use crate::k8s::read::{Listed, ReadClient, by_labels};
 use crate::k8s::view::{ConditionView, conditions_of, created, name, seconds};
 use crate::k8s::workloads::{WorkloadKind, pod_selector};
+use crate::k8s::yaml::redact_annotations;
 
 /// Причины ожидания контейнера, которые означают, что образ не скачать.
 const IMAGE_PULL: &[&str] = &["ErrImagePull", "ImagePullBackOff", "InvalidImageName"];
@@ -446,6 +447,7 @@ pub struct PodDetails {
     pub started: Option<i64>,
     pub containers: Vec<ContainerStatusView>,
     pub labels: BTreeMap<String, String>,
+    /// Как в YAML (`redact_annotations`): без копий объекта, `change-cause` с секретом — `***`.
     pub annotations: BTreeMap<String, String>,
     pub volumes: Vec<VolumeView>,
 }
@@ -501,7 +503,7 @@ pub fn pod_details(p: &Pod) -> PodDetails {
         })
         .unwrap_or_default();
     let mut annotations = p.metadata.annotations.clone().unwrap_or_default();
-    annotations.remove("kubectl.kubernetes.io/last-applied-configuration");
+    redact_annotations(&mut annotations);
     PodDetails {
         pod: pod_row(p),
         conditions: conditions_of(&status.and_then(|s| s.conditions.clone())),
@@ -845,6 +847,28 @@ mod tests {
             "поля контейнера на одном уровне: {json}"
         );
         assert!(!json.contains("t0ps3cret"), "значения env не уходят");
+    }
+
+    /// «Обзор» пода скрывает в аннотациях то же, что YAML.
+    #[test]
+    fn pod_annotations_without_copies_and_secret_change_cause() {
+        let mut p = running("web-7d9f-x");
+        p["metadata"]["annotations"] = serde_json::json!({
+            "kapp.k14s.io/original": "{\"kind\":\"Pod\",\"spec\":{\"containers\":[{\"env\":[{\"name\":\"DB_PASSWORD\",\"value\":\"s3cr3t\"}]}]}}",
+            "kubectl.kubernetes.io/last-applied-configuration": "{\"DB_PASSWORD\":\"s3cr3t\"}",
+            "kubernetes.io/change-cause": "kubectl run web --env=API_TOKEN=x",
+            "prometheus.io/scrape": "true"});
+        let d = pod_details(&from(p));
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(
+            !json.contains("s3cr3t") && !json.contains("API_TOKEN=x"),
+            "{json}"
+        );
+        assert_eq!(
+            d.annotations.keys().collect::<Vec<_>>(),
+            ["kubernetes.io/change-cause", "prometheus.io/scrape"]
+        );
+        assert_eq!(d.annotations["kubernetes.io/change-cause"], "***");
     }
 
     fn list(items: Vec<serde_json::Value>) -> serde_json::Value {

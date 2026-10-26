@@ -33,19 +33,25 @@ describe("Conditions", () => {
   });
 
   it("проблема — True у *Pressure, NetworkUnavailable, ReplicaFailure и Failed", () => {
-    const types = [
-      "MemoryPressure",
-      "DiskPressure",
-      "PIDPressure",
-      "NetworkUnavailable",
-      "ReplicaFailure",
-      "Failed",
-      "FailureTarget",
-      "DisruptionTarget",
-      "ScalingLimited",
-    ];
+    const types = ["MemoryPressure", "DiskPressure", "PIDPressure", "NetworkUnavailable", "ReplicaFailure", "Failed", "FailureTarget"];
     render(<Conditions conditions={types.map((t) => cond(t, "True"))} />);
     for (const type of types) expect(statusCell(type)).toHaveClass("problem");
+  });
+
+  it("True у DisruptionTarget и ScalingLimited — предупреждение, а не сбой", () => {
+    render(<Conditions conditions={[cond("DisruptionTarget", "True"), cond("ScalingLimited", "True")]} />);
+    for (const type of ["DisruptionTarget", "ScalingLimited"]) {
+      expect(statusCell(type)).toHaveClass("warn");
+      expect(statusCell(type)).not.toHaveClass("problem");
+    }
+  });
+
+  it("False у DisruptionTarget и ScalingLimited — норма, без выделения", () => {
+    render(<Conditions conditions={[cond("DisruptionTarget", "False"), cond("ScalingLimited", "False")]} />);
+    for (const type of ["DisruptionTarget", "ScalingLimited"]) {
+      expect(statusCell(type)).not.toHaveClass("problem");
+      expect(statusCell(type)).not.toHaveClass("warn");
+    }
   });
 
   it("False у *Pressure и NetworkUnavailable — норма, без выделения", () => {

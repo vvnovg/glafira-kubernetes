@@ -132,6 +132,14 @@ describe("ClusterOverviewView", () => {
     expect(screen.queryByText("Остальное скрыто правами.")).not.toBeInTheDocument();
   });
 
+  it("OpenShift без пулов машин (ROSA HCP) — «—», не ошибка", async () => {
+    vi.mocked(api.getClusterOverview).mockResolvedValue(withDetails({ machineConfigPools: { data: [] } }));
+    renderWithClient(<ClusterOverviewView connectionId="c1" />);
+    const heading = await screen.findByRole("heading", { name: "Пулы машин (MachineConfigPool)" });
+    expect(heading.nextElementSibling).toHaveTextContent(/^—$/);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("OpenShift: консоль не прочитана из-за прав — причина вместо ссылки, остальной обзор виден", async () => {
     vi.mocked(api.getClusterOverview).mockResolvedValue(withDetails({ consoleUrl: { error: forbidden("consoles") } }));
     renderWithClient(<ClusterOverviewView connectionId="c1" />);

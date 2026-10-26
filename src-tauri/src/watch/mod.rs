@@ -4,6 +4,7 @@
 //! фронтенд пакетами в порядке, в котором пришли.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::BoxFuture;
@@ -26,10 +27,15 @@ use crate::k8s::workloads::{
     deployment_configs, deployment_row, job_row, list_workloads, stateful_set_row,
 };
 use crate::platform::ApiGroups;
-use crate::sessions::{BATCH_WINDOW, Batch, Sink};
+use crate::sessions::{BATCH_WINDOW, Batch, Sink, StreamClient};
 
 /// Как часто перечитывается список, если прав на watch нет.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Через столько секунд сервер сам заканчивает каждый запрос watch (`timeoutSeconds`), и watcher
+/// начинает новый: живой watch не молчит дольше таймаута чтения клиента
+/// (`k8s::config::READ_TIMEOUT`), а watch на мёртвом соединении тот обрывает (спец. §4.1).
+pub const WATCH_TIMEOUT: u32 = 290;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -128,14 +134,19 @@ pub struct Source {
     pub restart: Option<Restart>,
 }
 
-/// Таймаут чтения списка. У watcher'а его нет: у клиента нет таймаута ответа (он оборвал бы
-/// watch и логи), а запрос, на который сервер не отвечает, watcher не повторит. Поэтому, пока
-/// вид читает список (`Init` … `InitDone`), каждая страница ждётся не дольше `after`; не
-/// пришла — поток начинается заново (`open`), а сессия сообщает о таймауте.
+/// Таймаут чтения списка. У watcher'а его нет, а таймаут чтения клиента (`READ_TIMEOUT`, почти
+/// 5 минут) — только для мёртвого соединения. Поэтому, пока вид читает список (`Init` …
+/// `InitDone`), каждая страница ждётся не дольше `after`; не пришла — поток начинается заново
+/// (`open`), а сессия сообщает о таймауте.
 pub struct Restart {
     /// `ReadClient::timeout`.
     pub after: Duration,
+    /// Поток тем клиентом, который у вида сейчас (`client`).
     pub open: Box<dyn Fn() -> Events + Send>,
+    /// Клиент потока. После ошибки, с которой клиент дальше не работает (истекли учётные данные
+    /// exec-плагина), поток начинается заново новым клиентом (`StreamClient::renew`), а не кончает
+    /// сессию. `None` — такая ошибка кончает сессию.
+    pub client: Option<Arc<StreamClient>>,
 }
 
 /// Полный список для режима опроса.
@@ -213,7 +224,8 @@ fn is_answer(next: &Next) -> bool {
     )
 }
 
-/// Поток вида с таймаутом чтения списка (`Restart`).
+/// Поток вида с таймаутом чтения списка и новым клиентом после ошибки, с которой прежний
+/// дальше не работает (`Restart`).
 fn guarded(source: Source) -> BoxStream<'static, Next> {
     use watcher::Event as E;
     let Some(restart) = source.restart else {
@@ -222,32 +234,58 @@ fn guarded(source: Source) -> BoxStream<'static, Next> {
     let deadline = Some(Instant::now() + restart.after);
     futures::stream::unfold(
         (source.stream, restart, deadline),
-        |(mut stream, restart, deadline)| async move {
-            let next = match deadline {
-                Some(at) => match tokio::time::timeout_at(at, stream.next()).await {
-                    Ok(next) => next,
-                    Err(_) => {
-                        // Зависший запрос обрывается вместе с прежним потоком.
-                        let stream = (restart.open)();
-                        let deadline = Some(Instant::now() + restart.after);
-                        return Some((None, (stream, restart, deadline)));
-                    }
-                },
-                None => stream.next().await,
-            };
-            let event = next?;
-            let deadline = match &event {
-                // Список начат или пришла его строка: ждём следующую страницу.
-                Ok(E::Init | E::InitApply(_)) => Some(Instant::now() + restart.after),
-                // Список прочитан: простой watch watcher отслеживает сам. После ошибки он ждёт
-                // перед повтором (до 30 с) и начинает список снова с `Init`.
-                Ok(E::InitDone) | Err(_) => None,
-                Ok(E::Apply(_) | E::Delete(_)) => deadline,
-            };
-            Some((Some(event), (stream, restart, deadline)))
+        |(mut stream, restart, mut deadline)| async move {
+            loop {
+                let next = match deadline {
+                    Some(at) => match tokio::time::timeout_at(at, stream.next()).await {
+                        Ok(next) => next,
+                        Err(_) => {
+                            // Зависший запрос обрывается вместе с прежним потоком.
+                            let stream = (restart.open)();
+                            let deadline = Some(Instant::now() + restart.after);
+                            return Some((None, (stream, restart, deadline)));
+                        }
+                    },
+                    None => stream.next().await,
+                };
+                let event = next?;
+                // Кластер не принял клиент: после каждого запроса watch, который сервер закончил
+                // (`WATCH_TIMEOUT`), watcher начинает новый тем же клиентом, а учётные данные
+                // exec-плагина уже истекли. Поток начинается заново новым клиентом; не вышло —
+                // ошибка идёт дальше и кончает сессию.
+                let renew = renewal(&restart, &event);
+                if let Some((client, error)) = renew
+                    && client.renew(&error).await.unwrap_or(false)
+                {
+                    stream = (restart.open)();
+                    deadline = Some(Instant::now() + restart.after);
+                    continue;
+                }
+                let deadline = match &event {
+                    // Список начат или пришла его строка: ждём следующую страницу.
+                    Ok(E::Init | E::InitApply(_)) => Some(Instant::now() + restart.after),
+                    // Список прочитан: простой watch watcher отслеживает сам. После ошибки он
+                    // ждёт перед повтором (до 30 с) и начинает список снова с `Init`.
+                    Ok(E::InitDone) | Err(_) => None,
+                    Ok(E::Apply(_) | E::Delete(_)) => deadline,
+                };
+                return Some((Some(event), (stream, restart, deadline)));
+            }
         },
     )
     .boxed()
+}
+
+/// Клиент потока и ошибка события, если с ней клиент дальше не работает (`Failure::Fatal`).
+fn renewal(
+    restart: &Restart,
+    event: &watcher::Result<watcher::Event<Row>>,
+) -> Option<(Arc<StreamClient>, AppError)> {
+    let client = restart.client.clone()?;
+    match classify(event.as_ref().err()?) {
+        Failure::Fatal(error) => Some((client, error)),
+        _ => None,
+    }
 }
 
 /// Что сделать с изменением потока.
@@ -589,27 +627,44 @@ fn to_rows<K>(
     })
 }
 
-/// Источник с таймаутом чтения списка `after`: `open` даёт поток и при запуске, и заново.
+/// Источник со своим клиентом (`StreamClient::fork`) и таймаутом чтения списка — таймаутом
+/// запроса клиента: `open` даёт поток текущим клиентом и при запуске, и заново.
 fn restarting(
     kind: Option<WorkloadKind>,
-    after: Duration,
-    open: impl Fn() -> Events + Send + 'static,
+    client: &StreamClient,
+    open: impl Fn(&ReadClient) -> Events + Send + 'static,
 ) -> Source {
+    let client = Arc::new(client.fork());
+    let after = client.reader().timeout();
+    let open = {
+        let client = client.clone();
+        move || open(&client.reader())
+    };
     Source {
         kind,
         stream: open(),
         restart: Some(Restart {
             after,
             open: Box::new(open),
+            client: Some(client),
         }),
+    }
+}
+
+/// Настройки watcher'а: селектор меток и `WATCH_TIMEOUT` для каждого запроса.
+fn watch_config(selector: Option<&str>) -> watcher::Config {
+    let config = watcher::Config::default().timeout(WATCH_TIMEOUT);
+    match selector {
+        Some(s) => config.labels(s),
+        None => config,
     }
 }
 
 /// Потоки вида: поды (по селектору workload'а), workloads всех видов или события. Пустой
 /// селектор подошёл бы всем объектам проекта, а не подам workload'а: потоков нет, как и подов
-/// у `list_pods`.
+/// у `list_pods`. У каждого потока свой клиент от `client` (`StreamClient::fork`).
 pub fn sources(
-    r: &ReadClient,
+    client: &StreamClient,
     namespace: &str,
     kind: WatchKind,
     selector: Option<&str>,
@@ -618,14 +673,11 @@ pub fn sources(
     if selector.is_some_and(str::is_empty) {
         return Vec::new();
     }
-    let config = || match selector {
-        Some(s) => watcher::Config::default().labels(s),
-        None => watcher::Config::default(),
-    };
+    let config = || watch_config(selector);
     macro_rules! typed {
         ($kind:expr, $t:ty, $f:expr) => {{
-            let (r, ns, config) = (r.clone(), namespace.to_string(), config());
-            restarting($kind, r.timeout(), move || {
+            let (ns, config) = (namespace.to_string(), config());
+            restarting($kind, client, move |r| {
                 r.watch::<$t>(&ns, config.clone())
                     .default_backoff()
                     .map(|e| to_rows(e, $f))
@@ -653,16 +705,11 @@ pub fn sources(
                 }),
             ];
             if WorkloadKind::DeploymentConfig.available(groups) {
-                let (r, ns, config, ar) = (
-                    r.clone(),
-                    namespace.to_string(),
-                    config(),
-                    deployment_configs(),
-                );
+                let (ns, config, ar) = (namespace.to_string(), config(), deployment_configs());
                 out.push(restarting(
                     Some(WorkloadKind::DeploymentConfig),
-                    r.timeout(),
-                    move || {
+                    client,
+                    move |r| {
                         r.watch_dynamic(&ar, &ns, config.clone())
                             .default_backoff()
                             .map(|e| to_rows(e, |o| Row::Workload(deployment_config_row(o))))
@@ -675,45 +722,79 @@ pub fn sources(
     }
 }
 
-/// Опрос вида: те же чтения, что у команд списков.
+/// Опрос вида: те же чтения, что у команд списков. Опрос идёт дольше учётных данных exec-плагина,
+/// поэтому перед каждым клиент берётся заново (`StreamClient::refresh`), а если кластер его не
+/// принял (учётные данные истекли, а срока плагин не сообщил), список читается ещё раз новым
+/// клиентом (`StreamClient::renew`).
 pub fn poll(
-    r: ReadClient,
+    client: StreamClient,
     namespace: String,
     kind: WatchKind,
     workload: Option<WorkloadRef>,
     groups: ApiGroups,
 ) -> Poll {
+    let client = Arc::new(client);
     Box::new(move || {
-        let (r, ns, workload) = (r.clone(), namespace.clone(), workload.clone());
+        let (client, ns, workload) = (client.clone(), namespace.clone(), workload.clone());
         Box::pin(async move {
-            Ok(match kind {
-                WatchKind::Pods => {
-                    let l = list_pods(&r, &ns, workload.as_ref()).await?;
-                    Snapshot {
-                        items: l.items.into_iter().map(Row::Pod).collect(),
-                        errors: vec![],
-                        truncated: l.truncated,
-                    }
+            client.refresh().await?;
+            let first = snapshot(&client.reader(), &ns, kind, workload.as_ref(), &groups).await;
+            match broken(&first) {
+                Some(e) if client.renew(&e).await.unwrap_or(false) => {
+                    snapshot(&client.reader(), &ns, kind, workload.as_ref(), &groups).await
                 }
-                WatchKind::Events => {
-                    let l = list_events(&r, &ns, None).await?;
-                    Snapshot {
-                        items: l.items.into_iter().map(Row::Event).collect(),
-                        errors: vec![],
-                        truncated: l.truncated,
-                    }
-                }
-                WatchKind::Workloads => {
-                    let l = list_workloads(&r, &ns, &groups).await;
-                    Snapshot {
-                        items: l.items.into_iter().map(Row::Workload).collect(),
-                        errors: l.errors,
-                        truncated: l.truncated,
-                    }
-                }
-            })
+                _ => first,
+            }
         })
     })
+}
+
+/// Полный список вида.
+async fn snapshot(
+    r: &ReadClient,
+    ns: &str,
+    kind: WatchKind,
+    workload: Option<&WorkloadRef>,
+    groups: &ApiGroups,
+) -> AppResult<Snapshot> {
+    Ok(match kind {
+        WatchKind::Pods => {
+            let l = list_pods(r, ns, workload).await?;
+            Snapshot {
+                items: l.items.into_iter().map(Row::Pod).collect(),
+                errors: vec![],
+                truncated: l.truncated,
+            }
+        }
+        WatchKind::Events => {
+            let l = list_events(r, ns, None).await?;
+            Snapshot {
+                items: l.items.into_iter().map(Row::Event).collect(),
+                errors: vec![],
+                truncated: l.truncated,
+            }
+        }
+        WatchKind::Workloads => {
+            let l = list_workloads(r, ns, groups).await;
+            Snapshot {
+                items: l.items.into_iter().map(Row::Workload).collect(),
+                errors: l.errors,
+                truncated: l.truncated,
+            }
+        }
+    })
+}
+
+/// Ошибка опроса, с которой клиент дальше не работает: самого чтения или вида workloads.
+fn broken(r: &AppResult<Snapshot>) -> Option<AppError> {
+    match r {
+        Err(e) => breaks_client(e.code).then(|| e.clone()),
+        Ok(s) => s
+            .errors
+            .iter()
+            .find(|e| breaks_client(e.error.code))
+            .map(|e| e.error.clone()),
+    }
 }
 
 #[cfg(test)]
@@ -825,6 +906,7 @@ mod tests {
         Some(Restart {
             after: Duration::from_secs(30),
             open: Box::new(move || open(opens.fetch_add(1, Ordering::SeqCst))),
+            client: None,
         })
     }
 
@@ -1260,6 +1342,106 @@ mod tests {
         assert_eq!(opens.load(Ordering::SeqCst), 2);
     }
 
+    /// Клиент потока, который подключается заново через `connect` (тот считает вызовы, а
+    /// сброшенные клиенты кладёт в `broken`).
+    fn renewing(
+        connects: &Arc<AtomicUsize>,
+        broken: &Arc<Mutex<Vec<String>>>,
+    ) -> Arc<StreamClient> {
+        let (connects, broken) = (connects.clone(), broken.clone());
+        let connect: crate::sessions::Connect = Arc::new(move |b| {
+            connects.fetch_add(1, Ordering::SeqCst);
+            if let Some((_, e)) = b {
+                broken.lock_safe().push(e.key);
+            }
+            Box::pin(async {
+                Ok(crate::k8s::pool::test_connected(|_| {
+                    (200, serde_json::json!({}))
+                }))
+            })
+        });
+        let first = crate::k8s::pool::test_connected(|_| (200, serde_json::json!({})));
+        Arc::new(StreamClient::new(first, connect))
+    }
+
+    /// Кластер не принял клиент (истекли учётные данные exec-плагина): поток начинается заново
+    /// новым клиентом, и сессия идёт дальше без ошибки. Тот же отказ меньше чем через минуту —
+    /// ошибка сессии; позже — снова новый клиент.
+    #[tokio::test(start_paused = true)]
+    async fn a_rejected_client_restarts_the_stream_with_a_new_one() {
+        let expired = || Err(watcher::Error::WatchStartFailed(api_error(401)));
+        let (opens, connects) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let broken = Arc::new(Mutex::new(Vec::new()));
+        let client = renewing(&connects, &broken);
+        let mut restart = restart(&opens, move |n| match n {
+            0 => later(
+                listed(vec![pod("b", "Running")]),
+                Duration::from_secs(61),
+                vec![expired()],
+            ),
+            _ => later(
+                listed(vec![pod("c", "Running")]),
+                Duration::from_secs(5),
+                vec![expired()],
+            ),
+        });
+        restart.as_mut().unwrap().client = Some(client);
+        let s = Source {
+            kind: None,
+            stream: stream(
+                listed(vec![pod("a", "Running")])
+                    .into_iter()
+                    .chain([expired()])
+                    .collect(),
+            ),
+            restart,
+        };
+        let reported = Reported::default();
+        let events = session_reporting(
+            vec![s],
+            no_poll(),
+            Duration::from_secs(120),
+            reported.report(),
+        )
+        .await;
+        assert_eq!(
+            summary(&events),
+            [
+                "reset a ",
+                "reset b ",
+                "reset c ",
+                "error errors.k8s.unauthorized true"
+            ]
+        );
+        assert_eq!(opens.load(Ordering::SeqCst), 2, "поток начат заново дважды");
+        assert_eq!(connects.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *broken.lock_safe(),
+            ["errors.k8s.unauthorized", "errors.k8s.unauthorized"],
+            "прежний клиент сброшен"
+        );
+        assert_eq!(
+            reported.keys(),
+            ["errors.k8s.unauthorized"],
+            "в `Report` — только отказ, который кончил сессию"
+        );
+    }
+
+    /// Настройки watcher'а: сервер сам заканчивает каждый watch раньше, чем таймаут чтения
+    /// клиента оборвал бы живое соединение.
+    #[test]
+    fn every_watch_request_has_a_server_timeout() {
+        for selector in [None, Some("app=web")] {
+            let c = watch_config(selector);
+            assert_eq!(c.timeout, Some(WATCH_TIMEOUT));
+            assert_eq!(c.label_selector.as_deref(), selector);
+        }
+        assert!(
+            Duration::from_secs(WATCH_TIMEOUT.into()) < crate::k8s::config::READ_TIMEOUT,
+            "живой watch не молчит до таймаута чтения"
+        );
+    }
+
     /// После ошибки watcher ждёт перед повтором (до 30 с): это не зависший список.
     #[tokio::test(start_paused = true)]
     async fn the_timeout_does_not_cut_the_wait_before_a_retry() {
@@ -1383,7 +1565,16 @@ mod tests {
             crate::k8s::testing::mock_client(|_| panic!("запросов быть не должно"));
         let r = ReadClient::new(client, Duration::from_secs(5));
         let groups = ApiGroups::default();
-        assert!(sources(&r, "team-a", WatchKind::Pods, Some(""), &groups).is_empty());
+        assert!(
+            sources(
+                &StreamClient::fixed(r),
+                "team-a",
+                WatchKind::Pods,
+                Some(""),
+                &groups
+            )
+            .is_empty()
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1409,7 +1600,7 @@ mod tests {
         });
         let r = ReadClient::new(client, Duration::from_secs(5));
         let p = poll(
-            r,
+            StreamClient::fixed(r),
             "team-a".into(),
             WatchKind::Pods,
             None,
@@ -1443,8 +1634,20 @@ mod tests {
         let sink = Collect::default();
         let cancel = CancellationToken::new();
         let task = tokio::spawn(run(
-            sources(&r, "team-a", WatchKind::Pods, None, &groups),
-            poll(r.clone(), "team-a".into(), WatchKind::Pods, None, groups),
+            sources(
+                &StreamClient::fixed(r.clone()),
+                "team-a",
+                WatchKind::Pods,
+                None,
+                &groups,
+            ),
+            poll(
+                StreamClient::fixed(r),
+                "team-a".into(),
+                WatchKind::Pods,
+                None,
+                groups,
+            ),
             sink.clone(),
             cancel.clone(),
         ));

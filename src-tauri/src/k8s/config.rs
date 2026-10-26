@@ -68,9 +68,18 @@ fn token(p: &ConnectionProfile, secrets: &dyn SecretStore) -> AppResult<String> 
     }
 }
 
-/// `kube::Config` профиля. Таймаут ответа не задаётся: он оборвал бы долгие потоки (логи, watch);
-/// таймаут запроса ставит вызывающий код (`request_timeout`). У exec-плагина учётных данных здесь
-/// нет: их выдаёт запуск плагина, и их подставляет `apply_exec_credential`.
+/// Таймаут чтения соединения: столько без единого байта — соединение считается мёртвым (сон,
+/// смена Wi-Fi или VPN), и запрос на нём кончается ошибкой, а не висит молча (спец. §4.1). TCP
+/// keepalive в kube нет. Живые потоки столько не молчат: сервер сам заканчивает каждый watch через
+/// `watch::WATCH_TIMEOUT` (290 с), а follow молчащего контейнера открывается снова без
+/// `Reconnecting` (`logs::run`). Обычные запросы короче: у каждого свой таймаут
+/// (`request_timeout`, по умолчанию 30 с).
+pub const READ_TIMEOUT: Duration = Duration::from_secs(295);
+
+/// `kube::Config` профиля. Таймаут ответа — `READ_TIMEOUT`: он обрывает только соединение, по
+/// которому почти 5 минут ничего не приходит; таймаут запроса ставит вызывающий код
+/// (`request_timeout`). У exec-плагина учётных данных здесь нет: их выдаёт запуск плагина, и их
+/// подставляет `apply_exec_credential`.
 pub fn build_kube_config(
     p: &ConnectionProfile,
     secrets: &dyn SecretStore,
@@ -80,7 +89,7 @@ pub fn build_kube_config(
     let host = uri.host().ok_or_else(|| invalid_url(p))?.to_string();
     let mut c = kube::Config::new(uri);
     c.connect_timeout = Some(Duration::from_millis(p.connect_timeout_ms));
-    c.read_timeout = None;
+    c.read_timeout = Some(READ_TIMEOUT);
     c.write_timeout = Some(request_timeout(p));
     // Встроенный повтор kube (429/503/504 до 15 раз) скрыл бы за таймаутом запроса ошибки
     // «слишком много запросов» и «сервер недоступен» и повторял бы изменяющие запросы.
@@ -210,7 +219,15 @@ mod tests {
             "sha256~abc"
         );
         assert_eq!(c.connect_timeout, Some(Duration::from_secs(10)));
-        assert_eq!(c.read_timeout, None, "долгие потоки не обрываются");
+        assert_eq!(
+            c.read_timeout,
+            Some(READ_TIMEOUT),
+            "мёртвое соединение обрывается"
+        );
+        assert!(
+            Duration::from_secs(crate::watch::WATCH_TIMEOUT.into()) < READ_TIMEOUT,
+            "живой watch сервер заканчивает раньше"
+        );
         assert!(c.root_cert.is_none() && !c.accept_invalid_certs);
         assert!(c.proxy_url.is_none());
         assert!(c.headers.iter().any(|(k, v)| k == http::header::USER_AGENT

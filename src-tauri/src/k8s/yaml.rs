@@ -4,6 +4,8 @@
 //! ключ `spec.tls.key` Route и аннотации с копией объекта вырезаются до вывода, значения
 //! переменных окружения с секретными именами скрыты (`redact`).
 
+use std::collections::BTreeMap;
+
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::batch::v1::{CronJob, Job};
 use k8s_openapi::api::core::v1::{ConfigMap, PersistentVolumeClaim, Pod, Service};
@@ -75,21 +77,31 @@ const OBJECT_COPIES: &[&str] = &[
 /// которое скрыто в `env`.
 const CHANGE_CAUSE: &str = "kubernetes.io/change-cause";
 
-/// Объект для показа: без `managedFields` и аннотаций-копий, у Route — без закрытого ключа
-/// `spec.tls.key` (спец. §10.2: «никогда, на любом уровне»), значения переменных окружения
-/// с секретными именами скрыты (`mask_env`). Через неё проходит каждый YAML.
+/// Аннотации для показа — в YAML и на вкладках «Обзор» workload'а и пода: без копий объекта
+/// (`OBJECT_COPIES`), `kubernetes.io/change-cause` с присваиванием секретному имени — `***`.
+/// Через неё проходит каждая карта аннотаций, которая уходит из Rust целиком.
+pub fn redact_annotations(a: &mut BTreeMap<String, String>) {
+    a.retain(|k, _| !OBJECT_COPIES.contains(&k.as_str()));
+    if let Some(cause) = a.get_mut(CHANGE_CAUSE)
+        && assigns_a_secret(cause)
+    {
+        *cause = REDACTED.into();
+    }
+}
+
+/// Объект для показа: без `managedFields`, аннотации — через `redact_annotations`, у Route — без
+/// закрытого ключа `spec.tls.key` (спец. §10.2: «никогда, на любом уровне»), значения переменных
+/// окружения с секретными именами скрыты (`mask_env`). Через неё проходит каждый YAML.
 fn redact(kind: YamlKind, v: &mut serde_json::Value) {
     if let Some(meta) = v.get_mut("metadata").and_then(|m| m.as_object_mut()) {
         meta.remove("managedFields");
-        if let Some(a) = meta.get_mut("annotations").and_then(|a| a.as_object_mut()) {
-            a.retain(|k, _| !OBJECT_COPIES.contains(&k.as_str()));
-            if let Some(cause) = a.get_mut(CHANGE_CAUSE)
-                && cause.as_str().is_some_and(assigns_a_secret)
-            {
-                *cause = REDACTED.into();
-            }
-            if a.is_empty() {
-                meta.remove("annotations");
+        if let Some(a) = meta.remove("annotations") {
+            // Значения аннотаций в API — строки; карта другого вида не показывается вовсе.
+            let mut a: BTreeMap<String, String> = serde_json::from_value(a).unwrap_or_default();
+            redact_annotations(&mut a);
+            if !a.is_empty() {
+                let a = a.into_iter().map(|(k, v)| (k, v.into())).collect();
+                meta.insert("annotations".into(), serde_json::Value::Object(a));
             }
         }
     }

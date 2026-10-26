@@ -84,6 +84,16 @@ impl Platform for Kubernetes {
 
 pub struct OpenShift;
 
+/// Части обзора, которых у кластера может не быть: на ROSA HCP и других кластерах с внешней
+/// плоскостью управления нет MachineConfigPool (группы `machineconfiguration.openshift.io`), а
+/// объекта консоли нет, если она выключена. 404 — пустое значение («—»), а не ошибка.
+fn absent_is_empty<T: Default>(r: crate::error::AppResult<T>) -> Part<T> {
+    match r {
+        Err(e) if e.code == crate::error::ErrorCode::NotFound => Part::ok(T::default()),
+        r => r.into(),
+    }
+}
+
 /// Все ClusterOperators.
 pub async fn cluster_operators(r: &ReadClient) -> crate::error::AppResult<Vec<OperatorRow>> {
     let list = r
@@ -113,16 +123,18 @@ impl Platform for OpenShift {
                     .into()
             };
             let infrastructure = async {
-                r.get_dynamic(&openshift::infrastructures(), None, "cluster")
-                    .await
-                    .map(|o| openshift::infrastructure_type(&o))
-                    .into()
+                absent_is_empty(
+                    r.get_dynamic(&openshift::infrastructures(), None, "cluster")
+                        .await
+                        .map(|o| openshift::infrastructure_type(&o)),
+                )
             };
             let console = async {
-                r.get_dynamic(&openshift::consoles(), None, "cluster")
-                    .await
-                    .map(|o| openshift::console_url(&o))
-                    .into()
+                absent_is_empty(
+                    r.get_dynamic(&openshift::consoles(), None, "cluster")
+                        .await
+                        .map(|o| openshift::console_url(&o)),
+                )
             };
             let operators = async {
                 if !caps.read_cluster_operators {
@@ -137,14 +149,15 @@ impl Platform for OpenShift {
                     .into()
             };
             let pools = async {
-                r.list_dynamic(
-                    &openshift::machine_config_pools(),
-                    None,
-                    &ListParams::default(),
+                absent_is_empty(
+                    r.list_dynamic(
+                        &openshift::machine_config_pools(),
+                        None,
+                        &ListParams::default(),
+                    )
+                    .await
+                    .map(|l| l.items.iter().map(machine_config_pool_row).collect()),
                 )
-                .await
-                .map(|l| l.items.iter().map(machine_config_pool_row).collect())
-                .into()
             };
             let (cluster_version, infrastructure, console_url, operators, machine_config_pools) =
                 tokio::join!(version, infrastructure, console, operators, pools);
@@ -326,6 +339,37 @@ mod tests {
             json["consoleUrl"],
             serde_json::json!({"data": "https://console-openshift-console.apps.c.example.com"})
         );
+    }
+
+    /// ROSA HCP: группы `machineconfiguration.openshift.io` нет, консоль выключена — на эти
+    /// запросы сервер отвечает 404. Части пустые («—»), а не ошибки.
+    #[tokio::test]
+    async fn parts_that_the_cluster_does_not_have_are_empty_not_errors() {
+        let (client, _server) = mock_client(|s| match s.path() {
+            "/apis/machineconfiguration.openshift.io/v1/machineconfigpools" => status(
+                404,
+                "NotFound",
+                "the server could not find the requested resource",
+            ),
+            "/apis/config.openshift.io/v1/consoles/cluster" => status(
+                404,
+                "NotFound",
+                r#"consoles.config.openshift.io "cluster" not found"#,
+            ),
+            _ => openshift_cluster(s),
+        });
+        let r = reader(client);
+        let Some(PlatformOverview::Openshift(o)) = adapter(PlatformKind::Openshift)
+            .overview(&r, &all_rights())
+            .await
+        else {
+            panic!("OpenShift");
+        };
+        assert_eq!(o.machine_config_pools.data, Some(vec![]));
+        assert!(o.machine_config_pools.error.is_none());
+        assert_eq!(o.console_url.data, Some(None));
+        assert!(o.console_url.error.is_none());
+        assert_eq!(o.infrastructure.data, Some(Some("VSphere".into())));
     }
 
     #[tokio::test]

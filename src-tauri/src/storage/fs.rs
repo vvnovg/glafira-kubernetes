@@ -23,12 +23,30 @@ fn tmp_path(path: &Path) -> PathBuf {
 
 /// Новый файл с правами только для владельца (0600 на unix): в данных приложения бывают
 /// подставленные значения `{{env}}` и заголовков. rename сохраняет права временного файла.
+/// Только новый (`create_new`, `O_EXCL`): файл или symlink, подложенный заранее под этим именем,
+/// не открывается, и запись не уходит по чужой ссылке.
 fn create_private(path: &Path) -> std::io::Result<File> {
     let mut opts = fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
     opts.open(path)
+}
+
+/// Сколько имён временного файла пробуется, пока не найдётся свободное.
+const TMP_ATTEMPTS: usize = 100;
+
+/// Временный файл: первое свободное имя из `next` (`tmp_path`). Занятое (чужой файл или symlink)
+/// пропускается — следующее имя с новым номером.
+fn create_tmp(mut next: impl FnMut() -> PathBuf) -> std::io::Result<(PathBuf, File)> {
+    for _ in 0..TMP_ATTEMPTS {
+        let tmp = next();
+        match create_private(&tmp) {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            r => return r.map(|f| (tmp, f)),
+        }
+    }
+    Err(std::io::ErrorKind::AlreadyExists.into())
 }
 
 /// Атомарная запись: временный файл → fsync → rename → fsync каталога.
@@ -60,9 +78,8 @@ pub struct AtomicFile {
 
 impl AtomicFile {
     pub fn create(path: &Path) -> AppResult<Self> {
-        let tmp = tmp_path(path);
-        let file = fs::create_dir_all(parent(path))
-            .and_then(|_| create_private(&tmp))
+        let (tmp, file) = fs::create_dir_all(parent(path))
+            .and_then(|_| create_tmp(|| tmp_path(path)))
             .map_err(|e| write_failed(path, e))?;
         Ok(Self {
             path: path.to_path_buf(),
@@ -223,6 +240,37 @@ mod tests {
         atomic_write(&p, b"new").unwrap();
         let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "заменённый файл тоже 0600");
+    }
+
+    /// Под именем временного файла заранее лежит symlink на чужой файл: он не открывается и не
+    /// обрезается, запись идёт под следующим именем, а подложенное остаётся как было.
+    #[cfg(unix)]
+    #[test]
+    fn a_planted_symlink_is_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"keep").unwrap();
+        let (planted, free) = (
+            dir.path().join("a.json.1.tmp"),
+            dir.path().join("a.json.2.tmp"),
+        );
+        std::os::unix::fs::symlink(&victim, &planted).unwrap();
+        let mut names = [planted.clone(), free.clone()].into_iter();
+        let (tmp, mut f) = create_tmp(|| names.next().unwrap()).unwrap();
+        assert_eq!(tmp, free);
+        f.write_all(b"secret").unwrap();
+        drop(f);
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"keep",
+            "чужой файл не тронут"
+        );
+        assert!(std::fs::symlink_metadata(&planted).unwrap().is_symlink());
+        assert_eq!(std::fs::read(&free).unwrap(), b"secret");
+        // Все имена заняты — ошибка, а не запись по ссылке.
+        let e = create_tmp(|| planted.clone()).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
     }
 
     #[test]

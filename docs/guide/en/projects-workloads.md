@@ -25,8 +25,10 @@ may not read, with the reason), the quotas used by 90 % or more and the `Warning
 Workloads, pods and events of a project update by themselves while their subtab is open: Glafira watches the
 changes in the cluster. Without the right to watch, the list refreshes every 10 seconds. A kind of workload you may
 not read is shown as a line with the reason, and the other kinds are listed. After a network error the list tries
-again by itself; when the session expires, it stops with the error. Other screens have [[ui:common.refresh]] and
-[[ui:common.autoRefresh]] (every 10 or 30 seconds).
+again by itself, and a connection that brings nothing for almost 5 minutes (the computer slept, the network or VPN
+changed) is dropped and the list is read anew. When the credentials of an exec plugin run out, Glafira runs the plugin
+again and the list goes on; when the session expires and that does not sign you in, the list stops with the error.
+Other screens have [[ui:common.refresh]] and [[ui:common.autoRefresh]] (every 10 or 30 seconds).
 
 While a tab is hidden behind another one, it does not ask the cluster: its lists stop watching and auto-refresh
 pauses. When you come back, the lists are read anew, and auto-refresh starts counting its interval again

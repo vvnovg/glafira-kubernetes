@@ -1,9 +1,11 @@
+use std::sync::Arc;
+
 use tauri::State;
 use tauri::ipc::Channel;
 
 use crate::error::{AppResult, ErrorCode};
 use crate::logs::{KubeLogs, LogEvent, LogParams, Matcher, Reported};
-use crate::sessions::{SessionGuard, Sink};
+use crate::sessions::{Connect, SessionGuard, Sink, StreamClient};
 use crate::state::AppState;
 use crate::watch::{WatchEvent, WatchKind, WatchParams};
 
@@ -49,19 +51,18 @@ pub async fn start_watch_impl(
     };
     let ns = params.namespace.clone();
     let workload = params.workload.clone();
-    let (used, reader, selector) = st
+    let (used, selector) = st
         .read_in(&params.connection_id, &params.namespace, |c| async move {
-            let r = c.reader();
             // У workload'а без селектора подов нет, как у `list_pods`: пустой селектор.
             let selector = match &workload {
                 Some(w) => Some(
-                    crate::k8s::workloads::pod_selector(&r, &ns, w.kind, &w.name)
+                    crate::k8s::workloads::pod_selector(&c.reader(), &ns, w.kind, &w.name)
                         .await?
                         .unwrap_or_default(),
                 ),
                 None => None,
             };
-            Ok((c, r, selector))
+            Ok((c, selector))
         })
         .await?;
     if cancel.is_cancelled() {
@@ -69,15 +70,16 @@ pub async fn start_watch_impl(
         return Ok(id);
     }
     let groups = used.info.api_groups;
+    let client = StreamClient::new(used.clone(), reconnect(st, &params.connection_id));
     let sources = crate::watch::sources(
-        &reader,
+        &client,
         &params.namespace,
         params.kind,
         selector.as_deref(),
         &groups,
     );
     let poll = crate::watch::poll(
-        reader,
+        client.fork(),
         params.namespace.clone(),
         params.kind,
         params.workload.clone(),
@@ -91,9 +93,29 @@ pub async fn start_watch_impl(
     Ok(id)
 }
 
-/// Что делать с ошибками запросов сессии, которая читает клиентом `used`. Как у
+/// Клиент подключения для потоков сессии, которые открываются заново (`StreamClient`): клиент,
+/// который кластер не принял, сбрасывается (`evict_if_broken_client`: только если в пуле всё
+/// ещё он), и клиент берётся у `AppState::connected` — из пула (его мог уже заменить соседний
+/// поток или чтение вкладки) или новым подключением. Истекающие учётные данные exec-плагина
+/// `connected` выдаёт заново одной попыткой на всех ожидающих; политика проверяется так же, как
+/// у любого чтения.
+fn reconnect(st: &AppState, connection_id: &str) -> Connect {
+    let (st, id) = (st.clone(), connection_id.to_string());
+    Arc::new(move |broken| {
+        let (st, id) = (st.clone(), id.clone());
+        Box::pin(async move {
+            if let Some((used, e)) = broken {
+                st.evict_if_broken_client(&id, &used, &e);
+            }
+            st.connected(&id, false).await
+        })
+    })
+}
+
+/// Что делать с ошибками запросов сессии, которая начиналась клиентом `used`. Как у
 /// `AppState::read_in`: 403 — права проекта перечитаются, ошибка учётных данных или TLS
-/// сбрасывает этот клиент, если он ещё в пуле.
+/// сбрасывает этот клиент, если он ещё в пуле (клиент, взятый потоком потом, сбрасывает
+/// `StreamClient::renew`).
 fn session_report(
     st: &AppState,
     connection_id: &str,
@@ -134,10 +156,9 @@ pub async fn start_logs_impl(
         sessions: st.sessions.clone(),
         id: id.clone(),
     };
-    let (used, reader) = st
+    let used = st
         .read_in(&params.connection_id, &params.namespace, |c| async move {
-            let r = c.reader();
-            Ok((c, r))
+            Ok(c)
         })
         .await?;
     if cancel.is_cancelled() {
@@ -146,11 +167,12 @@ pub async fn start_logs_impl(
     }
     // Лог прежнего экземпляра контейнера не растёт: follow ему не нужен.
     let follow = params.follow && !params.previous;
+    let client = StreamClient::new(used.clone(), reconnect(st, &params.connection_id));
     let report = session_report(st, &params.connection_id, &params.namespace, used);
     tokio::spawn(async move {
         let _guard = guard;
         let source = Reported {
-            source: KubeLogs { reader, params },
+            source: KubeLogs { client, params },
             report,
         };
         crate::logs::run(source, follow, matcher, sink, cancel).await;
@@ -189,7 +211,7 @@ pub async fn save_logs_impl(
     let (cid, ns) = (params.connection_id.clone(), params.namespace.clone());
     let save = st.read_in(&cid, &ns, |c| async move {
         let logs = KubeLogs {
-            reader: c.reader(),
+            client: StreamClient::fixed(c.reader()),
             params,
         };
         crate::logs::save(&logs, &matcher, std::path::Path::new(&path), timestamps).await
@@ -514,6 +536,191 @@ mod tests {
         assert!(st.sessions.is_empty());
         assert_eq!(requests.load(Ordering::SeqCst), 0);
         assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
+    }
+
+    /// Exec-плагин `kubectl oidc-login get-token`: каждый запуск — новый токен `tok-<номер>`
+    /// (запуски — строки в файле `count`), срок — через несколько секунд, то есть учётные данные
+    /// уже истекают (`Connected::expiring` берёт минуту запаса). Подключение `a` — к `port`.
+    #[cfg(unix)]
+    fn expiring_plugin(st: &AppState, dir: &std::path::Path, port: u16) -> std::path::PathBuf {
+        use crate::storage::profile::{AuthConfig, ExecEnv, ProxyConfig, sample_exec};
+        use std::os::unix::fs::PermissionsExt;
+        let expires = (time::OffsetDateTime::now_utc() + time::Duration::seconds(5))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        let script = dir.join("kubectl");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho run >> \"$COUNT_FILE\"\nn=$(wc -l < \"$COUNT_FILE\" | tr -d ' ')\nprintf '{{\"kind\":\"ExecCredential\",\"status\":{{\"token\":\"tok-%s\",\"expirationTimestamp\":\"{expires}\"}}}}' \"$n\"\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let count = dir.join("count");
+        let mut exec = sample_exec();
+        exec.command = script.display().to_string();
+        exec.args = vec!["oidc-login".into(), "get-token".into()];
+        exec.env = vec![ExecEnv {
+            name: "COUNT_FILE".into(),
+            value: count.display().to_string(),
+        }];
+        exec.approved = Some(crate::auth::exec::fingerprint(&exec));
+        let mut p = crate::storage::connections::sample_profile("a");
+        p.auth = AuthConfig::Exec(exec);
+        p.proxy = ProxyConfig::None;
+        st.connections.upsert(p).unwrap();
+        // Простой HTTP, чтобы не поднимать TLS: профиль с http:// не сохранить, поэтому адрес
+        // меняется в данных хранилища.
+        st.connections
+            .update(|d| {
+                let p = d.connections.iter_mut().find(|c| c.id == "a").unwrap();
+                p.api_url = format!("http://127.0.0.1:{port}");
+                Ok(())
+            })
+            .unwrap();
+        count
+    }
+
+    /// Ждёт, пока `done` не станет верным (до 10 с).
+    async fn until(what: &str, done: impl Fn() -> bool) {
+        let wait = async {
+            while !done() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), wait)
+            .await
+            .unwrap_or_else(|_| panic!("не дождались: {what}"));
+    }
+
+    /// Watch подов и follow лога открыты, а учётные данные exec-плагина истекли: кластер больше
+    /// не принимает прежние токены и закрывает потоки, открытые ими. Обе сессии идут дальше —
+    /// с токеном нового запуска плагина, без ошибки.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_watch_and_a_follow_log_outlive_the_exec_credential() {
+        use crate::k8s::testing::{Reply, serve};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio_util::sync::CancellationToken;
+        let dir = tempfile::tempdir().unwrap();
+        let st =
+            AppState::new(dir.path(), Arc::new(crate::secrets::MemoryStore::default())).unwrap();
+        // Токены с номером не больше — истекли; `rotate` закрывает потоки, открытые до этого.
+        let expired = Arc::new(AtomicUsize::new(0));
+        let rotate = CancellationToken::new();
+        let port = {
+            let (expired, rotate) = (expired.clone(), rotate.clone());
+            let open = CancellationToken::new();
+            serve(move |s, token| {
+                let n: usize = token
+                    .and_then(|t| t.strip_prefix("tok-"))
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(0);
+                let json = |(code, v): (u16, serde_json::Value)| {
+                    Reply::Full(code, serde_json::to_vec(&v).unwrap())
+                };
+                if n == 0 || n <= expired.load(Ordering::SeqCst) {
+                    return json(crate::k8s::testing::status(
+                        401,
+                        "Unauthorized",
+                        "Unauthorized",
+                    ));
+                }
+                let held = |body: Vec<u8>| match rotate.is_cancelled() {
+                    false => Reply::Held(body, rotate.clone()),
+                    true => Reply::Held(body, open.clone()),
+                };
+                match s.path() {
+                    "/api/v1/namespaces/team-a/pods" if s.uri.contains("watch=true") => {
+                        held(Vec::new())
+                    }
+                    "/api/v1/namespaces/team-a/pods" => json((
+                        200,
+                        serde_json::json!({"apiVersion": "v1", "kind": "PodList",
+                            "metadata": {"resourceVersion": "1"},
+                            "items": [crate::k8s::pods::fixtures::running(&format!("web-{n}"))]}),
+                    )),
+                    "/api/v1/namespaces/team-a/pods/web-1/log" => {
+                        held(format!("2026-10-25T10:{n:02}:00Z line-{n}\n").into_bytes())
+                    }
+                    "/api/v1/namespaces/team-a/pods/web-1" => {
+                        json((200, crate::k8s::pods::fixtures::running("web-1")))
+                    }
+                    _ => json(crate::k8s::cluster::fixtures::openshift(s)),
+                }
+            })
+            .await
+        };
+        let count = expiring_plugin(&st, dir.path(), port);
+        let runs = || {
+            std::fs::read_to_string(&count)
+                .map(|s| s.lines().count())
+                .unwrap_or(0)
+        };
+        let pods: Collect<WatchEvent> = Collect::default();
+        start_watch_impl(&st, params(WatchKind::Pods, None), pods.clone())
+            .await
+            .unwrap();
+        let logs: Collect<LogEvent> = Collect::default();
+        start_logs_impl(&st, log_params(), logs.clone())
+            .await
+            .unwrap();
+        let lines = |logs: &Collect<LogEvent>| -> Vec<String> {
+            logs.items()
+                .iter()
+                .flat_map(|e| match e {
+                    LogEvent::Lines { lines, .. } => lines.iter().map(|l| l.text.clone()).collect(),
+                    LogEvent::Reconnecting { .. } => vec!["<reconnecting>".into()],
+                    LogEvent::End { .. } => vec!["<end>".into()],
+                    LogEvent::Error { error } => vec![format!("<error {}>", error.key)],
+                })
+                .collect()
+        };
+        // Список подов: `web-<номер токена>` у `Reset`, ошибка — ключом.
+        let watched = |pods: &Collect<WatchEvent>| -> Vec<String> {
+            pods.items()
+                .iter()
+                .map(|e| match e {
+                    WatchEvent::Reset { items, .. } => {
+                        items.iter().map(|r| r.key()).collect::<Vec<_>>().join(",")
+                    }
+                    WatchEvent::Error { error, fatal } => format!("<error {} {fatal}>", error.key),
+                    other => format!("{other:?}"),
+                })
+                .collect()
+        };
+        until(
+            "первый список подов и первая строка лога",
+            || watched(&pods).len() == 1 && lines(&logs).len() == 1,
+        )
+        .await;
+        // Учётные данные истекли: прежние токены кластер больше не принимает.
+        let before = runs();
+        expired.store(before, Ordering::SeqCst);
+        rotate.cancel();
+        until(
+            "второе событие списка и строка лога после переподключения",
+            || watched(&pods).len() == 2 && lines(&logs).len() == 3,
+        )
+        .await;
+        let issued_later = |text: &str, prefix: &str| {
+            text.strip_prefix(prefix)
+                .and_then(|n| n.parse::<usize>().ok())
+                .is_some_and(|n| n > before)
+        };
+        let watched = watched(&pods);
+        assert!(
+            issued_later(&watched[1], "web-"),
+            "список прочитан заново токеном нового запуска плагина: {watched:?}"
+        );
+        let lines = lines(&logs);
+        assert!(
+            lines[1] == "<reconnecting>" && issued_later(&lines[2], "line-"),
+            "лог открыт снова токеном нового запуска плагина: {lines:?}"
+        );
+        assert!(runs() > before, "плагин запущен снова");
+        assert_eq!(st.sessions.stop_for("a"), 2, "обе сессии идут");
     }
 
     /// Кластер отклонил токен при открытии лога: ошибка в сессии, клиент подключения сброшен.

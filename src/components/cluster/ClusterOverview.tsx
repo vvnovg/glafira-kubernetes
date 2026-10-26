@@ -1,17 +1,14 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api, toAppError } from "../../api/client";
+import { api } from "../../api/client";
 import type { ClusterOverview, OpenShiftOverview, OperatorRow, Part } from "../../api/types";
-import { needsSignIn } from "../../lib/signIn";
 import { useRefetchInterval } from "../../lib/tabActive";
-import { ErrorBanner } from "../common/ErrorBanner";
 import { Hint } from "../common/Hint";
 import { PartView, Unavailable } from "../common/PartView";
 import { ReadError } from "../common/ReadError";
 import { RefreshControls, useRefreshInterval } from "../common/RefreshControls";
-import { reconnect, sessionMutationKey } from "./SessionActions";
 
 /** Какие части обзора скрыты правами (у них ошибка FORBIDDEN). */
 function hiddenByRights(o: ClusterOverview): boolean {
@@ -63,7 +60,7 @@ export function ClusterOverviewView({ connectionId }: { connectionId: string }) 
         <RefreshControls interval={interval} onInterval={setRefreshInterval} onRefresh={() => void q.refetch()} busy={q.isFetching} />
       </div>
       {q.isPending && <p className="muted">{t("common.loading")}</p>}
-      {q.error && <OverviewError error={q.error} connectionId={connectionId} onRetry={() => void q.refetch()} />}
+      {q.error && <ReadError error={q.error} connectionId={connectionId} onRetry={() => void q.refetch()} />}
       {o && (
         <>
           <dl className="stats">
@@ -143,29 +140,6 @@ export function ClusterOverviewView({ connectionId }: { connectionId: string }) 
         </>
       )}
     </section>
-  );
-}
-
-/**
- * Ошибка чтения обзора на вкладке подключения. «Войти снова» из `ReadError` открыл бы эту же вкладку, поэтому при
- * истёкшей сессии кнопка запускает подключение заново: вход (или причина отказа) показываются выше, на вкладке.
- */
-function OverviewError({ error, connectionId, onRetry }: { error: unknown; connectionId: string; onRetry: () => void }) {
-  const { t } = useTranslation();
-  const queryClient = useQueryClient();
-  // Тот же ключ, что у входа на вкладке: пока идёт подключение, второе рядом не запускается.
-  const signIn = useMutation({ mutationKey: sessionMutationKey(connectionId), mutationFn: () => reconnect(queryClient, connectionId) });
-  const e = toAppError(error);
-  if (!needsSignIn(e)) return <ReadError error={error} connectionId={connectionId} onRetry={onRetry} />;
-  return (
-    <div className="panel">
-      <ErrorBanner error={e} />
-      <div className="toolbar">
-        <button type="button" className="primary" disabled={signIn.isPending} onClick={() => signIn.mutate()}>
-          {t("objects.signInAgain")}
-        </button>
-      </div>
-    </div>
   );
 }
 
@@ -280,18 +254,23 @@ function OpenShiftSection({ connectionId, os }: { connectionId: string; os: Open
         )}
       </PartView>
       <h4>{t("cluster.overview.machineConfigPools")}</h4>
+      {/* Пулов нет (ROSA HCP: машинами управляет внешняя плоскость управления) — «—». */}
       <PartView part={os.machineConfigPools}>
-        {(pools) => (
-          <ul>
-            {pools.map((p) => (
-              <li key={p.name} className={p.degraded ? "problem" : undefined}>
-                <code>{p.name}</code> {p.updated}/{p.machines} {t("cluster.overview.machinesUpdated")}
-                {p.updating && ` · ${t("cluster.overview.updating")}`}
-                {p.degraded && ` · ${t("cluster.overview.degraded", { count: p.degradedMachines })}`}
-              </li>
-            ))}
-          </ul>
-        )}
+        {(pools) =>
+          pools.length === 0 ? (
+            <p className="muted">—</p>
+          ) : (
+            <ul>
+              {pools.map((p) => (
+                <li key={p.name} className={p.degraded ? "problem" : undefined}>
+                  <code>{p.name}</code> {p.updated}/{p.machines} {t("cluster.overview.machinesUpdated")}
+                  {p.updating && ` · ${t("cluster.overview.updating")}`}
+                  {p.degraded && ` · ${t("cluster.overview.degraded", { count: p.degradedMachines })}`}
+                </li>
+              ))}
+            </ul>
+          )
+        }
       </PartView>
     </>
   );
