@@ -144,18 +144,21 @@ crates/glafira-mcp-kubernetes — инструменты, типы ответо�
 - **Изоляция для тестов:** `k8s`, `logs`, `watch`, `metrics`, `health`, `ops` зависят от трейтов (`ClusterReader`,
   `ClusterWriter`, `MetricsSource`), которые подменяются в тестах; правила, движок рекомендаций, PromQL-шаблоны,
   маскировка, определение платформы и проверка exec-команды по списку разрешённых — чистые функции.
-- **Гарантия MCP «только чтение».** Крейты `glafira-mcp-*` не зависят от `kube`, `k8s-openapi`, `reqwest` и крейта
-  приложения — тест `tests/manifest.rs` читает их `Cargo.toml`. Реализация `Backend` в `src-tauri/src/mcp/` получает
-  только `ReadClient` (newtype без доступа к внутреннему `kube::Client`: get, list, watch, logs и GET-запросы
-  к Prometheus); тест-«сторожок» проверяет, что `src-tauri/src/mcp/**` не импортирует `ops::` и `ClusterWriter` и не
-  берёт внутренний клиент (`Connected::kube_client`). Предложения и замечания пишутся только в файл Glafira.
+- **Гарантия MCP «только чтение».** Крейты `glafira-mcp-*` не зависят от `kube`, `k8s-openapi`, `reqwest`, `hyper`,
+  `tauri` и крейта приложения — `tests/manifest.rs` каждого крейта читает его `Cargo.toml`. Реализация `Backend`
+  в `src-tauri/src/mcp/` получает только `ReadClient` (newtype без доступа к внутреннему `kube::Client`: get, list,
+  watch, logs и GET-запросы к Prometheus); тест-«сторожок» ищет по тексту файлов `src-tauri/src/mcp/` и не допускает
+  в них `ops::`, `ClusterWriter`, `kube_client(` (`Connected::kube_client`), `kube::Client`, `kube::Api`,
+  `kube::api::Api<`, `PostParams`, `PatchParams` и `DeleteParams`. Предложения и замечания пишутся только в файл Glafira.
 - **Длительные операции** (watch, логи, сбор метрик проекта, проверка) — фоновые tokio-задачи с `SessionId`; данные
   уходят во фронтенд через `tauri::ipc::Channel` батчами (до 200 элементов или раз в 100 мс; начальный снимок `Reset` уходит одним сообщением и бывает больше); отмена —
   `stop_session(id)` через `CancellationToken`.
 - **Пул клиентов:** на подключение — один `kube::Client` (общий для интерфейса и MCP) и один HTTP-клиент метрик;
   создаются при `connect`, уничтожаются при `disconnect` и смене токена. Вызов MCP к подключению, которое ещё не
   открыто, открывает его сам (`AppState::read`, как вкладка, с теми же проверками политики); если для этого нужен вход,
-  вызов получает ошибку, а вход человек выполняет в окне.
+  вызов получает ошибку, а вход человек выполняет в окне. Тексты ошибок с данными профиля (адрес API-сервера и прокси,
+  команда exec-плагина, ответ OAuth-сервера, имя пользователя из 403) модель не получает: код остаётся, а текст
+  заменяется фиксированной английской фразой, подробности видит только человек (§10.7).
 - **Таймауты:** запрос — 30 с, подключение — 10 с (настраиваются в профиле); у каждой сетевой операции есть таймаут
   и отмена, UI не блокируется. Долгие потоки (watch, follow логов) защищает таймаут чтения клиента — 295 с без единого
   байта: соединение, умершее после сна, смены Wi-Fi или VPN, обрывается, а не висит молча (TCP keepalive у `kube`
@@ -267,8 +270,9 @@ crates/glafira-mcp-kubernetes — инструменты, типы ответо�
 - **метрики:** `auto` (по умолчанию), свой URL Thanos, свой URL Prometheus; авторизация источника — токен
   подключения, отдельный bearer-токен или без авторизации; CA источника — как у подключения или свой;
 - **LLM:** уровень доступа `llmAccess` (`off` / `metadata` / `logs`, по умолчанию `off`; до O4 — `off` и `metadata`,
-  незнакомое значение читается как `off`), проекты для LLM (`llmNamespaces`: «все доступные» — по умолчанию, `null` —
-  или список), список имён полей для маскировки (с O4; до этого — стандартный список крейта, §10.3);
+  незнакомое значение читается как `off`), проекты для LLM (`llmNamespaces`: `null` — «все доступные», по умолчанию,
+  или список; пустой список — ни один проект LLM не виден), список имён полей для маскировки (с O4; до этого —
+  стандартный список крейта, §10.3);
 - таймауты: запрос (30 с), подключение (10 с).
 
 Поля `llmAccess`, `llmNamespaces`, папка и порядок — локальные: экспорт их не пишет, импорт не переносит (как
@@ -660,12 +664,20 @@ request и limit, пометки и нарушения ограничений; �
 
 Как в Kafka G2:
 - запуск только по кнопке «Проверить» или вызову `health_check`; автоматических и периодических проверок нет;
-- одна проверка на подключение одновременно, второй вызов ждёт идущую и получает тот же результат;
+- одна проверка на подключение одновременно: вызов с тем же списком проектов и в том же окружении ждёт идущую
+  и получает тот же результат, иной дожидается её окончания и запускает свою;
 - **охват:** уровень кластера (если есть права) и проекты — по умолчанию все доступные, не больше 50 проектов и
-  5000 подов; не больше 4 параллельных запросов; дедлайн 45 с. `health_check` проверяет проекты `namespaces` или, без
-  них, `llmNamespaces` (у «все доступные» — как интерфейс); такая проверка хранит их в `scope.requested`. Ожидание
-  идущей проверки и повтор свежей (`maxAgeSeconds`) — только если она охватывает запрошенные проекты;
-- непрочитанный объект считается непроверенным, ложных находок по нему нет; сводка — находка `check.partial`;
+  5000 подов; не больше 4 параллельных запросов и дедлайн 45 с — в них входит и `/readyz`. Поды набираются по
+  проектам по порядку: проект, чей список подов не поместился в 5000, и все следующие за ним проекты с подами
+  остаются без списка (он не прочитан, а не пуст); в `check.partial` для этого только `podLimit`, а правила, которым
+  нужны поды, такие проекты пропускают. `health_check` проверяет проекты `namespaces` или, без них, `llmNamespaces`
+  (у «все доступные» — как интерфейс); такая проверка хранит их в `scope.requested`. Свежую проверку
+  (`maxAgeSeconds`) повторяют, если она не старше, сделана в окружении подключения и охватывает запрошенные проекты
+  (`covers`): «все проекты» повторяет только проверка всех, список — проверка, у которой проверены все названные
+  проекты;
+- непрочитанный объект считается непроверенным, ложных находок по нему нет; сводка — находка `check.partial`. Ответ
+  404 на вид объектов значит, что вида в кластере нет (GRPCRoute до Gateway API 1.1, IngressClass до Kubernetes 1.19):
+  это не разрыв. `/readyz` и список проектов обязательны: 404 на них — разрыв;
 - чувствительные значения в снимок не попадают: снимок хранит только поля, нужные правилам;
 - находка `{ key, ruleId, severity, target { kind, namespace?, name?, workloadKind? }, params }` (`workloadKind` — у
   `workload`); `key` — `ruleId` + объект (`pod.crashLoop:workload:team-a:Deployment/web`); находки по подам одного
@@ -695,7 +707,7 @@ request и limit, пометки и нарушения ограничений; �
 | `pod.pending` | workload / pod | `Pending` дольше 5 мин, кроме подов с `pod.imagePull` и `pod.crashLoop`; причина из условия `PodScheduled` или ожидания контейнера | К | П | П |
 | `pod.oomKilled` | workload / pod | `lastState.terminated.reason = OOMKilled` за последние 24 ч | К | П | И |
 | `pod.restartsFrequent` | workload / pod | рестартов ≥ 5 и последний — меньше 1 ч назад (кроме `pod.crashLoop`) | П | П | И |
-| `workload.unavailable` | workload | Deployment, StatefulSet, DaemonSet, DeploymentConfig: доступно меньше желаемого (> 0) дольше 5 мин — от самого давнего неготового пода, иначе от `Available=False`, иначе от создания | К | П | И |
+| `workload.unavailable` | workload | Deployment, StatefulSet, DaemonSet, DeploymentConfig: доступно меньше желаемого (> 0) дольше 5 мин — от самого давнего неготового пода в `Running` или `Pending` (завершённые поды не считаются), иначе от `Available=False`, иначе от создания workload'а, но только если подов у него нет вовсе (считая удаляемые); если список подов проекта не прочитан, от создания тоже не считается | К | П | И |
 | `workload.rolloutStuck` | workload | `Progressing=False` с `ProgressDeadlineExceeded` (Deployment, DeploymentConfig) | К | П | П |
 | `workload.singleReplica` | workload | желаемо 1 реплика (Deployment, StatefulSet, DeploymentConfig), HPA нет или `minReplicas = 1` | П | И | — |
 | `container.noRequests` | workload | у контейнера работающего пода нет CPU- или memory-request (после применения `LimitRange`) | П | П | И |
@@ -728,10 +740,11 @@ request и limit, пометки и нарушения ограничений; �
   в `check.partial`, а не находка. `cluster.operatorDegraded`, `cluster.updateFailing` и `cluster.mcpDegraded` — только
   у платформы `openshift`; правила уровня кластера для `dropapp` добавляет этап O5;
 - правила Route, Ingress и Gateway API работают, только если есть соответствующая группа API. Ingress, из которого
-  OpenShift создал Routes (Route с `ownerReference` на Ingress), проверяется правилами `route.*` по этим Routes,
-  а `ingress.classMissing` к нему не применяется. Пустой `status.loadBalancer` находкой не считается: не все
-  контроллеры его заполняют. `ingress.classMissing` требует чтения `ingressclasses`, `ingress.tlsSecretMissing` —
-  права `list secrets` в проекте; без прав — пометка в `check.partial`;
+  OpenShift создал Routes (Route с `ownerReference` на Ingress), проверяется правилами `route.*` по этим Routes, а
+  `ingress.classMissing` к нему не применяется. Правило пропускает и все Ingress проекта, где Routes ожидались (группа
+  API `route.openshift.io` есть), но не прочитаны: какие Ingress обслуживают Routes, неизвестно. Пустой
+  `status.loadBalancer` находкой не считается: не все контроллеры его заполняют. `ingress.classMissing` требует чтения
+  `ingressclasses`, `ingress.tlsSecretMissing` — права `list secrets` в проекте; без прав — пометка в `check.partial`;
 - `route.certExpiring` проверяет только сертификаты, заданные в `spec.tls.certificate` самого Route (сертификат
   роутера по умолчанию не читается);
 - `container.*` смотрят основные контейнеры и нативные sidecar работающих подов (`container.latestTag` — все
@@ -802,7 +815,7 @@ request и limit, пометки и нарушения ограничений; �
 | Уровень | Что видит модель |
 |---|---|
 | `off` | ничего (подключение не попадает в `list_connections`) |
-| `metadata` («Только метаданные») | объекты, статусы, условия, события, метрики и рекомендации, квоты и `LimitRange`, права пользователя. env — имена и источник (`literal` / `configMapKeyRef` / `secretKeyRef` / `fieldRef` / `resourceFieldRef`, имя и ключ ссылки), без значений; ConfigMap — имена и ключи; Secret — имена, типы и ключи; `command`/`args` — с маскировкой (§10.3); аннотации — кроме `kubectl.kubernetes.io/last-applied-configuration` и ключей, подходящих под шаблоны секретов |
+| `metadata` («Только метаданные») | объекты, статусы, условия, события, метрики и рекомендации, квоты и `LimitRange`, права пользователя. env — имена и источник (`literal` / `configMapKeyRef` / `secretKeyRef` / `fieldRef` / `resourceFieldRef`, имя и ключ ссылки), без значений; ConfigMap — имена и ключи; Secret — имена, типы и ключи; `command`/`args` — с маскировкой (§10.3); аннотации — кроме `kubectl.kubernetes.io/last-applied-configuration` и ключей, подходящих под шаблоны секретов; тексты из кластера (сообщения событий и условий, состояния контейнеров, образы, пробы, сообщения Route, HTTPRoute, GRPCRoute, ClusterOperator и ClusterVersion, находки проверки) — после встроенных шаблонов маскировки |
 | `logs` («Метаданные и логи») | всё из `metadata` + логи подов, литеральные значения env и значения ConfigMap — после маскировки |
 | никогда, на любом уровне | `data`/`stringData` Secret, `spec.tls.key` Route, токены, kubeconfig, адрес и параметры аутентификации профиля, настройки и журнал Glafira |
 
@@ -817,8 +830,13 @@ request и limit, пометки и нарушения ограничений; �
   крейта): значение env, ключа ConfigMap,
   аннотации, флага `--name=value` в `command`/`args` и пары `name=value` / `"name": value` в строке лога;
 - **встроенные шаблоны:** JWT, `Bearer <токен>`, `user:pass@` в URL, email, номера карт с проверкой Луна, ключи
-  `AKIA…`, PEM-блоки приватных ключей, токены `sha256~…`;
-- замаскированное значение — `***`, счётчик `masked` в ответе;
+  `AKIA…`, PEM-блоки приватных ключей, токены `sha256~…`. Только они, без пар `имя=значение` (в прозе такие пары
+  портят диагностику: «Failed to get secret: not found»), применяются ещё к тексту из кластера: сообщениям событий
+  и условий, сообщениям состояний контейнеров, образам и строкам проб, сообщениям Route, HTTPRoute, GRPCRoute,
+  ClusterOperator и ClusterVersion, сообщениям `warningEvent` в `observe_workload`, а у `health_check` — `title`,
+  `details` и строкам в `params` находок;
+- замаскированное значение — `***`; счётчик `masked` в ответе есть у `describe_workload` и `describe_pod` (число
+  замен), в остальных ответах шаблоны работают молча;
 - фильтры логов применяются к немаскированным данным (поиск по значению из ошибки работает), как в Kafka G4.
 
 ### 10.4 Инструменты
@@ -858,7 +876,12 @@ request и limit, пометки и нарушения ограничений; �
 Уточнения:
 - `list_connections`: `platform` и `distribution` — пока подключение открыто (в пуле клиентов), иначе `null`;
 - `health_check`: `namespaces` — до 50 проектов внутри `llmNamespaces`; находки вне `llmNamespaces` модель не видит,
-  `scope.projects` в ответе — тоже только из них;
+  `scope.projects` в ответе — тоже только из них. Если у подключения список `llmNamespaces`, проверка, сделанная
+  человеком по большему числу проектов, сужается до него: `scope.projectsTotal` пересчитывается (проверенные и не
+  проверенные из-за предела проекты списка, но не больше самого списка); у `check.partial` пропадают разрывы
+  (`gaps`) чужих проектов, а `gapCount`, `projectsChecked`, `projectsTotal` и `projectLimit` пересчитываются; если
+  причин неполноты не осталось, находка отбрасывается и `incomplete` сбрасывается. `scope.pods` и `scope.nodes`
+  остаются итогами всей проверки: число по проекту его не раскрывает;
 - логи: строка длиннее 4 КБ обрезается; `search_workload_logs` просматривает не больше 20 подов, 50 МБ и 40 с
   (запрос логов с `limitBytes`); `get_pod_logs` и `search_workload_logs` — одна длительная операция на сессию, общая
   с `observe_workload`;
@@ -910,6 +933,12 @@ request и limit, пометки и нарушения ограничений; �
   `rate_limited`, `invalid_argument`, `not_found`, `busy`, `response_too_large`, `metrics_unavailable`,
   `limit_reached`, `check_in_progress_timeout`, `internal` и коды приложения из `ErrorCode` (`SESSION_EXPIRED`,
   `FORBIDDEN`, `TIMEOUT`, `CONNECTION_FAILED`, …) с английским текстом, как в Kafka G1.
+- тексты с данными профиля модель не получает: у `errors.exec.*`, `errors.oauth.*`, `errors.connections.*` и
+  `errors.k8s.credentials|transport|forbidden` код остаётся, а текст заменяется фиксированной английской фразой,
+  подробности (`details`) не уходят никогда. Без замены остаются фразы без данных профиля (`errors.exec.notApproved`,
+  `errors.connections.loginRequired|tokenMissing|badNamespace|notFound`,
+  `errors.oauth.notAvailable|cancelled|timeout|badTokenResponse`) и ошибки с именами объектов, о которых модель сама
+  спросила. Сбой файла Glafira (`health/<id>.json`) и паника фоновой задачи — `internal` с общей фразой.
 
 ---
 
@@ -1064,8 +1093,10 @@ keychain: сервис glafira-kubernetes, ключи <connection-id>/<field>
   ClusterOperator, ClusterVersion и MachineConfigPool проверяются unit-тестами на снимках и смоуком на OpenShift.
 - **MCP-крейты:** фейковый `Backend`, MCP-клиент rmcp — список инструментов и аннотации, сторожок имён, уровни
   доступа (`not_allowed`, `logs_disabled`), `llmNamespaces`, маскировка в ответах, усечение до 100 КБ, лимиты,
-  рукопожатие, журнал без содержимого; `tests/manifest.rs` — нет зависимости от `kube`, `k8s-openapi`, `reqwest` и
-  приложения; сторожок «`src-tauri/src/mcp/**` не импортирует `ops::` и `ClusterWriter`».
+  рукопожатие, журнал без содержимого; `tests/manifest.rs` каждого крейта — нет зависимости от `kube`, `k8s-openapi`,
+  `reqwest`, `hyper`, `tauri` и приложения; сторожок «`src-tauri/src/mcp/`» — поиск по тексту файлов: нет `ops::`,
+  `ClusterWriter`, `kube_client(`, `kube::Client`, `kube::Api`, `kube::api::Api<`, `PostParams`, `PatchParams`,
+  `DeleteParams`.
 - **Фронтенд:** Vitest + Testing Library — формы подключения и импорта kubeconfig, дерево, вкладки проекта,
   workload'а и пода, логи, «Ресурсы» (таблица, итог, уверенность, переход к форме), формы изменений с diff и
   подтверждением, «Замечания», MCP-настройки; IPC мокается.
@@ -1099,7 +1130,7 @@ keychain: сервис glafira-kubernetes, ключи <connection-id>/<field>
 | Этап | Содержимое |
 |---|---|
 | **O1. Каркас и чтение** | Два плана. **O1a «Каркас и подключения»:** новый репозиторий, перенос основы (§3) и `PORTED.md`; хранилище, keychain, настройки, политика (включая `allowInsecureTls`), журнал, словари en/ru, подсказки, справка (главы «Начало работы» и «Подключения»), папки, экспорт и импорт; подключения (токен, сертификат, вход через браузер, exec-плагины из списка разрешённых и политика `allowExecAuth`, импорт kubeconfig, адрес API с путём), проверка подключения, права; слой платформы (`openshift`, `kubernetes`) и дистрибутив по discovery (§4.3; трейт `Platform` с адаптерами — в O1b вместе с обзором кластера); дерево, вкладка подключения (кто вошёл, платформа и дистрибутив, права), «О программе». **O1b «Чтение кластера»:** обзор кластера (включая `/readyz`, классы Ingress и Gateway), проекты, workloads, поды, события, сеть (Services, Routes, Ingress, Gateway, HTTPRoute, GRPCRoute), конфигурация, хранилище, квоты, YAML, логи, watch, срок токена, группы пользователя на шаге «Вход» проверки подключения (§5.3), трейт `Platform`, `ReadClient`; долги O1a: общий итог подключения для ожидающих очереди, свой ключ входа у проверки подключения, завершение группы процессов exec-плагина, значения секретов exec-плагина в полях формы — до «Показать» |
-| **O2. MCP-шлюз и проверка** | `glafira-mcp-core` (перенос), `glafira-mcp-kubernetes`; уровень `metadata`, `llmNamespaces`, маскировка `command`/`args`/аннотаций; проверка (`health/`, 34 правила без `resources.*`, в том числе `cluster.apiNotReady`, `ingress.*`, `gatewayRoute.*`, `gateway.*`), вкладка «Замечания», значки и блоки; 17 инструментов (все, кроме `get_resource_usage`, `recommend_resources`, предложений и логов) |
+| **O2. MCP-шлюз и проверка** | `glafira-mcp-core` (перенос), `glafira-mcp-kubernetes`; уровень `metadata`, `llmNamespaces`, маскировка `command`/`args`/аннотаций и текстов из кластера; проверка (`health/`, 34 правила без `resources.*`, в том числе `cluster.apiNotReady`, `ingress.*`, `gatewayRoute.*`, `gateway.*`), вкладка «Замечания», значки и блоки; 17 инструментов (все, кроме `get_resource_usage`, `recommend_resources`, предложений и логов) |
 | **O3. Ресурсы, изменения, предложения** | Источники метрик (включая автопоиск Prometheus через прокси API-сервера), PromQL-шаблоны, движок рекомендаций, вкладки «Ресурсы» workload'а и проекта, графики; правила `resources.*`; изменяющие операции §9 с dry-run и guard; `get_resource_usage`, `recommend_resources`, `propose_change`, `list_proposals`, `withdraw_proposal` с заполнением форм (22 инструмента) |
 | **O4. Логи для LLM** | Уровень `logs`, маскировка логов и значений, политика `mcpLogsEnabled`, `get_pod_logs`, `search_workload_logs` (24 инструмента) |
 | **O5. DropApp** | Обследование живого кластера DropApp и спека этапа (§4.3); адаптер `dropapp`: признак для `detect`, вход, автопоиск метрик, обзор и правила уровня кластера, найденное по мультитенантности, serverless и сети; смоук на DropApp. Условие начала — стенд DropApp и доступ к документации; без них этап переносится, и O6 его не ждёт |
