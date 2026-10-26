@@ -398,6 +398,10 @@ impl KubeServer {
         let HealthOutput::Run(mut run) = out else {
             return Err(BackendError::unexpected());
         };
+        // Проверка шла до 50 с: пользователь мог за это время сузить `llmNamespaces` или снять
+        // доступ LLM. Область читается заново — по прежней ответ раскрыл бы то, что уже закрыто
+        // (доступ снят — `not_allowed`, как у любого вызова без доступа).
+        let scope = self.scope(&p.connection_id, None)?;
         // Проверка, которую запустил человек, могла охватить и проекты вне области LLM.
         limit_to_scope(&mut run, &scope);
         // Текст находок — из кластера: маскировка до сводки, отбора и обрезки под предел размера,

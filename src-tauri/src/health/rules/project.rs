@@ -80,12 +80,13 @@ pub fn check(s: &ClusterSnapshot, out: &mut Findings) {
                         "target": scaled }),
                 );
             }
+            // `ScalingDisabled` — цель масштабирована в 0 и HPA отключился сам: так задумано.
             let stuck = ["AbleToScale", "ScalingActive"]
                 .into_iter()
                 .find_map(|name| {
                     h.conditions
                         .get(name)
-                        .filter(|c| c.is("False"))
+                        .filter(|c| c.is("False") && c.reason.as_deref() != Some("ScalingDisabled"))
                         .map(|c| (name, c))
                 });
             if let Some((name, c)) = stuck {
@@ -241,5 +242,47 @@ mod tests {
             ),
             (Some("ScalingActive"), Some("FailedGetResourceMetric"))
         );
+    }
+
+    #[test]
+    fn an_hpa_whose_target_is_scaled_to_zero_is_not_unable_to_scale() {
+        // Цель масштабирована в 0: HPA сам отключается (`ScalingActive=False`, `ScalingDisabled`) —
+        // так задумано, а не поломка.
+        let hpa = |name: &str, conds: &[(&str, Cond)]| HpaSnap {
+            name: name.into(),
+            target_kind: "Deployment".into(),
+            target_name: name.into(),
+            min_replicas: Some(1),
+            max_replicas: 5,
+            current_replicas: Some(0),
+            conditions: conds
+                .iter()
+                .map(|(n, c)| (n.to_string(), c.clone()))
+                .collect::<BTreeMap<_, _>>(),
+        };
+        let p = ProjectSnap {
+            namespace: "team-a".into(),
+            hpas: Some(vec![
+                hpa(
+                    "off",
+                    &[
+                        ("AbleToScale", cond("True", "SucceededGetScale")),
+                        ("ScalingActive", cond("False", "ScalingDisabled")),
+                    ],
+                ),
+                // Другая поломка при том же отключении остаётся находкой.
+                hpa(
+                    "broken",
+                    &[
+                        ("AbleToScale", cond("False", "FailedGetScale")),
+                        ("ScalingActive", cond("False", "ScalingDisabled")),
+                    ],
+                ),
+            ]),
+            ..Default::default()
+        };
+        let v = run(p, Environment::Prod);
+        assert_eq!(ids(&v), ["hpa.unableToScale broken"]);
+        assert_eq!(v[0].params["condition"], "AbleToScale");
     }
 }

@@ -47,7 +47,7 @@ pub enum WorkloadKind {
     CronJob,
 }
 
-/// Workload by kind and name (the doc comment goes into the JSON Schema for LLM).
+/// Workload by kind and name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkloadRef {

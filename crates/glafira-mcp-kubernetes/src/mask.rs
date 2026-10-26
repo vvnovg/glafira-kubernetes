@@ -6,7 +6,7 @@
 //!   `name=value`, `name: value` и `"name": value` в тексте; у `authorization` значение — схема
 //!   и учётные данные (`Basic …`, `Token …`) — скрывается целиком;
 //! - **встроенные шаблоны:** JWT, `Bearer <токен>`, `user:pass@` в URL, email, номера карт
-//!   с проверкой Луна, ключи `AKIA…`/`ASIA…`, PEM-блоки приватных ключей, токены `sha256~…`.
+//!   с проверкой Луна, ключи `AKIA…`/`ASIA…`, PEM-блоки приватных ключей (в том числе PGP), токены `sha256~…`.
 //!
 //! Аннотации с копией объекта (`last-applied-configuration` и подобные) в ответ не попадают.
 
@@ -47,8 +47,11 @@ fn re(pattern: &str) -> Regex {
     Regex::new(pattern).expect("masking pattern")
 }
 
+/// PEM-блок закрытого ключа; у PGP маркеры заканчиваются на `PRIVATE KEY BLOCK`.
 static PEM_KEY: LazyLock<Regex> = LazyLock::new(|| {
-    re(r"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)")
+    re(
+        r"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|$)",
+    )
 });
 static JWT: LazyLock<Regex> =
     LazyLock::new(|| re(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}"));
@@ -324,6 +327,24 @@ mod tests {
                 "-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----".into(),
                 "***".into(),
                 1,
+            ),
+            // Закрытый ключ PGP: ASCII-броня с заголовком и контрольной суммой, «BLOCK» в обоих маркерах.
+            (
+                "key -----BEGIN PGP PRIVATE KEY BLOCK-----\nVersion: GnuPG v2\n\nlQOYBF9x\n=ab12\n-----END PGP PRIVATE KEY BLOCK----- tail".into(),
+                "key *** tail".into(),
+                1,
+            ),
+            // Оборванный блок (текст обрезан до конца) маскируется до конца.
+            (
+                "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF9x".into(),
+                "***".into(),
+                1,
+            ),
+            // Открытый ключ — не секрет.
+            (
+                "-----BEGIN PGP PUBLIC KEY BLOCK-----\nmQENBF9x\n-----END PGP PUBLIC KEY BLOCK-----".into(),
+                "-----BEGIN PGP PUBLIC KEY BLOCK-----\nmQENBF9x\n-----END PGP PUBLIC KEY BLOCK-----".into(),
+                0,
             ),
             (
                 "oc login --token=sha256~AbCdEfGhIjKlMnOp".into(),

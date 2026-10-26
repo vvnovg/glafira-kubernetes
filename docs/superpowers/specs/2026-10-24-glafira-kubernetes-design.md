@@ -717,7 +717,7 @@ request и limit, пометки и нарушения ограничений; �
 | `quota.nearLimit` | quota | использовано ≥ 90 % любого ресурса ResourceQuota | П | П | И |
 | `pvc.pending` | pvc | `Lost`; `Pending` дольше 5 мин — только если PVC монтирует под (у `WaitForFirstConsumer` без потребителя `Pending` — норма) | К | П | П |
 | `hpa.atMax` | hpa | `ScalingLimited=True` с причиной `TooManyReplicas` | П | П | И |
-| `hpa.unableToScale` | hpa | `AbleToScale=False` или `ScalingActive=False` (например, нет requests для метрики) | П | П | И |
+| `hpa.unableToScale` | hpa | `AbleToScale=False` или `ScalingActive=False` (например, нет requests для метрики), кроме `ScalingDisabled` (цель масштабирована в 0) | П | П | И |
 | `service.noEndpoints` | service | Service с селектором без готовых endpoints; в `params` — Route, Ingress, HTTPRoute и GRPCRoute, которые на него ссылаются | П | П | И |
 | `route.notAdmitted` | route | нет статуса роутера или `Admitted=False` | К | П | П |
 | `route.certExpiring` | route | встроенный сертификат Route истекает меньше чем через 30 дней; истёк — строгость К / К / П | П | П | И |
@@ -835,8 +835,8 @@ request и limit, пометки и нарушения ограничений; �
   и условий, сообщениям состояний контейнеров, образам и строкам проб, сообщениям Route, HTTPRoute, GRPCRoute,
   ClusterOperator и ClusterVersion, сообщениям `warningEvent` в `observe_workload`, а у `health_check` — `title`,
   `details` и строкам в `params` находок;
-- замаскированное значение — `***`; счётчик `masked` в ответе есть у `describe_workload` и `describe_pod` (число
-  замен), в остальных ответах шаблоны работают молча;
+- замаскированное значение — `***`; счётчик `masked` в ответе в O2 есть у `describe_workload` и `describe_pod` (число
+  замен; у инструментов логов O4 свой счётчик `masked`), в остальных ответах шаблоны работают молча;
 - фильтры логов применяются к немаскированным данным (поиск по значению из ошибки работает), как в Kafka G4.
 
 ### 10.4 Инструменты
@@ -876,7 +876,8 @@ request и limit, пометки и нарушения ограничений; �
 Уточнения:
 - `list_connections`: `platform` и `distribution` — пока подключение открыто (в пуле клиентов), иначе `null`;
 - `health_check`: `namespaces` — до 50 проектов внутри `llmNamespaces`; находки вне `llmNamespaces` модель не видит,
-  `scope.projects` в ответе — тоже только из них. Если у подключения список `llmNamespaces`, проверка, сделанная
+  `scope.projects` в ответе — тоже только из них. Область читается заново, когда проверка вернулась (за ожидание
+  до 50 с список мог сузиться, а доступ LLM — сняться: тогда `not_allowed`). Если у подключения список `llmNamespaces`, проверка, сделанная
   человеком по большему числу проектов, сужается до него: `scope.projectsTotal` пересчитывается (проверенные и не
   проверенные из-за предела проекты списка, но не больше самого списка); у `check.partial` пропадают разрывы
   (`gaps`) чужих проектов, а `gapCount`, `projectsChecked`, `projectsTotal` и `projectLimit` пересчитываются (в

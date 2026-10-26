@@ -40,6 +40,10 @@ struct Fake {
     big_findings: AtomicBool,
     /// Сколько длинных замечаний отдаёт `list_annotations` (0 — три коротких).
     many_notes: AtomicUsize,
+    /// Область LLM подключения, сменённая пользователем: `None` в значении — доступ снят.
+    scope_overrides: Mutex<BTreeMap<String, Option<BTreeSet<String>>>>,
+    /// Смена области, которая происходит, пока идёт проверка: подключение и его новая область.
+    scope_after_check: Mutex<Option<(String, Option<BTreeSet<String>>)>>,
 }
 
 impl Fake {
@@ -55,6 +59,8 @@ impl Fake {
             active: AtomicUsize::new(0),
             big_findings: AtomicBool::new(false),
             many_notes: AtomicUsize::new(0),
+            scope_overrides: Mutex::new(BTreeMap::new()),
+            scope_after_check: Mutex::new(None),
         })
     }
 
@@ -287,6 +293,11 @@ impl Hooks for Fake {
 
 impl Backend for Fake {
     fn scope(&self, connection_id: &str) -> Option<Scope> {
+        if let Some(changed) = self.scope_overrides.lock().unwrap().get(connection_id) {
+            return changed.clone().map(|namespaces| Scope {
+                namespaces: Some(namespaces),
+            });
+        }
         match connection_id {
             "c1" => Some(Scope {
                 namespaces: Some(BTreeSet::from(["team-a".to_string()])),
@@ -472,6 +483,10 @@ impl Backend for Fake {
                         let d = *self.check_delay.lock().unwrap();
                         tokio::time::sleep(d).await;
                     }
+                    // Пока шла проверка, пользователь сузил область LLM или снял доступ.
+                    if let Some((id, scope)) = self.scope_after_check.lock().unwrap().take() {
+                        self.scope_overrides.lock().unwrap().insert(id, scope);
+                    }
                     Ok(HealthOutput::Run(sample_run(
                         self.big_findings.load(Ordering::SeqCst),
                     )))
@@ -642,6 +657,10 @@ async fn exposes_exactly_the_tools() {
         );
         let schema = serde_json::to_string(&t.input_schema).unwrap();
         assert!(!cyrillic(&schema), "{}: {schema}", t.name);
+        // Заметки для сопровождающих («spec §8.1», «goes into the JSON Schema») модели ни к чему.
+        for note in ["spec §", "doc comment", "JSON Schema"] {
+            assert!(!schema.contains(note), "{}: {note}: {schema}", t.name);
+        }
     }
 }
 
@@ -1601,6 +1620,32 @@ async fn health_check_keeps_to_the_llm_scope_and_pages() {
         let msg = err(&call(&c, "health_check", args).await);
         assert!(msg.starts_with(code), "{msg}");
     }
+}
+
+#[tokio::test]
+async fn health_check_uses_the_scope_narrowed_while_the_check_ran() {
+    // Область сузили, пока шла проверка: ответ — по новой области, не по прежней.
+    let fake = Fake::new();
+    *fake.scope_after_check.lock().unwrap() =
+        Some(("c2".into(), Some(BTreeSet::from(["team-b".to_string()]))));
+    let e = env(fake.clone()).await;
+    let c = client(&e.ep).await;
+    let v = ok(call(&c, "health_check", json!({"connectionId": "c2"})).await);
+    assert_eq!(v["scope"]["projects"], json!(["team-b"]));
+    let text = serde_json::to_string(&v["findings"]).unwrap();
+    assert!(!text.contains("team-a"), "{text}");
+    assert!(text.contains("team-b"), "{text}");
+}
+
+#[tokio::test]
+async fn health_check_is_not_allowed_when_llm_access_was_turned_off_while_it_ran() {
+    // Доступ LLM сняли, пока шла проверка: как для подключения без доступа.
+    let fake = Fake::new();
+    *fake.scope_after_check.lock().unwrap() = Some(("c1".into(), None));
+    let e = env(fake).await;
+    let c = client(&e.ep).await;
+    let msg = err(&call(&c, "health_check", json!({"connectionId": "c1"})).await);
+    assert!(msg.starts_with("not_allowed"), "{msg}");
 }
 
 #[tokio::test]

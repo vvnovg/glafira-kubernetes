@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::time::Duration;
 
 use glafira_mcp_core::audit::now_ms;
 use glafira_mcp_core::{AuditEvent, AuditLog, McpServerHandle, SessionSnapshot};
@@ -272,6 +273,17 @@ impl McpController {
         }
     }
 
+    /// При выходе: `shutdown`, но не дольше `grace`. Если за это время остановить не удалось (другая
+    /// операция запуска или остановки не отпускает замок), срабатывает `exit_now`: `mcp.json`
+    /// всё равно удаляется, сессии закрываются. `true` — остановлено обычным путём.
+    pub async fn shutdown_within(&self, grace: Duration) -> bool {
+        if tokio::time::timeout(grace, self.shutdown()).await.is_ok() {
+            return true;
+        }
+        self.exit_now();
+        false
+    }
+
     /// Выход мимо `RunEvent::Exit` (установщик обновления на Windows вызывает `process::exit` из
     /// синхронного хука, runtime не дождаться): свой `mcp.json` удаляется сразу, сессии
     /// закрываются; слушатель уходит вместе с процессом.
@@ -487,6 +499,25 @@ mod tests {
         c.exit_now();
         assert_eq!(files::read(dir.path()), None);
         c.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn exit_that_cannot_stop_in_time_still_removes_the_file() {
+        let (dir, c, _) = controller(true);
+        c.set_enabled(true).await.unwrap();
+        assert!(files::read(dir.path()).is_some());
+        // Идёт другая операция запуска или остановки: `shutdown` ждёт её замок и не успевает.
+        let busy = c.ops.lock().await;
+        let stopped = c.shutdown_within(Duration::from_millis(50)).await;
+        assert!(!stopped);
+        assert_eq!(
+            files::read(dir.path()),
+            None,
+            "mcp.json убран запасным путём"
+        );
+        drop(busy);
+        // Замок свободен: остановка укладывается в срок.
+        assert!(c.shutdown_within(Duration::from_secs(5)).await);
     }
 
     #[tokio::test]

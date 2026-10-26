@@ -21,7 +21,7 @@ pub enum Severity {
     Critical,
 }
 
-/// Kind of the object of a finding or note (spec §8.1).
+/// Kind of the object of a finding or note.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]

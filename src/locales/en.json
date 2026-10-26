@@ -212,7 +212,7 @@
       "manualNamespaces": "If the cluster does not let you list projects, list the ones you work with here.",
       "test": "Checks step by step: address, TLS, sign-in, platform and projects. Unsaved fields are tested too.",
       "llmAccess": "What an LLM assistant connected over MCP may read. Metadata: objects, statuses, events, quotas — no secret, env or ConfigMap values. Off: the LLM does not see this connection.",
-      "llmScope": "Projects the LLM may read; the cluster itself and nodes stay visible if you can read them. The setting stays on this computer: export does not write it."
+      "llmScope": "Projects the LLM may read; an empty list means it sees no projects. The cluster itself and nodes stay visible if you can read them. The setting stays on this computer: export does not write it."
     },
     "cluster": {
       "platform": "Detected from the API groups and the version: OpenShift, or Kubernetes with its distribution (EKS, GKE, AKS, Rancher, Deckhouse, k3s, RKE2).",

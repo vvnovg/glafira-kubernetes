@@ -89,15 +89,17 @@ pub fn check(s: &ClusterSnapshot, out: &mut Findings) {
             );
         }
         if let Some(r) = s.node_requests.as_ref().and_then(|m| m.get(&n.name)) {
+            // В `params` — целый процент; порог сравнивается точно: 90,5 % — больше 90 %.
             let percent =
                 |used: i64, total: Option<i64>| total.filter(|t| *t > 0).map(|t| used * 100 / t);
+            let over = |used: i64, total: Option<i64>| {
+                total.filter(|t| *t > 0).is_some_and(|t| {
+                    used.saturating_mul(100) > t.saturating_mul(REQUESTS_HIGH_PERCENT)
+                })
+            };
             let cpu = percent(r.cpu_milli, n.allocatable_cpu_milli);
             let memory = percent(r.memory, n.allocatable_memory);
-            if [cpu, memory]
-                .iter()
-                .flatten()
-                .any(|p| *p > REQUESTS_HIGH_PERCENT)
-            {
+            if over(r.cpu_milli, n.allocatable_cpu_milli) || over(r.memory, n.allocatable_memory) {
                 out.emit(
                     "node.requestsHigh",
                     target(),
@@ -327,6 +329,41 @@ mod tests {
         assert_eq!(v[4].params["memoryPercent"], 100);
         assert_eq!(v[2].severity, Severity::Critical);
         assert_eq!(run(&s, Environment::Stage)[2].severity, Severity::Warning);
+    }
+
+    #[test]
+    fn requests_high_compares_exactly_not_the_truncated_percent() {
+        let mut s = ClusterSnapshot::empty(NOW, PlatformKind::Kubernetes);
+        let mut tight = |name: &str, cpu: i64, memory: i64| {
+            let mut n = node(name);
+            n.allocatable_cpu_milli = Some(4000);
+            n.allocatable_memory = Some(1000);
+            s.nodes.get_or_insert_with(Vec::new).push(n);
+            s.node_requests.get_or_insert_with(BTreeMap::new).insert(
+                name.to_string(),
+                Requests {
+                    cpu_milli: cpu,
+                    memory,
+                },
+            );
+        };
+        // Ровно 90 % по обоим ресурсам — не больше 90 %.
+        tight("exact", 3600, 900);
+        // 90,025 % CPU: целая часть 90, но это больше 90 %.
+        tight("cpu-over", 3601, 100);
+        // 90,1 % памяти.
+        tight("memory-over", 100, 901);
+        let v = run(&s, Environment::Prod);
+        assert_eq!(
+            ids(&v),
+            [
+                "node.requestsHigh cpu-over",
+                "node.requestsHigh memory-over"
+            ]
+        );
+        // В `params` — целые проценты, как и прежде.
+        assert_eq!(v[0].params["cpuPercent"], 90);
+        assert_eq!(v[1].params["memoryPercent"], 90);
     }
 
     #[test]

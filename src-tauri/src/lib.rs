@@ -34,20 +34,17 @@ use crate::state::AppState;
 const MCP_EXIT_GRACE: Duration = Duration::from_secs(2);
 
 /// При выходе: MCP-сервер останавливается, свой `mcp.json` удаляется — шим не пойдёт по
-/// мёртвому адресу.
+/// мёртвому адресу. Не уложился в срок — `exit_now` убирает файл и закрывает сессии. Если
+/// `setup` не успел зарегистрировать контроллер, останавливать нечего.
 fn shutdown_mcp<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
-    let mcp = app
-        .state::<Arc<crate::mcp::McpController>>()
-        .inner()
-        .clone();
-    let stopped = tauri::async_runtime::block_on(async {
-        tokio::time::timeout(MCP_EXIT_GRACE, mcp.shutdown())
-            .await
-            .is_ok()
-    });
+    let Some(mcp) = app.try_state::<Arc<crate::mcp::McpController>>() else {
+        return;
+    };
+    let mcp = mcp.inner().clone();
+    let stopped = tauri::async_runtime::block_on(mcp.shutdown_within(MCP_EXIT_GRACE));
     if !stopped {
         tracing::warn!(
-            "mcp server did not stop within {MCP_EXIT_GRACE:?}: exiting without waiting"
+            "mcp server did not stop within {MCP_EXIT_GRACE:?}: its file was removed, exiting without waiting"
         );
     }
 }
