@@ -98,6 +98,22 @@ Glafira works with your rights only. On connection it checks what you may read a
 operators). If the cluster does not let you list projects, enter them in
 [[ui:connections.form.manualNamespaces]].
 
+## Cluster overview {#overview}
+
+Under the connection details, the connection tab shows the [[ui:cluster.overview.title]]: whether the API server is
+ready (the `/readyz` checks, which any user may read, and the checks that failed), ready nodes by role, the number of
+projects, the Ingress classes and, with Gateway API, the Gateway classes. On OpenShift it adds the version, the update
+channel and the available updates, the infrastructure, the web console, the cluster operators that are not fine
+([[ui:cluster.overview.operatorsAll]] lists every one) and the machine config pools. A part you may not read shows
+a dash (—) with the reason; the rest is shown. On OpenShift the tab also shows until when the sign-in token is valid and warns
+an hour before it expires.
+
+## Nodes {#nodes}
+
+With the right to list nodes, the connection tab and the tree have [[ui:cluster.nodes.open]]: the list of nodes with
+their readiness, problems (`MemoryPressure`, `DiskPressure`…), roles and kubelet version. Click a node to see its
+conditions, taints, capacity and allocatable resources, addresses and labels.
+
 ## Environments and read-only {#environments}
 
 [[ui:connections.form.environment]] sets the color of the connection. A new `prod` connection is

@@ -75,6 +75,21 @@ GO_IT_KUBECONFIG="$PWD/dev/kind/out/kubeconfig" cargo test --manifest-path src-t
   ответ сервера на «кто я» (401, 403…) — это TLS ✅ и ❌ на шаге «Вход»; шаг «TLS» падает, в частности, от сетевой
   ошибки, ошибки TLS или таймаута (`src-tauri/src/k8s/connectivity.rs`).
 
+## Чтение кластера
+- Всё чтение — в Rust через `ReadClient` (`src-tauri/src/k8s/read.rs`): только get, list, watch, логи и проверки
+  прав; списки — страницами по 500, не больше 10 000 объектов. Каждая команда работает с правами пользователя; часть
+  экрана без прав приходит причиной (`Part` в `src-tauri/src/k8s/view.rs`), остальное показывается.
+- Обзор кластера (`k8s/overview.rs`): `/readyz?verbose`, ноды по ролям, классы Ingress и Gateway, число проектов; у
+  OpenShift — адаптер платформы (`platform/adapters.rs`): ClusterVersion, Infrastructure, консоль, ClusterOperators,
+  MachineConfigPools и срок токена (`useroauthaccesstokens`).
+- Проекты, права в проекте (`SelfSubjectRulesReview`, кэш на 5 минут, сброс при 403), workloads, поды, события, сеть,
+  конфигурация (значения Secret не читаются интерфейсом), PVC, квоты, YAML без `managedFields` — модули `src-tauri/src/k8s/`.
+- Списки подов, workloads и событий проекта обновляются через watch (`src-tauri/src/watch/`), без прав на watch — опрос
+  раз в 10 с; логи (`src-tauri/src/logs/`) — фильтр в Rust, обрезка строк длиннее 64 КБ, переподключение в follow.
+  Сессии останавливаются `stop_session`, при отключении и удалении подключения.
+- Одновременные чтения одного подключения подключаются один раз: кто ждал очереди, пока чужая попытка не удалась,
+  получает ту же ошибку (`AppState::connected`), — exec-плагин не запускается по разу на каждую подвкладку.
+
 ## Где хранятся данные
 - Профили и папки: `connections.json` в каталоге данных (macOS: `~/Library/Application Support/io.github.vvnovg.glafira.kubernetes/`).
 - Токены и ключи клиентских сертификатов — в системном хранилище секретов, сервис `glafira-kubernetes`, ключи

@@ -161,13 +161,13 @@ crates/glafira-mcp-kubernetes — инструменты, типы ответо�
 
 | Группа | Команды |
 |---|---|
-| Подключения | `list_connections`, `save_connection`, `delete_connection`, `test_connection`, `connect`, `disconnect`, `set_connection_token`, `start_oauth_login`, `cancel_oauth_login` (и ожидание exec-плагина), `resolve_exec_command`, `preview_kubeconfig_import`, `apply_kubeconfig_import` |
+| Подключения | `list_connections`, `save_connection`, `delete_connection`, `test_connection`, `connect`, `disconnect`, `set_connection_token`, `start_oauth_login`, `cancel_oauth_login` (и ожидание exec-плагина при подключении), `cancel_connection_test` (ожидание exec-плагина при проверке в форме: у проверки свой ключ входа `test:<id>`), `resolve_exec_command`, `preview_kubeconfig_import`, `apply_kubeconfig_import` |
 | Папки и обмен | `list_folders`, `create_folder`, `rename_folder`, `delete_folder`, `move_items`, `export_connections`, `preview_import`, `apply_import` |
-| Права и платформа | `get_capabilities(connectionId)` (права, группы API, платформа и дистрибутив, §4.3), `get_namespace_access(connectionId, namespace)` |
+| Права и платформа | права, группы API, платформа и дистрибутив (§4.3) и срок токена — в ответе `connect` (`ConnectionInfo`); `get_namespace_access(connectionId, namespace)` |
 | Кластер | `get_cluster_overview`, `list_nodes`, `get_node`, `list_cluster_operators` |
-| Проекты | `list_projects`, `get_project_overview`, `get_quotas` |
-| Объекты | `list_workloads`, `get_workload`, `get_rollout_history`, `list_pods`, `get_pod`, `list_events`, `list_services`, `list_routes`, `list_ingresses`, `list_gateways`, `list_gateway_routes`, `list_config_maps`, `list_secrets` (имена, типы, ключи), `list_pvcs`, `list_hpas`, `get_yaml(ref)` |
-| Watch и логи | `start_watch(params, channel) -> SessionId`, `start_logs(params, channel) -> SessionId`, `save_logs`, `stop_session` |
+| Проекты | `list_projects`, `get_quotas`; обзор проекта собирает интерфейс из списков подов, workloads, квот и событий |
+| Объекты | `list_workloads`, `get_workload` (с HPA, PDB и историей rollout), `list_pods(…, workload?)`, `get_pod`, `list_events(…, object?)`, `get_network` (Services, Routes, Ingress, Gateway, HTTPRoute, GRPCRoute — каждый вид своей частью), `get_config` (ConfigMaps; Secrets — имена, типы, ключи), `get_config_map_values`, `list_pvcs`, `get_yaml(kind, name)` |
+| Watch и логи | `start_watch(params, channel) -> SessionId`, `start_logs(params, channel) -> SessionId`, `save_logs(params, path, timestamps)`, `stop_session` |
 | Ресурсы | `get_metrics_source_status`, `get_workload_usage(ref, window)`, `get_project_usage(namespace, window, channel) -> SessionId`, `recommend_resources(ref, window)` |
 | Изменения | `preview_change(connectionId, change) -> ChangePreview`, `apply_change(connectionId, change, expectedResourceVersion, confirm?, proposalId?)` |
 | Проверка | `run_health_check`, `get_health`, `set_finding_ignored`, `set_annotation_status`, `delete_annotation`, `delete_all_annotations`, `set_proposal_status`, `delete_proposal`, `delete_all_proposals` |
@@ -356,10 +356,9 @@ oc. В тексте отказа — только имя ключа: значе�
 `test_connection` идёт по шагам и показывает, на каком шаге ошибка, с подсказкой:
 1. DNS / TCP до API-сервера (с учётом прокси); у exec-плагина после него — запуск плагина (шаг `exec`);
 2. TLS: цепочка, имя хоста, срок сертификата («сертификат подписан неизвестным CA — укажите CA кластера»);
-3. аутентификация: `SelfSubjectReview` (`authentication.k8s.io/v1`), имя пользователя и группы (в O1a шаг «Вход»
-   показывает только имя, группы видны на вкладке подключения; группы на самом шаге — в O1b); любой ответ сервера на
-   этот запрос (401, 403…) — это TLS ✓ и ошибка на шаге «Вход», а шаг TLS падает только от сетевой ошибки, ошибки TLS
-   и таймаута;
+3. аутентификация: `SelfSubjectReview` (`authentication.k8s.io/v1`), имя пользователя и группы (первые 10, остальные
+   числом); любой ответ сервера на этот запрос (401, 403…) — это TLS ✓ и ошибка на шаге «Вход», а шаг TLS падает
+   только от сетевой ошибки, ошибки TLS и таймаута;
 4. discovery: платформа и дистрибутив (§4.3), версия (`ClusterVersion`, если читается, иначе `/version`), найдены ли
    группы OpenShift и Gateway API;
 5. проекты: число доступных;
@@ -469,15 +468,18 @@ oc. В тексте отказа — только имя ключа: значе�
 - **Фильтр** (подстрока или regex, с учётом регистра или без) выполняется в Rust до отправки в интерфейс; счётчик
   «показано / просмотрено».
 - Буфер в интерфейсе — до 100 000 строк (кольцевой в режиме follow); строка длиннее 64 КБ обрезается в превью.
-- Сохранение в файл — `save_logs` (диалог выбора файла).
-- Потеря соединения в follow: переподключение с `sinceTime` последней строки; через 60 с без восстановления — статус
-  «ошибка».
+- Сохранение в файл — `save_logs` (диалог выбора файла): Rust читает лог заново с теми же параметрами без follow и
+  пишет подошедшие под фильтр строки целиком.
+- Потеря соединения в follow: переподключение с `sinceTime` последней строки (с начала её секунды — API округляет
+  `sinceTime`), уже показанные строки отбрасываются по времени; через 60 с без восстановления — статус «ошибка».
 
 ### 6.7 Обновление данных
 
 Открытые списки подов, workloads и событий проекта обновляются через `kube::runtime::watcher` (сессия `start_watch`).
-Если прав на `watch` нет — опрос раз в 10 с. Остальные экраны — ручное обновление и автообновление (выкл. / 10 с /
-30 с). Списки читаются страницами (`limit` 500 / `continue`) и виртуализированы.
+Если прав на `watch` нет — опрос раз в 10 с. Поды CronJob (их Job меняются) читаются списком раз в 10 с. Остальные
+экраны — ручное обновление и автообновление (выкл. / 10 с / 30 с). Списки читаются страницами (`limit` 500 /
+`continue`, не больше 10 000 объектов) и виртуализированы. После входа заново открытые вкладки подключения
+перечитываются, а сессии watch и логов начинаются заново.
 
 ---
 
@@ -1008,7 +1010,7 @@ keychain: сервис glafira-kubernetes, ключи <connection-id>/<field>
 
 | Этап | Содержимое |
 |---|---|
-| **O1. Каркас и чтение** | Два плана. **O1a «Каркас и подключения»:** новый репозиторий, перенос основы (§3) и `PORTED.md`; хранилище, keychain, настройки, политика (включая `allowInsecureTls`), журнал, словари en/ru, подсказки, справка (главы «Начало работы» и «Подключения»), папки, экспорт и импорт; подключения (токен, сертификат, вход через браузер, exec-плагины из списка разрешённых и политика `allowExecAuth`, импорт kubeconfig, адрес API с путём), проверка подключения, права; слой платформы (`openshift`, `kubernetes`) и дистрибутив по discovery (§4.3; трейт `Platform` с адаптерами — в O1b вместе с обзором кластера); дерево, вкладка подключения (кто вошёл, платформа и дистрибутив, права), «О программе». **O1b «Чтение кластера»:** обзор кластера (включая `/readyz`, классы Ingress и Gateway), проекты, workloads, поды, события, сеть (Services, Routes, Ingress, Gateway, HTTPRoute, GRPCRoute), конфигурация, хранилище, квоты, YAML, логи, watch, срок токена, группы пользователя на шаге «Вход» проверки подключения (§5.3) |
+| **O1. Каркас и чтение** | Два плана. **O1a «Каркас и подключения»:** новый репозиторий, перенос основы (§3) и `PORTED.md`; хранилище, keychain, настройки, политика (включая `allowInsecureTls`), журнал, словари en/ru, подсказки, справка (главы «Начало работы» и «Подключения»), папки, экспорт и импорт; подключения (токен, сертификат, вход через браузер, exec-плагины из списка разрешённых и политика `allowExecAuth`, импорт kubeconfig, адрес API с путём), проверка подключения, права; слой платформы (`openshift`, `kubernetes`) и дистрибутив по discovery (§4.3; трейт `Platform` с адаптерами — в O1b вместе с обзором кластера); дерево, вкладка подключения (кто вошёл, платформа и дистрибутив, права), «О программе». **O1b «Чтение кластера»:** обзор кластера (включая `/readyz`, классы Ingress и Gateway), проекты, workloads, поды, события, сеть (Services, Routes, Ingress, Gateway, HTTPRoute, GRPCRoute), конфигурация, хранилище, квоты, YAML, логи, watch, срок токена, группы пользователя на шаге «Вход» проверки подключения (§5.3), трейт `Platform`, `ReadClient`; долги O1a: общий итог подключения для ожидающих очереди, свой ключ входа у проверки подключения, завершение группы процессов exec-плагина, значения секретов exec-плагина в полях формы — до «Показать» |
 | **O2. MCP-шлюз и проверка** | `glafira-mcp-core` (перенос), `glafira-mcp-kubernetes`; уровень `metadata`, `llmNamespaces`, маскировка `command`/`args`/аннотаций; проверка (`health/`, 34 правила без `resources.*`, в том числе `cluster.apiNotReady`, `ingress.*`, `gatewayRoute.*`, `gateway.*`), вкладка «Замечания», значки и блоки; 17 инструментов (все, кроме `get_resource_usage`, `recommend_resources`, предложений и логов) |
 | **O3. Ресурсы, изменения, предложения** | Источники метрик (включая автопоиск Prometheus через прокси API-сервера), PromQL-шаблоны, движок рекомендаций, вкладки «Ресурсы» workload'а и проекта, графики; правила `resources.*`; изменяющие операции §9 с dry-run и guard; `get_resource_usage`, `recommend_resources`, `propose_change`, `list_proposals`, `withdraw_proposal` с заполнением форм (22 инструмента) |
 | **O4. Логи для LLM** | Уровень `logs`, маскировка логов и значений, политика `mcpLogsEnabled`, `get_pod_logs`, `search_workload_logs` (24 инструмента) |

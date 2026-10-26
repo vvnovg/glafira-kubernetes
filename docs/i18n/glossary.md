@@ -39,3 +39,14 @@ HTTPRoute, GRPCRoute, Service, ConfigMap, Secret, PVC, HPA, ResourceQuota, Limit
 | exec plugin | exec-плагин | команда kubeconfig, которая выдаёт учётные данные |
 | launch line | строка запуска | путь, аргументы и переменные exec-плагина |
 | allow (to run a command) | разрешить (запуск) | подтверждение строки запуска |
+| cluster overview | обзор кластера | |
+| condition | условие | `status.conditions` объекта; названия условий (`Ready`, `Available`) не переводятся |
+| ready / desired / available / updated | готово / желаемо / доступно / обновлено | реплики workload'а |
+| rollout history | история выкладки | ReplicaSets или ReplicationControllers |
+| event | событие | `Normal` и `Warning` не переводятся |
+| endpoint | endpoint | готовые endpoints сервиса |
+| taint | taint | не переводится |
+| probe | проба | `Liveness-проба`, `Readiness-проба`, `Startup-проба` |
+| capacity / allocatable | ёмкость / доступно подам | ресурсы ноды |
+| logs, follow | логи, следить за новыми строками | |
+| previous run | предыдущий запуск | логи прошлого запуска контейнера (`previous`) |

@@ -8,6 +8,11 @@ export function helpChapterFor(tab: TabSpec | null): ChapterId {
     case "cluster":
     case "nodes":
       return "connections";
+    case "project":
+    case "workload":
+      return "projects-workloads";
+    case "pod":
+      return "pods-logs";
     default:
       return "getting-started";
   }
