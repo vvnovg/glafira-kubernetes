@@ -145,4 +145,10 @@ describe("ConnectionNode", () => {
     expect(badges[0]).toHaveTextContent("LLM");
     expect(badges[0].closest(".tree-conn")).toHaveTextContent("prod");
   });
+
+  it("«Замечания» открывает вкладку находок подключения", async () => {
+    const user = renderNode();
+    await user.click(screen.getByRole("button", { name: "Замечания" }));
+    expect(useWorkspace.getState().tabs[0]).toMatchObject({ kind: "findings", connectionId: "c1" });
+  });
 });

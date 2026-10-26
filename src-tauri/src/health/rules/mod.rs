@@ -247,6 +247,28 @@ mod tests {
     }
 
     #[test]
+    fn every_rule_has_interface_texts() {
+        for dict in [
+            include_str!("../../../../src/locales/en.json"),
+            include_str!("../../../../src/locales/ru.json"),
+        ] {
+            let v: serde_json::Value = serde_json::from_str(dict).unwrap();
+            for id in rule_ids() {
+                for part in ["title", "details", "fix"] {
+                    assert!(
+                        v["health"]["rules"][id][part].is_string(),
+                        "health.rules.{id}.{part}"
+                    );
+                }
+                assert!(
+                    v["health"]["ruleNames"][id].is_string(),
+                    "health.ruleNames.{id}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn findings_drop_hidden_levels_and_sort_by_severity() {
         let mut f = Findings::new(Environment::Local);
         f.emit(

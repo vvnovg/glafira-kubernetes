@@ -58,6 +58,11 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
             </button>
           </li>
         )}
+        <li>
+          <button type="button" className="link" onClick={() => open({ kind: "findings", connectionId: c.id })}>
+            {t("sidebar.findings")}
+          </button>
+        </li>
       </ul>
     </li>
   );

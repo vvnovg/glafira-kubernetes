@@ -7,6 +7,26 @@
     "project.tabs.workloads",
     "project.workloads.title",
     "project.network.service",
-    "mcp.indicator.one"
+    "mcp.indicator.one",
+    "health.kind.workload",
+    "health.kind.service",
+    "health.kind.route",
+    "health.kind.ingress",
+    "health.kind.httproute",
+    "health.kind.grpcroute",
+    "health.kind.gateway",
+    "health.kind.pvc",
+    "health.kind.hpa",
+    "health.kind.quota",
+    "health.object.workload",
+    "health.object.service",
+    "health.object.route",
+    "health.object.ingress",
+    "health.object.httproute",
+    "health.object.grpcroute",
+    "health.object.gateway",
+    "health.object.pvc",
+    "health.object.hpa",
+    "health.object.quota"
   ]
 }

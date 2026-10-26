@@ -162,3 +162,11 @@
 | `src/components/mcp/McpIndicator.test.tsx` | `src/components/mcp/McpIndicator.test.tsx` | `8bbd0bd` | как есть |
 | `src/components/settings/McpSection.tsx` | `src/components/settings/McpSection.tsx` | `8bbd0bd` | как есть |
 | `src/components/settings/McpSection.test.tsx` | `src/components/settings/McpSection.test.tsx` | `8bbd0bd` | как есть |
+| `src/lib/useHealth.ts` | `src/lib/useHealth.ts` | `8bbd0bd` | адаптирован: без предложений LLM (этап O3) |
+| `src/components/health/findings.ts` | `src/components/health/findings.ts` | `8bbd0bd` | адаптирован: объекты Kubernetes, параметры и варианты текстов правил, без предложений LLM |
+| `src/components/health/findings.test.ts` | `src/components/health/findings.test.ts` | `8bbd0bd` | адаптирован: правила Kubernetes |
+| `src/components/health/parts.tsx` | `src/components/health/parts.tsx` | `8bbd0bd` | адаптирован: ссылки на вкладки объектов Kubernetes |
+| `src/components/health/CheckBar.tsx` | `src/components/health/CheckBar.tsx` | `8bbd0bd` | адаптирован: охват проверки — проекты, поды, ноды |
+| `src/components/health/CheckBar.test.tsx` | `src/components/health/CheckBar.test.tsx` | `8bbd0bd` | адаптирован: охват проверки |
+| `src/components/health/FindingsPanel.tsx` | `src/components/health/FindingsPanel.tsx` | `8bbd0bd` | адаптирован: виды объектов Kubernetes, поиск и по проекту, без предложений LLM |
+| `src/components/health/FindingsPanel.test.tsx` | `src/components/health/FindingsPanel.test.tsx` | `8bbd0bd` | адаптирован: правила Kubernetes, без предложений LLM |

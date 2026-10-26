@@ -1,5 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
+  AnnotationStatus,
   AppError,
   AppInfo,
   ClusterOverview,
@@ -11,6 +12,7 @@ import type {
   EventObject,
   EventRow,
   ExportSummary,
+  HealthView,
   ImportPreview,
   KubeconfigPreview,
   LanguageSettings,
@@ -160,4 +162,15 @@ export const api = {
   getMcpAudit: (limit: number) => call<McpAuditEntry[]>("get_mcp_audit", { limit }),
   getMcpClientConfigs: () => call<McpClientConfigs>("get_mcp_client_configs"),
   revealMcpAudit: () => call<void>("reveal_mcp_audit"),
+
+  /** «Проверить кластер»: все доступные проекты (не больше 50) и уровень кластера. */
+  runHealthCheck: (connectionId: string) => call<HealthView>("run_health_check", { connectionId }),
+  getHealth: (connectionId: string) => call<HealthView>("get_health", { connectionId }),
+  setFindingIgnored: (connectionId: string, key: string, ignored: boolean) =>
+    call<HealthView>("set_finding_ignored", { connectionId, key, ignored }),
+  setAnnotationStatus: (connectionId: string, annotationId: string, status: AnnotationStatus) =>
+    call<HealthView>("set_annotation_status", { connectionId, annotationId, status }),
+  deleteAnnotation: (connectionId: string, annotationId: string) =>
+    call<HealthView>("delete_annotation", { connectionId, annotationId }),
+  deleteAllAnnotations: (connectionId: string) => call<HealthView>("delete_all_annotations", { connectionId }),
 };

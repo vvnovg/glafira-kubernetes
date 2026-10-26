@@ -10,6 +10,7 @@ import { i18n } from "../i18n";
 import { TabContent } from "./TabContent";
 import { TabActiveContext } from "../lib/tabActive";
 import { useHelpShortcut } from "../lib/useHelpShortcut";
+import { useHealthEvents } from "../lib/useHealth";
 import { useMcpEvents } from "../lib/useMcpStatus";
 import { ApprovalDialog } from "./mcp/ApprovalDialog";
 
@@ -29,6 +30,8 @@ function tabTitle(tab: Tab, byId: Map<string, ConnectionProfile>): string {
       return i18n.t("tabs.cluster", { conn });
     case "nodes":
       return i18n.t("tabs.nodes", { conn });
+    case "findings":
+      return i18n.t("tabs.findings", { conn });
     case "project":
       return `${tab.namespace} · ${conn}`;
     // Имена объектов не переводятся; подключение видно по бейджу окружения.
@@ -43,6 +46,7 @@ export function Layout() {
   const { tabs, activeId, activate, close } = useWorkspace();
   useHelpShortcut();
   useMcpEvents();
+  useHealthEvents();
   const { data: connections = [] } = useQuery({ queryKey: ["connections"], queryFn: api.listConnections });
   const byId = new Map(connections.map((c) => [c.id, c]));
   const active = tabs.find((x) => x.id === activeId);

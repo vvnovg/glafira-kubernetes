@@ -231,6 +231,10 @@
     },
     "settings": {
       "mcpEnable": "Запускает локальный MCP-сервер для LLM-ассистентов. Доступ открывается для каждого подключения отдельно и по умолчанию выключен; новый клиент подтверждается в диалоге."
+    },
+    "health": {
+      "check": "Запускает встроенные правила Glafira по кластеру, его нодам и не более чем 50 проектам. Строгость зависит от окружения подключения. Проверка только читает кластер.",
+      "hidden": "Находки, которые вы скрыли для конкретного объекта. Они не считаются в значках; LLM-ассистенты видят их с пометкой «скрыто»."
     }
   },
   "connections": {
@@ -441,7 +445,8 @@
     "projectsFromProfile": "Кластер не даёт список проектов — показаны проекты из профиля",
     "noProjects": "Проектов нет",
     "noProjectsFromProfile": "Кластер не даёт список проектов, а в профиле их нет",
-    "llmAccess": "Открыто LLM-ассистентам по MCP"
+    "llmAccess": "Открыто LLM-ассистентам по MCP",
+    "findings": "Замечания"
   },
   "settings": {
     "title": "Настройки",
@@ -562,7 +567,8 @@
     "connection": "Подключение: {{name}}",
     "newConnection": "Новое подключение",
     "cluster": "{{conn}} · Обзор",
-    "nodes": "{{conn}} · Ноды"
+    "nodes": "{{conn}} · Ноды",
+    "findings": "{{conn}} · Замечания"
   },
   "layout": {
     "closeTab": "Закрыть вкладку",
@@ -828,6 +834,311 @@
       "one": "LLM: {{client}}",
       "many": "LLM-клиентов: {{n}}",
       "title": "Сессии MCP: открыть «Настройки»"
+    }
+  },
+  "health": {
+    "title": "Замечания",
+    "check": "Проверить кластер",
+    "checking": "Проверка…",
+    "never": "Кластер ещё не проверялся.",
+    "last": "Последняя проверка: {{when}} · {{who}}",
+    "byUi": "в Glafira",
+    "scope": "Проектов: {{checked}} из {{total}}; подов: {{pods}}; нод: {{nodes}}",
+    "nodesUnknown": "не прочитаны",
+    "scopeRequested": "Проекты по запросу LLM: {{projects}}",
+    "partial": "проверено частично",
+    "checkedAs": "проверено как {{env}}",
+    "filterSeverity": "Строгость",
+    "allSeverities": "Любая строгость",
+    "filterSource": "Источник",
+    "allSources": "Все источники",
+    "sourceRules": "Правила",
+    "sourceLlm": "Замечания LLM",
+    "filterKind": "Объект",
+    "allKinds": "Все объекты",
+    "search": "Поиск по имени или проекту",
+    "showHidden": "Показать скрытые ({{count}})",
+    "hide": "Скрыть для этого объекта",
+    "restore": "Вернуть",
+    "groupSize": "объектов: {{count}}",
+    "noFindings": "Находок нет: правила не нашли проблем.",
+    "nothingMatches": "Под фильтры ничего не подходит.",
+    "allHidden": "Все находки скрыты. Их видно с флажком «Показать скрытые».",
+    "fix": "Что делать:",
+    "notes": "Замечания LLM",
+    "noteBy": "Замечание LLM · {{client}}",
+    "resolve": "Решено",
+    "dismiss": "Не актуально",
+    "reopen": "Открыть снова",
+    "deleteAll": "Удалить все замечания LLM",
+    "deleteAllConfirm": "Удалить все замечания LLM у этого подключения?",
+    "closedNotes": "Закрытые ({{count}})",
+    "noNotes": "Замечаний LLM нет.",
+    "llmNotes": "LLM-ассистенты, подключённые по MCP, могут оставлять здесь замечания о кластере, проектах и их объектах.",
+    "status": {
+      "resolved": "решено",
+      "dismissed": "не актуально"
+    },
+    "allFindings": "Все замечания",
+    "badgeTitle": "Требуют внимания: {{count}}",
+    "severity": {
+      "critical": "Критично",
+      "warning": "Предупреждение",
+      "info": "Информация"
+    },
+    "podsIn": " в {{count}} из {{total}} подов ({{pods}})",
+    "partialParts": {
+      "projects": "проверено только {{checked}} из {{total}} проектов (предел 50)",
+      "pods": "проверены только первые 5000 подов",
+      "timedOut": "проверка остановилась по пределу 45 с",
+      "gaps": "не прочитано: {{gaps}}"
+    },
+    "kind": {
+      "cluster": "Кластер",
+      "node": "Нода",
+      "project": "Проект",
+      "workload": "Workload",
+      "pod": "Под",
+      "service": "Service",
+      "route": "Route",
+      "ingress": "Ingress",
+      "httproute": "HTTPRoute",
+      "grpcroute": "GRPCRoute",
+      "gateway": "Gateway",
+      "pvc": "PVC",
+      "hpa": "HPA",
+      "quota": "ResourceQuota"
+    },
+    "object": {
+      "cluster": "кластер",
+      "node": "нода {{name}}",
+      "project": "проект {{project}}",
+      "workload": "{{workloadKind}} {{project}}/{{name}}",
+      "pod": "под {{project}}/{{name}}",
+      "service": "Service {{project}}/{{name}}",
+      "route": "Route {{project}}/{{name}}",
+      "ingress": "Ingress {{project}}/{{name}}",
+      "httproute": "HTTPRoute {{project}}/{{name}}",
+      "grpcroute": "GRPCRoute {{project}}/{{name}}",
+      "gateway": "Gateway {{project}}/{{name}}",
+      "pvc": "PVC {{project}}/{{name}}",
+      "hpa": "HPA {{project}}/{{name}}",
+      "quota": "ResourceQuota {{project}}/{{name}}"
+    },
+    "ruleNames": {
+      "cluster.apiNotReady": "API-сервер не готов",
+      "cluster.operatorDegraded": "Деградировавшие ClusterOperators",
+      "cluster.updateFailing": "Обновление кластера не проходит",
+      "cluster.mcpDegraded": "Деградировавшие MachineConfigPools",
+      "node.notReady": "Ноды не готовы",
+      "node.pressure": "Ноды под нагрузкой",
+      "node.requestsHigh": "Ноды почти заняты запросами",
+      "node.unschedulable": "Ноды закрыты для новых подов",
+      "pod.crashLoop": "Перезапуски по кругу",
+      "pod.imagePull": "Образы не скачиваются",
+      "pod.pending": "Поды в Pending",
+      "pod.oomKilled": "Контейнеры убиты за нехватку памяти",
+      "pod.restartsFrequent": "Частые перезапуски",
+      "workload.unavailable": "Недоступные workloads",
+      "workload.rolloutStuck": "Застрявшие выкладки",
+      "workload.singleReplica": "Одна реплика",
+      "container.noRequests": "Без requests",
+      "container.noMemoryLimit": "Без лимита памяти",
+      "container.noReadinessProbe": "Без Readiness-пробы",
+      "container.latestTag": "Тег latest",
+      "quota.nearLimit": "Квоты почти исчерпаны",
+      "pvc.pending": "PVC не привязаны",
+      "hpa.atMax": "HPA на максимуме",
+      "hpa.unableToScale": "HPA не масштабируют",
+      "service.noEndpoints": "Service без endpoints",
+      "route.notAdmitted": "Route не приняты",
+      "route.certExpiring": "Истекают сертификаты Route",
+      "ingress.classMissing": "Нет класса Ingress",
+      "ingress.backendMissing": "Нет backend у Ingress",
+      "ingress.tlsSecretMissing": "Нет Secret для TLS у Ingress",
+      "gatewayRoute.notAccepted": "Маршруты не приняты Gateway",
+      "gatewayRoute.refsUnresolved": "Ссылки маршрутов не разрешены",
+      "gateway.notProgrammed": "Gateway не настроены",
+      "check.partial": "Неполная проверка"
+    },
+    "rules": {
+      "cluster.apiNotReady": {
+        "title": "API-сервер не готов",
+        "details": "/readyz сообщает о непройденных проверках: {{failed}}. Пока они не пройдут, запросы к кластеру могут не проходить или идти медленно.",
+        "fix": "Проверьте control plane: etcd, логи API-сервера и ноды control plane."
+      },
+      "cluster.operatorDegraded": {
+        "title": "ClusterOperators деградировали или недоступны",
+        "details": "ClusterOperators с Degraded=True или Available=False: {{names}} (всего {{count}}).",
+        "fix": "Откройте операторы на обзоре кластера: причина обычно в подах и событиях проекта оператора."
+      },
+      "cluster.updateFailing": {
+        "title": "Обновление кластера не проходит",
+        "details": "ClusterVersion сообщает Failing=True{{because}}: кластер не может завершить обновление.",
+        "fix": "Проверьте условия ClusterVersion и операторы, которые блокируют обновление."
+      },
+      "cluster.mcpDegraded": {
+        "title": "MachineConfigPools деградировали",
+        "details": "MachineConfigPools с Degraded=True: {{pools}} (всего {{count}}). Ноды этих пулов не получают обновления конфигурации.",
+        "fix": "Проверьте условия пула и логи machine-config-daemon на его нодах."
+      },
+      "node.notReady": {
+        "title": "Нода {{name}} не готова",
+        "details": "Условие Ready — {{status}}{{because}}: поды с ноды могут быть вытеснены, новые на неё не назначаются.",
+        "fix": "Проверьте kubelet и среду выполнения контейнеров на ноде, её сеть и диск."
+      },
+      "node.pressure": {
+        "title": "Нода {{name}} под нагрузкой",
+        "details": "Условия со значением True: {{conditions}}. Пока нагрузка не спадёт, kubelet вытесняет поды и не принимает новые.",
+        "fix": "Освободите на ноде память, диск или идентификаторы процессов либо перенесите часть нагрузки на другие ноды."
+      },
+      "node.requestsHigh": {
+        "title": "Нода {{name}} почти полностью занята запросами",
+        "details": "Поды на ноде запрашивают {{cpuPercent}}% доступного CPU и {{memoryPercent}}% памяти: новые поды могут не поместиться.",
+        "fix": "Добавьте ноды или уменьшите requests подов, которые запрашивают больше, чем используют."
+      },
+      "node.unschedulable": {
+        "title": "Нода {{name}} закрыта для новых подов",
+        "details": "Задан spec.unschedulable: новые поды на ноду не назначаются.",
+        "fix": "Если обслуживание закончено, верните ноду (kubectl uncordon)."
+      },
+      "pod.crashLoop": {
+        "title": "{{object}}: контейнеры перезапускаются по кругу",
+        "details": "Контейнеры {{containers}} падают и перезапускаются{{affected}}: последнее завершение {{reason}}, код {{exitCode}}, перезапусков до {{restarts}}.",
+        "fix": "Посмотрите логи прошлого запуска контейнера и события пода: причина обычно в приложении или его конфигурации."
+      },
+      "pod.imagePull": {
+        "title": "{{object}}: образ не скачивается",
+        "details": "Образ {{image}} не скачивается{{affected}}{{because}}.",
+        "fix": "Проверьте имя и тег образа, доступность registry с нод и pull secret."
+      },
+      "pod.pending": {
+        "title": "{{object}}: слишком долго в Pending",
+        "details": "В состоянии Pending больше 5 минут (до {{minutes}} мин){{affected}}{{because}}.",
+        "fix": "Посмотрите события пода: обычно планировщик не находит ноду с нужными ресурсами, селекторами и tolerations или не готов том."
+      },
+      "pod.oomKilled": {
+        "title": "{{object}}: контейнеры убиты за нехватку памяти",
+        "details": "Контейнеры {{containers}} за последние 24 часа убиты за превышение лимита памяти (OOMKilled){{affected}}.",
+        "fix": "Поднимите лимит памяти или выясните, почему приложению нужно больше памяти."
+      },
+      "pod.restartsFrequent": {
+        "title": "{{object}}: частые перезапуски",
+        "details": "Контейнеры перезапускались не меньше 5 раз (до {{restarts}}){{affected}}, последний раз — {{lastRestartMinutes}} мин назад.",
+        "fix": "Посмотрите логи прошлого запуска и события пода; проверьте Liveness-пробу и лимит памяти."
+      },
+      "workload.unavailable": {
+        "title": "{{object}} недоступен",
+        "details": "Доступно только {{available}} из {{desired}} реплик — дольше 5 минут (около {{minutes}} мин).",
+        "fix": "Откройте поды и события workload'а и выясните, почему поды не готовы."
+      },
+      "workload.rolloutStuck": {
+        "title": "{{object}}: выкладка застряла",
+        "details": "Progressing=False, ProgressDeadlineExceeded{{because}}: новые поды не стали доступны вовремя.",
+        "fix": "Проверьте поды нового ReplicaSet; откатите выкладку, если новая версия не запускается."
+      },
+      "workload.singleReplica": {
+        "title": "{{object}}: одна реплика",
+        "details": "Одна реплика и нет HPA: перезапуск, освобождение ноды или обновление делают его недоступным.",
+        "detailsHpa": "Одна реплика и HPA {{hpa}} с minReplicas = 1: перезапуск, освобождение ноды или обновление делают его недоступным.",
+        "fix": "Запустите хотя бы две реплики (или minReplicas ≥ 2) и добавьте PodDisruptionBudget."
+      },
+      "container.noRequests": {
+        "title": "{{object}}: контейнеры без requests",
+        "details": "Работающие контейнеры без request CPU: {{cpu}}; без request памяти: {{memory}} (с учётом значений по умолчанию из LimitRange).",
+        "fix": "Задайте requests около реального потребления: по ним планировщик размещает поды, а поды без requests вытесняются первыми."
+      },
+      "container.noMemoryLimit": {
+        "title": "{{object}}: контейнеры без лимита памяти",
+        "details": "Работающие контейнеры без лимита памяти: {{containers}}.",
+        "fix": "Задайте лимит памяти: один контейнер с утечкой может оставить без памяти всю ноду."
+      },
+      "container.noReadinessProbe": {
+        "title": "{{object}}: контейнеры без Readiness-пробы",
+        "details": "Контейнеры без Readiness-пробы: {{containers}}.",
+        "fix": "Добавьте Readiness-пробу: без неё трафик приходит в поды до их готовности, в том числе при выкладке."
+      },
+      "container.latestTag": {
+        "title": "{{object}}: образы с тегом latest",
+        "details": "Работающие контейнеры используют образы с тегом latest или без тега: {{images}}.",
+        "fix": "Укажите тег версии или digest: иначе после перезапусков поды могут работать на разных версиях."
+      },
+      "quota.nearLimit": {
+        "title": "{{object}} почти исчерпана",
+        "details": "Ресурсы, использованные на 90% и больше: {{resources}}.",
+        "fix": "Увеличьте квоту или освободите ресурсы: при превышении новые поды и объекты отклоняются."
+      },
+      "pvc.pending": {
+        "title": "{{object}}: {{phase}}",
+        "details": "Заявка в Pending дольше 5 минут (около {{minutes}} мин), а её ждут поды {{pods}} (класс хранилища {{class}}).",
+        "detailsLost": "Связанный том потерян: поды, которые его используют, не запустятся.",
+        "fix": "Проверьте класс хранилища, его provisioner и события заявки."
+      },
+      "hpa.atMax": {
+        "title": "{{object}} на максимуме",
+        "details": "ScalingLimited=True, TooManyReplicas: {{target}} нужно больше maxReplicas = {{maxReplicas}}.",
+        "fix": "Увеличьте maxReplicas или снизьте нагрузку на реплику."
+      },
+      "hpa.unableToScale": {
+        "title": "{{object}} не может масштабировать",
+        "details": "{{condition}}=False{{because}}: HPA не меняет число реплик {{target}}.",
+        "fix": "Проверьте, что метрики доступны (metrics-server или адаптер) и что у подов цели заданы requests масштабируемого ресурса."
+      },
+      "service.noEndpoints": {
+        "title": "{{object}}: нет готовых endpoints",
+        "details": "Service не выбирает ни одного готового пода: запросы к нему не проходят.",
+        "detailsUsedBy": "Service не выбирает ни одного готового пода: запросы к нему не проходят. Его используют {{referencedBy}}.",
+        "fix": "Сверьте селектор Service с метками подов и выясните, почему поды не готовы."
+      },
+      "route.notAdmitted": {
+        "title": "{{object}} не принят роутером",
+        "details": "Admitted=False{{because}}: Route не обслуживает трафик.",
+        "detailsNoStatus": "Ни один роутер не принял Route (статуса нет): он не обслуживает трафик.",
+        "fix": "Проверьте, не занят ли host другим Route, и селекторы шардов роутера."
+      },
+      "route.certExpiring": {
+        "title": "{{object}}: истекает сертификат",
+        "details": "Сертификат в spec.tls истекает через {{days}} дн.",
+        "detailsExpired": "Сертификат в spec.tls истёк {{daysAgo}} дн. назад: клиенты отклоняют соединение.",
+        "fix": "Обновите сертификат в Route."
+      },
+      "ingress.classMissing": {
+        "title": "{{object}}: нет класса Ingress",
+        "details": "IngressClass {{class}} не существует: этот Ingress не обслуживает ни один контроллер.",
+        "detailsNoClass": "У Ingress не указан класс, а класса по умолчанию нет: его может не обслуживать ни один контроллер.",
+        "fix": "Укажите в spec.ingressClassName существующий класс или отметьте класс по умолчанию."
+      },
+      "ingress.backendMissing": {
+        "title": "{{object}}: нет backend",
+        "details": "Service, которых нет в проекте: {{services}}; несуществующие порты у Service: {{ports}}. Запросы по этим путям не проходят.",
+        "fix": "Исправьте имена и порты backend в правилах Ingress или создайте недостающие Service."
+      },
+      "ingress.tlsSecretMissing": {
+        "title": "{{object}}: нет Secret для TLS",
+        "details": "Secret из spec.tls не найдены дольше 5 минут: {{secrets}}. Контроллер отдаёт вместо них свой сертификат по умолчанию.",
+        "fix": "Создайте Secret или исправьте их имена в spec.tls; проверьте, не может ли их выпустить cert-manager."
+      },
+      "gatewayRoute.notAccepted": {
+        "title": "{{object}} не принят",
+        "details": "Gateway {{parents}} не приняли маршрут{{because}}: его правила там не действуют.",
+        "fix": "Проверьте parentRefs, allowedRoutes у listeners и hostnames."
+      },
+      "gatewayRoute.refsUnresolved": {
+        "title": "{{object}}: ссылки не разрешены",
+        "details": "ResolvedRefs=False{{because}} у {{parents}}: часть backend отсутствует или не разрешена.",
+        "fix": "Проверьте backendRefs, а для других проектов — ReferenceGrant."
+      },
+      "gateway.notProgrammed": {
+        "title": "{{object}} не настроен",
+        "details": "{{condition}}=False дольше 5 минут{{because}}: Gateway не обслуживает трафик.",
+        "fix": "Проверьте GatewayClass и реализующий его контроллер."
+      },
+      "check.partial": {
+        "title": "Проверка неполная",
+        "details": "Часть объектов не проверена: {{parts}}. Находок по ним может не хватать.",
+        "detailsUnknown": "Часть объектов не проверена: находок по ним может не хватать.",
+        "fix": "Проверьте под пользователем с большими правами или проверяйте меньше проектов; права — на обзоре кластера."
+      }
     }
   }
 }

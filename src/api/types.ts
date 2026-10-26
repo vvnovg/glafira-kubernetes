@@ -900,3 +900,88 @@ export type LogEvent =
   | { type: "reconnecting"; since: string | null }
   | { type: "end"; scanned: number; shown: number }
   | { type: "error"; error: AppError };
+
+// --- Проверка кластера и замечания (этап O2). Время — миллисекунды Unix.
+
+export type Severity = "info" | "warning" | "critical";
+export type TargetKind =
+  | "cluster"
+  | "node"
+  | "project"
+  | "workload"
+  | "pod"
+  | "service"
+  | "route"
+  | "ingress"
+  | "httproute"
+  | "grpcroute"
+  | "gateway"
+  | "pvc"
+  | "hpa"
+  | "quota";
+
+/** Объект находки или замечания: у кластера нет ни проекта, ни имени, у ноды — только имя. */
+export interface HealthTarget {
+  kind: TargetKind;
+  namespace?: string;
+  name?: string;
+  /** Только у `workload`. */
+  workloadKind?: WorkloadKind;
+}
+
+/** Находка правила; тексты — `health.rules.<ruleId>.*` с `params`. */
+export interface Finding {
+  key: string;
+  ruleId: string;
+  severity: Severity;
+  target: HealthTarget;
+  params: Record<string, unknown>;
+}
+
+export type CheckTrigger = { kind: "ui" } | { kind: "mcp"; client?: string };
+
+/** Что проверено: проекты (не больше 50), поды (не больше 5000), ноды (`null` — не прочитаны). */
+export interface CheckScope {
+  projects: string[];
+  projectsTotal: number;
+  pods: number;
+  nodes: number | null;
+  /** Проекты, которые попросил LLM; нет поля — все доступные. */
+  requested?: string[];
+}
+
+export interface CheckRun {
+  runId: string;
+  startedAtMs: number;
+  durationMs: number;
+  trigger: CheckTrigger;
+  environment: Environment;
+  incomplete: boolean;
+  scope: CheckScope;
+  findings: Finding[];
+}
+
+export type AnnotationStatus = "open" | "resolved" | "dismissed";
+
+/** Замечание LLM: текст — как его написал ассистент. */
+export interface Annotation {
+  id: string;
+  target: HealthTarget;
+  severity: Severity;
+  title: string;
+  body: string;
+  relatedRuleId?: string;
+  client: string | null;
+  sessionId?: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+  status: AnnotationStatus;
+  closedAtMs?: number;
+}
+
+/** Последняя проверка, ключи скрытых находок и замечания LLM подключения. */
+export interface HealthView {
+  lastCheck: CheckRun | null;
+  ignored: string[];
+  annotations: Annotation[];
+}
