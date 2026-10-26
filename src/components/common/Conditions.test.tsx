@@ -33,7 +33,17 @@ describe("Conditions", () => {
   });
 
   it("проблема — True у *Pressure, NetworkUnavailable, ReplicaFailure и Failed", () => {
-    const types = ["MemoryPressure", "DiskPressure", "PIDPressure", "NetworkUnavailable", "ReplicaFailure", "Failed"];
+    const types = [
+      "MemoryPressure",
+      "DiskPressure",
+      "PIDPressure",
+      "NetworkUnavailable",
+      "ReplicaFailure",
+      "Failed",
+      "FailureTarget",
+      "DisruptionTarget",
+      "ScalingLimited",
+    ];
     render(<Conditions conditions={types.map((t) => cond(t, "True"))} />);
     for (const type of types) expect(statusCell(type)).toHaveClass("problem");
   });
@@ -44,6 +54,23 @@ describe("Conditions", () => {
       expect(statusCell(type)).not.toHaveClass("problem");
       expect(statusCell(type)).not.toHaveClass("warn");
     }
+  });
+
+  it("Ready и ContainersReady False с причиной PodCompleted — завершённый под здоров, без выделения", () => {
+    render(
+      <Conditions
+        conditions={[
+          { type: "Ready", status: "False", reason: "PodCompleted" },
+          { type: "ContainersReady", status: "False", reason: "PodCompleted" },
+          { type: "Initialized", status: "False", reason: "ContainersNotInitialized" },
+          // Причина должна совпасть точно; она же не отменяет выделение у настоящего сбоя.
+          { type: "PodReadyToStartContainers", status: "False", reason: "PodCompletedLater" },
+        ]}
+      />,
+    );
+    const cells = screen.getAllByRole("row").slice(1).map((r) => r.querySelectorAll("td")[1]);
+    expect(cells.map((c) => c.classList.contains("problem"))).toEqual([false, false, true, true]);
+    expect(cells.map((c) => c.classList.contains("warn"))).toEqual([false, false, false, false]);
   });
 
   it("Unknown — предупреждение для любого типа", () => {

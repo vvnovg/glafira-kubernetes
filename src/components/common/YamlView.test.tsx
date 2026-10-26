@@ -26,10 +26,14 @@ describe("YamlView и мелкие части экранов", () => {
     const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
     renderWithClient(<YamlView connectionId="c1" namespace="team-a" kind="Deployment" name="web" />);
     expect(await screen.findByText(/kind: Deployment/)).toBeInTheDocument();
+    // Область уведомления смонтирована до копирования, текст появляется в ней же.
+    const status = screen.getByRole("status");
+    expect(status).toBeEmptyDOMElement();
     expect(api.getYaml).toHaveBeenCalledWith("c1", "team-a", "Deployment", "web");
     await user.click(screen.getByRole("button", { name: "Копировать" }));
     expect(writeText).toHaveBeenCalledWith("kind: Deployment\nmetadata:\n  name: web\n");
-    await waitFor(() => expect(screen.getByText("Скопировано")).toBeInTheDocument());
+    await waitFor(() => expect(status).toHaveTextContent("Скопировано"));
+    expect(screen.getByRole("status")).toBe(status);
   });
 
   it("«Скопировано» исчезает через 2 с", async () => {
@@ -70,20 +74,23 @@ describe("YamlView и мелкие части экранов", () => {
     const writeText = vi.spyOn(navigator.clipboard, "writeText").mockRejectedValue(new Error("denied"));
     renderWithClient(<YamlView connectionId="c1" namespace="team-a" kind="Pod" name="web" />);
     await screen.findByText(/kind: Pod/);
+    const status = screen.getByRole("status");
+    expect(status).toBeEmptyDOMElement();
     await user.click(screen.getByRole("button", { name: "Копировать" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось скопировать в буфер обмена");
+    await waitFor(() => expect(status).toHaveTextContent("Не удалось скопировать в буфер обмена"));
+    expect(status).toHaveClass("warn");
     expect(screen.queryByText("Скопировано")).not.toBeInTheDocument();
     // Вторая попытка удалась: отказ заменяется итогом.
     writeText.mockResolvedValue();
     await user.click(screen.getByRole("button", { name: "Копировать" }));
-    expect(await screen.findByText("Скопировано")).toBeInTheDocument();
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    await waitFor(() => expect(status).toHaveTextContent("Скопировано"));
+    expect(status).not.toHaveClass("warn");
     // Буфера нет вовсе (`writeText` бросает сразу, не промисом).
     writeText.mockImplementation(() => {
       throw new TypeError("clipboard unavailable");
     });
     await user.click(screen.getByRole("button", { name: "Копировать" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось скопировать в буфер обмена");
+    await waitFor(() => expect(status).toHaveTextContent("Не удалось скопировать в буфер обмена"));
   });
 
   it("условия, метки и подвкладки", async () => {

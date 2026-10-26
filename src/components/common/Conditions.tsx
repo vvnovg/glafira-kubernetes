@@ -2,12 +2,19 @@ import { useTranslation } from "react-i18next";
 import type { ConditionView } from "../../api/types";
 import { formatAge } from "../../lib/age";
 
-/** Условия, у которых проблема — `True`: давление на ноде, нет сети ноды, сбой реплик, неудавшееся задание. У остальных проблема — `False`. */
-const TRUE_IS_PROBLEM = /Pressure$|^(NetworkUnavailable|ReplicaFailure|Failed)$/;
+/**
+ * Условия, у которых проблема — `True`: давление на ноде, нет сети ноды, сбой реплик, неудавшееся задание и его
+ * цель, отключение пода, упор HPA в предел. У остальных проблема — `False`.
+ */
+const TRUE_IS_PROBLEM = /Pressure$|^(NetworkUnavailable|ReplicaFailure|Failed|FailureTarget|DisruptionTarget|ScalingLimited)$/;
+
+/** Завершённый под (Job, init-контейнеры) не готов, но здоровый: kubelet ставит `Ready` и `ContainersReady` в `False` с этой причиной. */
+const COMPLETED = "PodCompleted";
 
 /** Класс статуса: проблемное состояние — `problem`, неизвестное — `warn`, нормальное — без класса. */
 function statusClass(c: ConditionView): string | undefined {
   if (c.status !== "True" && c.status !== "False") return "warn";
+  if (c.status === "False" && c.reason === COMPLETED) return undefined;
   const bad = TRUE_IS_PROBLEM.test(c.type) ? "True" : "False";
   return c.status === bad ? "problem" : undefined;
 }

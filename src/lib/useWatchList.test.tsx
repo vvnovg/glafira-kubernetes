@@ -1,4 +1,5 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
+import { StrictMode, useLayoutEffect } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../api/client", async (importOriginal) => {
@@ -210,7 +211,46 @@ describe("useWatchList", () => {
     });
   });
 
+  it("StrictMode: события первого, отключённого запуска эффекта с тем же ключом игнорируются", async () => {
+    // В разработке React запускает эффект, отключает и запускает снова: у обоих запусков один ключ сессии.
+    const { result } = renderHook(() => useWatchList(PARAMS, podKey), { wrapper: StrictMode });
+    await waitFor(() => expect(emits).toHaveLength(2));
+    act(() => emits[1]({ type: "reset", items: [pod("live")], errors: [], truncated: false }));
+    const before = result.current;
+    act(() => emits[0]({ type: "reset", items: [pod("stale")], errors: [], truncated: true }));
+    act(() => emits[0]({ type: "changes", changes: [{ op: "upsert", row: pod("stale-2") }] }));
+    expect(result.current).toBe(before);
+    expect(result.current.rows.map((r) => r.name)).toEqual(["live"]);
+    await waitFor(() => expect(api.stopSession).toHaveBeenCalledWith("s1"));
+  });
+
   describe("смена параметров", () => {
+    it("событие прежней сессии между коммитом нового ключа и отключением её эффекта строки не оставляет", async () => {
+      // Слой-эффект выполняется сразу после коммита, а эффект прежней сессии отключается позже (пассивные эффекты),
+      // так что её обработчик ещё жив: из него приходит сообщение прежнего проекта.
+      const { result, rerender } = renderHook(
+        ({ params }: { params: WatchParams }) => {
+          const state = useWatchList(params, podKey);
+          useLayoutEffect(() => {
+            if (params.namespace === "team-b") emits[0]({ type: "reset", items: [pod("OLD")], errors: [], truncated: true });
+          }, [params.namespace]);
+          return state;
+        },
+        { initialProps: { params: PARAMS } },
+      );
+      await waitFor(() => expect(emits).toHaveLength(1));
+      act(() => emits[0]({ type: "reset", items: [pod("a")], errors: [], truncated: false }));
+      expect(result.current.status).toBe("live");
+      // Новая сессия так и не отвечает: прежние строки ничто другое не сотрёт.
+      vi.mocked(api.startWatch).mockImplementationOnce(() => new Promise(() => undefined));
+      rerender({ params: { ...PARAMS, namespace: "team-b" } });
+      await waitFor(() => expect(api.startWatch).toHaveBeenCalledTimes(2));
+      expect(result.current.rows).toEqual([]);
+      expect(result.current.status).toBe("connecting");
+      expect(result.current.truncated).toBe(false);
+      expect(api.stopSession).toHaveBeenCalledWith("s1");
+    });
+
     it("другой проект: ни один кадр не показывает строки прежнего", async () => {
       const seen: string[][] = [];
       const { rerender } = renderHook(

@@ -32,14 +32,11 @@ export function useWatchList<T extends WatchRow>(params: WatchParams | null, key
   const epoch = useEpoch(params?.connectionId ?? "");
   const paramsKey = params ? JSON.stringify(params) : null;
   const sessionKey = paramsKey === null ? null : `${epoch}:${paramsKey}`;
-  const [state, setState] = useState<WatchState<T>>(INITIAL);
-  // Другой проект или вид, вход заново, `params` null: строки прежней сессии не показываются ни в одном кадре,
-  // состояние сбрасывается прямо при рендере, а не в эффекте.
-  const [stateKey, setStateKey] = useState(sessionKey);
-  if (stateKey !== sessionKey) {
-    setStateKey(sessionKey);
-    setState(INITIAL);
-  }
+  // Состояние помечено ключом сессии, которой оно принадлежит. Другой проект или вид, вход заново, `params` null:
+  // оно сбрасывается прямо при рендере, и React тут же перерисовывает компонент, так что закоммиченного кадра
+  // со строками прежней сессии нет.
+  const [store, setStore] = useState<{ key: string | null; state: WatchState<T> }>({ key: sessionKey, state: INITIAL });
+  if (store.key !== sessionKey) setStore({ key: sessionKey, state: INITIAL });
 
   useEffect(() => {
     if (!paramsKey) return;
@@ -47,6 +44,11 @@ export function useWatchList<T extends WatchRow>(params: WatchParams | null, key
     let active = true;
     let sessionId: string | null = null;
     const rows = new Map<string, T>();
+    // Обработчик прежней сессии жив до отключения её эффекта, а пассивные эффекты выполняются позже коммита нового
+    // ключа: его сообщения в это окно не должны попасть в сброшенное состояние. Поэтому обновление применяется,
+    // только если состояние всё ещё принадлежит этой сессии.
+    const update = (fn: (s: WatchState<T>) => WatchState<T>) =>
+      setStore((s) => (s.key === sessionKey ? { key: s.key, state: fn(s.state) } : s));
     api
       .startWatch(p, (e) => {
         if (!active) return;
@@ -54,7 +56,7 @@ export function useWatchList<T extends WatchRow>(params: WatchParams | null, key
           case "reset":
             rows.clear();
             for (const r of e.items as T[]) rows.set(keyOf(r), r);
-            setState((s) => ({
+            update((s) => ({
               rows: [...rows.values()],
               status: s.status === "polling" ? "polling" : "live",
               error: null,
@@ -68,13 +70,13 @@ export function useWatchList<T extends WatchRow>(params: WatchParams | null, key
               if (c.op === "upsert") rows.set(keyOf(c.row as T), c.row as T);
               else rows.delete(c.key);
             }
-            setState((s) => ({ ...s, rows: [...rows.values()], error: null }));
+            update((s) => ({ ...s, rows: [...rows.values()], error: null }));
             break;
           case "polling":
-            setState((s) => ({ ...s, status: "polling" }));
+            update((s) => ({ ...s, status: "polling" }));
             break;
           case "error":
-            setState((s) => ({ ...s, status: e.fatal ? "error" : s.status, error: e.error }));
+            update((s) => ({ ...s, status: e.fatal ? "error" : s.status, error: e.error }));
             break;
         }
       })
@@ -83,7 +85,7 @@ export function useWatchList<T extends WatchRow>(params: WatchParams | null, key
         else api.stopSession(id).catch(() => undefined);
       })
       .catch((err) => {
-        if (active) setState((s) => ({ ...s, status: "error", error: toAppError(err) }));
+        if (active) update((s) => ({ ...s, status: "error", error: toAppError(err) }));
       });
     return () => {
       active = false;
@@ -92,5 +94,6 @@ export function useWatchList<T extends WatchRow>(params: WatchParams | null, key
     // keyOf — функция модуля; сессия зависит только от параметров и входа.
   }, [paramsKey, epoch]);
 
-  return stateKey === sessionKey ? state : INITIAL;
+  // В отбрасываемом проходе рендера (сброс выше) тоже отдаётся начальное состояние.
+  return store.key === sessionKey ? store.state : INITIAL;
 }

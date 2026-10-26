@@ -44,16 +44,10 @@ export function YamlView({ connectionId, namespace, kind, name }: { connectionId
         >
           {t("common.copy")}
         </button>
-        {result?.ok && (
-          <span className="muted" role="status">
-            {t("common.copied")}
-          </span>
-        )}
-        {result && !result.ok && (
-          <span className="warn" role="alert">
-            {t("common.copyFailed")}
-          </span>
-        )}
+        {/* Область уведомления есть всегда: читалка экрана объявляет текст, появившийся в уже существующей области. */}
+        <span role="status" className={result ? (result.ok ? "muted" : "warn") : undefined}>
+          {result ? (result.ok ? t("common.copied") : t("common.copyFailed")) : ""}
+        </span>
       </div>
       {q.isPending && <p className="muted">{t("common.loading")}</p>}
       {q.error && <ReadError error={q.error} connectionId={connectionId} onRetry={() => void q.refetch()} />}
