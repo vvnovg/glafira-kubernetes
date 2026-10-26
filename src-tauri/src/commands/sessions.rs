@@ -39,18 +39,35 @@ pub async fn start_watch_impl(
             "Pods of a CronJob are read by the list, not by watch"
         ));
     }
+    // Сессия на учёте ещё до подключения: отключение, пока идёт вход (exec-плагин), её
+    // остановит (`stop_for`). При ошибке её снимает с учёта `guard`.
+    let (id, cancel) = st.sessions.register(&params.connection_id);
+    let guard = SessionGuard {
+        sessions: st.sessions.clone(),
+        id: id.clone(),
+    };
     let ns = params.namespace.clone();
     let workload = params.workload.clone();
-    let (reader, groups, selector) = st
+    let (used, reader, selector) = st
         .read_in(&params.connection_id, &params.namespace, |c| async move {
             let r = c.reader();
+            // У workload'а без селектора подов нет, как у `list_pods`: пустой селектор.
             let selector = match &workload {
-                Some(w) => crate::k8s::workloads::pod_selector(&r, &ns, w.kind, &w.name).await?,
+                Some(w) => Some(
+                    crate::k8s::workloads::pod_selector(&r, &ns, w.kind, &w.name)
+                        .await?
+                        .unwrap_or_default(),
+                ),
                 None => None,
             };
-            Ok((r, c.info.api_groups, selector))
+            Ok((c, r, selector))
         })
         .await?;
+    if cancel.is_cancelled() {
+        // Подключение отключили, пока сессия подключалась: её уже сняли с учёта.
+        return Ok(id);
+    }
+    let groups = used.info.api_groups;
     let sources = crate::watch::sources(
         &reader,
         &params.namespace,
@@ -65,14 +82,24 @@ pub async fn start_watch_impl(
         params.workload.clone(),
         groups,
     );
-    let (id, cancel) = st.sessions.register(&params.connection_id);
-    let guard = SessionGuard {
-        sessions: st.sessions.clone(),
-        id: id.clone(),
+    // Как у `AppState::read_in`: 403 — права проекта перечитаются, ошибка учётных данных или
+    // TLS сбрасывает клиент сессии, если он ещё в пуле.
+    let report: crate::watch::Report = {
+        let (st, cid, ns) = (
+            st.clone(),
+            params.connection_id.clone(),
+            params.namespace.clone(),
+        );
+        Box::new(move |e| {
+            if e.code == ErrorCode::Forbidden {
+                st.access.forget(&cid, &ns);
+            }
+            st.evict_if_broken_client(&cid, &used, e);
+        })
     };
     tokio::spawn(async move {
         let _guard = guard;
-        crate::watch::run(sources, poll, sink, cancel).await;
+        crate::watch::run_reporting(sources, poll, sink, cancel, report).await;
     });
     Ok(id)
 }
@@ -101,7 +128,7 @@ mod tests {
             AppState::new(dir.path(), Arc::new(crate::secrets::MemoryStore::default())).unwrap();
         let connected = crate::k8s::pool::test_connected(|s| {
             if s.uri.contains("watch=true") {
-                // Watch, который не отвечает, пока сессию не остановят.
+                // Watch сразу отвечает 504; watcher повторяет его, пока сессию не остановят.
                 crate::k8s::testing::status(504, "Timeout", "timeout")
             } else {
                 (
@@ -144,5 +171,100 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(e.key, "errors.watch.cronJobPods");
+        assert!(st.sessions.is_empty());
+    }
+
+    /// Мок кластера: Deployment `web` — `deployment` (и `on_get` при его чтении), список подов
+    /// пуст; запросы подов считаются в `pods`.
+    fn cluster(
+        st: &AppState,
+        deployment: serde_json::Value,
+        on_get: impl Fn() + Send + 'static,
+    ) -> Arc<std::sync::atomic::AtomicUsize> {
+        let pods = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = pods.clone();
+        let connected = crate::k8s::pool::test_connected(move |s| {
+            if s.path() == "/apis/apps/v1/namespaces/team-a/deployments/web" {
+                on_get();
+                (200, deployment.clone())
+            } else {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                (
+                    200,
+                    serde_json::json!({"apiVersion": "v1", "kind": "PodList",
+                        "metadata": {"resourceVersion": "1"}, "items": []}),
+                )
+            }
+        });
+        assert!(
+            st.pool
+                .insert_if_current("a", st.pool.generation("a"), connected)
+        );
+        pods
+    }
+
+    fn web() -> Option<WorkloadRef> {
+        Some(WorkloadRef {
+            kind: WorkloadKind::Deployment,
+            name: "web".into(),
+        })
+    }
+
+    /// Отключение, пока сессия подключается (здесь — читает селектор workload'а): сессия
+    /// останавливается и не начинается.
+    #[tokio::test]
+    async fn a_session_stopped_while_connecting_does_not_start() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let st =
+            AppState::new(dir.path(), Arc::new(crate::secrets::MemoryStore::default())).unwrap();
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let pods = {
+            let (sessions, stopped) = (st.sessions.clone(), stopped.clone());
+            cluster(
+                &st,
+                crate::k8s::workloads::fixtures::deployment("web", 1, 1),
+                move || stopped.store(sessions.stop_for("a"), Ordering::SeqCst),
+            )
+        };
+        let sink: Collect<WatchEvent> = Collect::default();
+        start_watch_impl(&st, params(WatchKind::Pods, web()), sink.clone())
+            .await
+            .unwrap();
+        assert_eq!(stopped.load(Ordering::SeqCst), 1, "сессия уже на учёте");
+        assert!(st.sessions.is_empty());
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(pods.load(Ordering::SeqCst), 0, "watch не начат");
+        assert!(sink.items().is_empty());
+    }
+
+    /// Workload без селектора: подов нет, как у `list_pods`, — пустой список без watch.
+    #[tokio::test]
+    async fn a_workload_without_a_selector_has_no_pods_to_watch() {
+        let dir = tempfile::tempdir().unwrap();
+        let st =
+            AppState::new(dir.path(), Arc::new(crate::secrets::MemoryStore::default())).unwrap();
+        let mut deployment = crate::k8s::workloads::fixtures::deployment("web", 1, 1);
+        deployment["spec"]["selector"] = serde_json::json!({});
+        let pods = cluster(&st, deployment, || {});
+        let sink: Collect<WatchEvent> = Collect::default();
+        start_watch_impl(&st, params(WatchKind::Pods, web()), sink.clone())
+            .await
+            .unwrap();
+        let ended = async {
+            while !st.sessions.is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), ended)
+            .await
+            .unwrap();
+        let events = sink.items();
+        assert!(
+            matches!(&events[..], [WatchEvent::Reset { items, errors, truncated: false }]
+                if items.is_empty() && errors.is_empty()),
+            "{events:?}"
+        );
+        assert_eq!(pods.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }
