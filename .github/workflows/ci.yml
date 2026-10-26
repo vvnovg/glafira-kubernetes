@@ -31,7 +31,9 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          workspaces: src-tauri -> target
+          workspaces: |
+            src-tauri -> target
+            crates/glafira-mcp-core -> target
       - name: Системные зависимости Tauri
         run: |
           sudo apt-get update
@@ -43,10 +45,16 @@ jobs:
       - run: pnpm build
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      - name: MCP-шлюз (крейт glafira-mcp-core)
+        run: |
+          cargo fmt --manifest-path crates/glafira-mcp-core/Cargo.toml --check
+          cargo clippy --manifest-path crates/glafira-mcp-core/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path crates/glafira-mcp-core/Cargo.toml
       - name: Лицензии и уязвимости зависимостей (cargo deny, deny.toml)
         run: |
           cargo deny --version 2>/dev/null | grep -q ' 0\.20\.2$' || cargo install cargo-deny --locked --version 0.20.2 --force
           cargo deny --manifest-path src-tauri/Cargo.toml --config deny.toml check licenses advisories
+          cargo deny --manifest-path crates/glafira-mcp-core/Cargo.toml --config deny.toml check licenses advisories
       - name: Кластер kind
         uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
         with:
@@ -86,9 +94,16 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          workspaces: src-tauri -> target
+          workspaces: |
+            src-tauri -> target
+            crates/glafira-mcp-core -> target
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
       - run: pnpm build
       - name: Unit-тесты Rust
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+      # Шим MCP — режим GUI-бинаря: на Windows проверяется, что stdio GUI-процесса работает через pipe.
+      - name: MCP-шлюз (stdio GUI-процесса, named pipe / Unix socket)
+        run: |
+          cargo clippy --manifest-path crates/glafira-mcp-core/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path crates/glafira-mcp-core/Cargo.toml

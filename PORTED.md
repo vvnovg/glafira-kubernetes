@@ -119,7 +119,19 @@
 | `src/components/TabContent.tsx` | `src/components/TabContent.tsx` | `8bbd0bd` | адаптирован: вкладки O1 |
 | `deny.toml` | `deny.toml` | `8bbd0bd` | адаптирован: без C-библиотек librdkafka и OpenSSL |
 | `.github/FUNDING.yml` | `.github/FUNDING.yml` | `8bbd0bd` | адаптирован: адрес поддержки |
-| `.github/workflows/ci.yml` | `.github/workflows/ci.yml` | `8bbd0bd` | адаптирован: без Kafka и MCP-крейта, стенд kind |
+| `.github/workflows/ci.yml` | `.github/workflows/ci.yml` | `8bbd0bd` | адаптирован: без Kafka, стенд kind, крейты MCP-шлюза |
 | `docs/i18n/README.md` | `docs/i18n/README.md` | `8bbd0bd` | адаптирован: языки en и ru, без Kafka |
 | `docs/i18n/glossary.md` | `docs/i18n/glossary.md` | `8bbd0bd` | адаптирован: термины Kubernetes и OpenShift, en и ru |
 | `src-tauri/src/der.rs` | `src-tauri/src/tls/der.rs` | `8bbd0bd` | адаптирован: комментарий модуля |
+| `crates/glafira-mcp-core/Cargo.toml` | `crates/glafira-mcp/Cargo.toml` | `8bbd0bd` | адаптирован: только транспорт и сессии, без schemars |
+| `crates/glafira-mcp-core/src/endpoint.rs` | `crates/glafira-mcp/src/endpoint.rs` | `8bbd0bd` | адаптирован: имя продукта — параметр `choose` |
+| `crates/glafira-mcp-core/src/handshake.rs` | `crates/glafira-mcp/src/handshake.rs` | `8bbd0bd` | адаптирован: ссылка на спеку |
+| `crates/glafira-mcp-core/src/audit.rs` | `crates/glafira-mcp/src/audit.rs` | `8bbd0bd` | адаптирован: ссылка на спеку |
+| `crates/glafira-mcp-core/src/limits.rs` | `crates/glafira-mcp/src/limits.rs` | `8bbd0bd` | адаптирован: комментарии |
+| `crates/glafira-mcp-core/src/fit.rs` | `crates/glafira-mcp/src/rules.rs` | `8bbd0bd` | адаптирован: без конфигов Kafka — фильтр, страницы и предел ответа |
+| `crates/glafira-mcp-core/src/session.rs` | `crates/glafira-mcp/src/model.rs` | `8bbd0bd` | адаптирован: только сессия, право, ошибка и `Hooks` |
+| `crates/glafira-mcp-core/src/server.rs` | `crates/glafira-mcp/src/server/mod.rs` | `8bbd0bd` | адаптирован: обвязка вызова без доменных типов, обработчик продукта создаёт `make` |
+| `crates/glafira-mcp-core/src/bin/gui_stdio_probe.rs` | `crates/glafira-mcp/src/bin/gui_stdio_probe.rs` | `8bbd0bd` | как есть |
+| `crates/glafira-mcp-core/tests/gui_stdio.rs` | `crates/glafira-mcp/tests/gui_stdio.rs` | `8bbd0bd` | как есть |
+| `crates/glafira-mcp-core/tests/manifest.rs` | `crates/glafira-mcp/tests/manifest.rs` | `8bbd0bd` | адаптирован: запрещены зависимости Kubernetes и приложения |
+| `crates/glafira-mcp-core/tests/server.rs` | `crates/glafira-mcp/tests/server.rs` | `8bbd0bd` | адаптирован: игрушечный обработчик вместо инструментов Kafka |
