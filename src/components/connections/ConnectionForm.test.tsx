@@ -355,6 +355,27 @@ describe("ConnectionForm", () => {
     await waitFor(() => expect(useWorkspace.getState().tabs).toEqual([]));
   });
 
+  it("доступ LLM: уровень и проекты уходят в профиль, «все доступные» — null", async () => {
+    vi.mocked(api.saveConnection).mockImplementation(async (p) => ({ ...p, id: "c1" }));
+    const user = userEvent.setup();
+    const initial = { ...newProfile(), id: "c1", name: "dev", apiUrl: "https://api.dev:6443" };
+    renderWithClient(<ConnectionForm initial={initial} tabId="t" />);
+    expect(screen.queryByLabelText("Проекты для LLM")).toBeNull();
+    await user.selectOptions(screen.getByLabelText("Доступ LLM (MCP)"), "metadata");
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(api.saveConnection).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(api.saveConnection).mock.calls[0][0]).toMatchObject({ llmAccess: "metadata", llmNamespaces: null });
+
+    await user.selectOptions(screen.getByLabelText("Проекты для LLM"), "list");
+    await user.type(screen.getByLabelText("Проекты LLM"), "team-a, team-b, team-a");
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(api.saveConnection).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(api.saveConnection).mock.calls[1][0]).toMatchObject({
+      llmAccess: "metadata",
+      llmNamespaces: ["team-a", "team-b"],
+    });
+  });
+
   it("ошибка сохранения показывается баннером", async () => {
     vi.mocked(api.saveConnection).mockRejectedValue({
       code: "INVALID_INPUT",

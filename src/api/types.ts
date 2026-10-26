@@ -81,7 +81,14 @@ export interface ConnectionProfile {
   /** Папка в дереве; null — корень. Меняется только командой перемещения. */
   folderId?: string | null;
   order?: number;
+  /** Доступ LLM (MCP); локальное поле: экспорт его не пишет. Нет поля — `off`. */
+  llmAccess?: LlmAccess;
+  /** Проекты для LLM; null или нет поля — все доступные. */
+  llmNamespaces?: string[] | null;
 }
+
+/** Уровень доступа LLM: `logs` — этап O4. */
+export type LlmAccess = "off" | "metadata";
 
 /** Секреты из формы: нет поля или null — оставить сохранённый, "" — удалить, иное — сохранить. */
 export interface SecretsInput {

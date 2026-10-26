@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, toAppError } from "../../api/client";
-import type { AppError, AuthConfig, AuthMethod, CaMode, ConnectionProfile, Environment, ExecAuth, ProxyMode, SecretsInput, TestReport } from "../../api/types";
+import type { AppError, AuthConfig, AuthMethod, CaMode, ConnectionProfile, Environment, ExecAuth, LlmAccess, ProxyMode, SecretsInput, TestReport } from "../../api/types";
 import { tr } from "../../i18n/text";
 import { restartSessions } from "../../lib/afterSignIn";
 import { useWorkspace } from "../../state/workspace";
@@ -16,6 +16,7 @@ const ENVIRONMENTS: Environment[] = ["local", "dev", "test", "stage", "prod"];
 const AUTH_METHODS: AuthMethod[] = ["browser", "token", "clientCert", "exec"];
 const CA_MODES: CaMode[] = ["system", "pem", "insecure"];
 const PROXY_MODES: ProxyMode[] = ["system", "none", "url"];
+const LLM_ACCESS: LlmAccess[] = ["off", "metadata"];
 
 export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile; tabId: string }) {
   const { t } = useTranslation();
@@ -25,6 +26,9 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
   const [clientKey, setClientKey] = useState("");
   const [favorites, setFavorites] = useState(formatNamespaces(initial.favoriteNamespaces));
   const [manual, setManual] = useState(formatNamespaces(initial.manualNamespaces));
+  // Проекты для LLM: «все доступные» (null) или список; список не теряется при переключении туда и обратно.
+  const [llmListed, setLlmListed] = useState(Boolean(initial.llmNamespaces));
+  const [llmList, setLlmList] = useState(formatNamespaces(initial.llmNamespaces ?? []));
   // Последние введённые значения, чтобы переключение режима туда и обратно их не теряло.
   const [lastCert, setLastCert] = useState(initial.auth.method === "clientCert" ? initial.auth.certificatePem : "");
   const [lastCa, setLastCa] = useState(initial.ca.mode === "pem" ? initial.ca.pem : "");
@@ -71,6 +75,8 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
     folderId,
     favoriteNamespaces: parseNamespaces(favorites),
     manualNamespaces: parseNamespaces(manual),
+    llmAccess: profile.llmAccess ?? "off",
+    llmNamespaces: llmListed ? parseNamespaces(llmList) : null,
   });
   const secrets = (): SecretsInput => ({
     token: profile.auth.method === "token" && token.trim() ? token : null,
@@ -426,6 +432,36 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
           value={profile.connectTimeoutMs}
           onChange={(e) => update({ connectTimeoutMs: Number(e.target.value) })}
         />
+
+        <span className="field-label">
+          <label htmlFor="cf-llm">{t("connections.form.llmAccess")}</label>
+          <Hint k="hints.connections.llmAccess" label={t("connections.form.llmAccess")} />
+        </span>
+        <select id="cf-llm" value={profile.llmAccess ?? "off"} onChange={(e) => update({ llmAccess: e.target.value as LlmAccess })}>
+          {LLM_ACCESS.map((a) => (
+            <option key={a} value={a}>
+              {t(a === "off" ? "connections.form.llmAccessOff" : "connections.form.llmAccessMetadata")}
+            </option>
+          ))}
+        </select>
+        {(profile.llmAccess ?? "off") !== "off" && (
+          <>
+            <span className="field-label">
+              <label htmlFor="cf-llm-scope">{t("connections.form.llmScope")}</label>
+              <Hint k="hints.connections.llmScope" label={t("connections.form.llmScope")} />
+            </span>
+            <select id="cf-llm-scope" value={llmListed ? "list" : "all"} onChange={(e) => setLlmListed(e.target.value === "list")}>
+              <option value="all">{t("connections.form.llmScopeAll")}</option>
+              <option value="list">{t("connections.form.llmScopeList")}</option>
+            </select>
+            {llmListed && (
+              <>
+                <label htmlFor="cf-llm-ns">{t("connections.form.llmNamespaces")}</label>
+                <input id="cf-llm-ns" placeholder="team-a, team-b" value={llmList} onChange={(e) => setLlmList(e.target.value)} />
+              </>
+            )}
+          </>
+        )}
       </div>
 
       <div className="toolbar">
