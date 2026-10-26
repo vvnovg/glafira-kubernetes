@@ -23,6 +23,7 @@ vi.mock("../../api/client", async (importOriginal) => {
 
 import { api } from "../../api/client";
 import type { ConnectionProfile, PolicyStatus } from "../../api/types";
+import { useConnectionEpoch } from "../../state/connectionEpoch";
 import { useWorkspace } from "../../state/workspace";
 import { ConnectionForm } from "./ConnectionForm";
 import { newProfile } from "./profile";
@@ -46,6 +47,7 @@ beforeEach(() => {
   vi.mocked(api.listFolders).mockResolvedValue([]);
   vi.mocked(api.getPolicyStatus).mockResolvedValue(POLICY);
   useWorkspace.setState({ tabs: [], activeId: null });
+  useConnectionEpoch.setState({ epochs: {} });
 });
 
 describe("ConnectionForm", () => {
@@ -108,6 +110,33 @@ describe("ConnectionForm", () => {
       false,
     );
     expect(useWorkspace.getState().tabs.map((t) => t.id)).toEqual(["cluster:new-id"]);
+  });
+
+  it("сохранение существующего подключения перезапускает его watch и логи: Rust остановил сессии без события", async () => {
+    const c1: ConnectionProfile = { ...newProfile(), id: "c1", name: "prod-1", auth: { method: "token" } };
+    vi.mocked(api.saveConnection).mockResolvedValue(c1);
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionForm initial={c1} tabId="connection-form:c1" />);
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(useWorkspace.getState().activeId).toBe("cluster:c1"));
+    // Другие подключения не затрагиваются.
+    expect(useConnectionEpoch.getState().epochs).toEqual({ c1: 1 });
+  });
+
+  it("сбой keychain после остановки сессий тоже перезапускает списки, отказ проверки профиля — нет", async () => {
+    const c1: ConnectionProfile = { ...newProfile(), id: "c1", name: "prod-1", auth: { method: "token" } };
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionForm initial={c1} tabId="connection-form:c1" />);
+    // Профиль не принят до остановки сессий — они живы.
+    vi.mocked(api.saveConnection).mockRejectedValueOnce({ code: "INVALID_INPUT", key: "errors.connections.httpsRequired", message: "x", retryable: false });
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    expect(await screen.findByText("Адрес API-сервера должен начинаться с https:// и содержать хост")).toBeInTheDocument();
+    expect(useConnectionEpoch.getState().epochs).toEqual({});
+    // Профиль записан и откатан, но сессии остановлены.
+    vi.mocked(api.saveConnection).mockRejectedValueOnce({ code: "INTERNAL", key: "errors.secrets.keychain", message: "x", retryable: false });
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(useConnectionEpoch.getState().epochs).toEqual({ c1: 1 }));
+    expect(useWorkspace.getState().tabs).toEqual([]);
   });
 
   it("клиентский сертификат: поля сертификата и ключа, ключ уходит секретом", async () => {

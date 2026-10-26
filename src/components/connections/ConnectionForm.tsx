@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, toAppError } from "../../api/client";
 import type { AppError, AuthConfig, AuthMethod, CaMode, ConnectionProfile, Environment, ExecAuth, ProxyMode, SecretsInput, TestReport } from "../../api/types";
 import { tr } from "../../i18n/text";
+import { restartSessions } from "../../lib/afterSignIn";
 import { useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Hint } from "../common/Hint";
@@ -101,7 +102,18 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
 
   const onSave = () =>
     run(async () => {
-      const saved = await api.saveConnection(current(), secrets(), confirmExec);
+      let saved: ConnectionProfile;
+      try {
+        saved = await api.saveConnection(current(), secrets(), confirmExec);
+      } catch (e) {
+        // Rust останавливает сессии подключения и тогда, когда keychain не принял секрет и профиль откатился; не
+        // останавливает их только отказ проверки профиля (`INVALID_INPUT`). Без перезапуска открытый список остался бы «живым».
+        if (!isNew && toAppError(e).code !== "INVALID_INPUT") restartSessions([initial.id]);
+        throw e;
+      }
+      // Сессии watch и логов подключения остановлены (`stop_for`) и заканчиваются без события: открытые списки перезапускаются.
+      // Запросы подключения ниже убираются из кэша (`removeQueries`), перечитывать их не нужно.
+      restartSessions([saved.id]);
       // save_connection не меняет место существующего подключения в дереве — перенос отдельной командой.
       try {
         if (!isNew && folderTouched && folderId !== knownFolder(loadedFolderId)) {

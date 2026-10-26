@@ -44,9 +44,10 @@ describe("useWatchList", () => {
     const { result } = renderHook(() => useWatchList(PARAMS, podKey));
     expect(result.current.status).toBe("connecting");
     await waitFor(() => expect(api.startWatch).toHaveBeenCalledWith(PARAMS, expect.any(Function)));
-    act(() => emit({ type: "reset", items: [pod("a"), pod("b")], errors: [] }));
+    act(() => emit({ type: "reset", items: [pod("a"), pod("b")], errors: [], truncated: false }));
     expect(result.current.rows.map((r) => r.name)).toEqual(["a", "b"]);
     expect(result.current.status).toBe("live");
+    expect(result.current.truncated).toBe(false);
     act(() =>
       emit({
         type: "changes",
@@ -66,6 +67,44 @@ describe("useWatchList", () => {
     expect(result.current.error).toEqual(error);
     act(() => emit({ type: "error", error, fatal: true }));
     expect(result.current.status).toBe("error");
+  });
+
+  it("truncated: ставит каждый сброс, изменения его сохраняют, перезапуск сбрасывает", async () => {
+    const { result } = renderHook(() => useWatchList(PARAMS, podKey));
+    await waitFor(() => expect(api.startWatch).toHaveBeenCalledTimes(1));
+    expect(result.current.truncated).toBe(false);
+    act(() => emit({ type: "reset", items: [pod("a")], errors: [], truncated: true }));
+    expect(result.current.truncated).toBe(true);
+    act(() => emit({ type: "changes", changes: [{ op: "upsert", row: pod("b") }] }));
+    act(() => emit({ type: "changes", changes: [{ op: "delete", key: "a" }] }));
+    act(() => emit({ type: "polling" }));
+    expect(result.current.rows.map((r) => r.name)).toEqual(["b"]);
+    expect(result.current.truncated).toBe(true);
+    // Опрос присылает полный список сбросом: предел снимается, когда строк стало меньше.
+    act(() => emit({ type: "reset", items: [pod("b")], errors: [], truncated: false }));
+    expect(result.current.truncated).toBe(false);
+    act(() => emit({ type: "reset", items: [pod("b")], errors: [], truncated: true }));
+    expect(result.current.truncated).toBe(true);
+    await act(async () => {
+      useConnectionEpoch.getState().bump("c1");
+    });
+    expect(result.current.truncated).toBe(false);
+    expect(result.current.rows).toEqual([]);
+    await waitFor(() => expect(api.startWatch).toHaveBeenCalledTimes(2));
+  });
+
+  it("пустой пакет изменений снимает ошибку: сессия восстановилась", async () => {
+    const { result } = renderHook(() => useWatchList(PARAMS, podKey));
+    await waitFor(() => expect(api.startWatch).toHaveBeenCalledTimes(1));
+    act(() => emit({ type: "reset", items: [pod("a")], errors: [], truncated: false }));
+    const error = { code: "CONNECTION_FAILED" as const, message: "x", retryable: true };
+    act(() => emit({ type: "error", error, fatal: false }));
+    expect(result.current.error).toEqual(error);
+    expect(result.current.status).toBe("live");
+    act(() => emit({ type: "changes", changes: [] }));
+    expect(result.current.error).toBeNull();
+    expect(result.current.status).toBe("live");
+    expect(result.current.rows.map((r) => r.name)).toEqual(["a"]);
   });
 
   it("останавливает сессию при размонтировании и перезапускает после входа заново", async () => {

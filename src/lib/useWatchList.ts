@@ -17,9 +17,11 @@ export interface WatchState<T> {
   error: AppError | null;
   /** Виды workloads, которые не читаются. */
   kindErrors: KindError[];
+  /** Сессия держит предельные 10 000 строк: остальные не показываются. Ставит каждый `Reset`, `Changes` не меняют. */
+  truncated: boolean;
 }
 
-const INITIAL = { rows: [], status: "connecting" as const, error: null, kindErrors: [] };
+const INITIAL = { rows: [], status: "connecting" as const, error: null, kindErrors: [], truncated: false };
 
 /**
  * Список проекта, который обновляется сам (спец. §6.7): сессия watch в Rust, а без прав на watch —
@@ -45,9 +47,16 @@ export function useWatchList<T extends WatchRow>(params: WatchParams | null, key
           case "reset":
             rows.clear();
             for (const r of e.items as T[]) rows.set(keyOf(r), r);
-            setState((s) => ({ rows: [...rows.values()], status: s.status === "polling" ? "polling" : "live", error: null, kindErrors: e.errors }));
+            setState((s) => ({
+              rows: [...rows.values()],
+              status: s.status === "polling" ? "polling" : "live",
+              error: null,
+              kindErrors: e.errors,
+              truncated: e.truncated,
+            }));
             break;
           case "changes":
+            // Пустой пакет — «восстановилось» (сессия снова читает): ошибка снимается и без изменений строк.
             for (const c of e.changes) {
               if (c.op === "upsert") rows.set(keyOf(c.row as T), c.row as T);
               else rows.delete(c.key);

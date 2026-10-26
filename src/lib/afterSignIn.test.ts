@@ -1,7 +1,18 @@
 import { QueryClient } from "@tanstack/react-query";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { useConnectionEpoch } from "../state/connectionEpoch";
-import { afterSignIn } from "./afterSignIn";
+import { afterSignIn, restartSessions } from "./afterSignIn";
+
+beforeEach(() => useConnectionEpoch.setState({ epochs: {} }));
+
+describe("restartSessions", () => {
+  it("поднимает номер входа только у названных подключений", () => {
+    restartSessions(new Set(["c1", "c2"]));
+    restartSessions([]);
+    restartSessions(["c1"]);
+    expect(useConnectionEpoch.getState().epochs).toEqual({ c1: 2, c2: 1 });
+  });
+});
 
 describe("afterSignIn", () => {
   it("перечитывает вкладки только этого подключения и перезапускает его сессии", () => {

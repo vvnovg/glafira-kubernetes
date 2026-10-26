@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { api } from "../../../api/client";
 import type { ConnectionProfile, KubeContext } from "../../../api/types";
 import { tr } from "../../../i18n/text";
+import { restartSessions } from "../../../lib/afterSignIn";
 import { trapTab } from "../../../lib/focusTrap";
 import { ErrorBanner } from "../../common/ErrorBanner";
 import { Hint } from "../../common/Hint";
@@ -100,7 +101,8 @@ export function KubeconfigImportDialog({ initialTargetId, onClose, onImported }:
     // Подтверждение — отпечаток показанной строки запуска выбранного и разрешённого контекста.
     const approveExec = picked.flatMap((c) => (c.exec && c.launchFingerprint && isAllowed(c) ? [c.launchFingerprint] : []));
     // Подключения, которые импорт мог обновить: их кэш (адрес, вход) после импорта устарел.
-    const touched = new Set(picked.flatMap((c) => (c.existingId ? [c.existingId] : [])));
+    const existing = picked.flatMap((c) => (c.existingId ? [c.existingId] : []));
+    const touched = new Set(existing);
     let saved: ConnectionProfile[] | null = null;
     try {
       saved = await api.applyKubeconfigImport(preview.path, names, targetId, approveExec);
@@ -118,6 +120,10 @@ export function KubeconfigImportDialog({ initialTargetId, onClose, onImported }:
       // сообщает подписчикам о новом состоянии: сброс перезапрашивает данные у смонтированных
       // запросов. Ответ не ждём — диалог не зависит от связи с кластером.
       void queryClient.resetQueries({ predicate: (q) => typeof q.queryKey[1] === "string" && touched.has(q.queryKey[1]) });
+      // Каждый сохранённый контекст останавливает сессии своего подключения (`stop_for`) без события, после сбоя часть
+      // уже записана: сессии существующих подключений выбранных контекстов перезапускаются в любом случае. Новые
+      // подключения сессий не имеют.
+      restartSessions(existing);
       setBusy(false);
     }
     if (saved) onImported(saved);

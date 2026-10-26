@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { api } from "../../../api/client";
 import type { ImportPreview, PreviewItem } from "../../../api/types";
 import { tr } from "../../../i18n/text";
+import { restartSessions } from "../../../lib/afterSignIn";
 import { trapTab } from "../../../lib/focusTrap";
 import { ErrorBanner } from "../../common/ErrorBanner";
 import { Hint } from "../../common/Hint";
@@ -83,6 +84,9 @@ export function ImportDialog({ path, initialTargetId, onClose, onImported }: Pro
       // им ничего бы не сообщило). Ответ не ждём — диалог не зависит от связи с кластером.
       const updated = new Set(result.updated.filter((i) => i.kind === "connection").map((i) => i.id));
       void queryClient.resetQueries({ predicate: (q) => typeof q.queryKey[1] === "string" && updated.has(q.queryKey[1]) });
+      // Сессии watch и логов обновлённых подключений остановлены (`stop_for`) без события: открытые списки перезапускаются.
+      // Добавленные и не изменившиеся подключения Rust не трогает.
+      restartSessions(updated);
       onImported(result);
     } catch (err) {
       setApplyError(err);

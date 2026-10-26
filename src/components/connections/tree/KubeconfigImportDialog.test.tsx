@@ -3,6 +3,7 @@ import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { useConnectionEpoch } from "../../../state/connectionEpoch";
 import { renderWithClient } from "../../../test/render";
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
@@ -84,6 +85,7 @@ function OpenTab() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  useConnectionEpoch.setState({ epochs: {} });
   vi.mocked(api.listConnections).mockResolvedValue([]);
   vi.mocked(api.listFolders).mockResolvedValue([{ id: "f", name: "Kubeconfig", parentId: null, order: 0 }]);
   vi.mocked(api.previewKubeconfigImport).mockResolvedValue(PREVIEW);
@@ -253,6 +255,38 @@ describe("KubeconfigImportDialog", () => {
     // Подписчик ключа `["connection", "old"]` получает свежие данные без повторного открытия вкладки.
     await waitFor(() => expect(screen.getByLabelText("Вкладка")).toHaveTextContent("подключено"));
     expect(api.connect).toHaveBeenCalledTimes(2);
+  });
+
+  it("после импорта перезапускает watch и логи существующих подключений, но не новых", async () => {
+    // «dev» — новое подключение (id «new»), «lab» обновляет существующее «old»: сессии есть только у него.
+    vi.mocked(api.applyKubeconfigImport).mockResolvedValue([{ id: "new" }, { id: "old" }] as ConnectionProfile[]);
+    const onImported = vi.fn();
+    const user = userEvent.setup();
+    renderWithClient(<Mounted initialTargetId={null} onClose={() => {}} onImported={onImported} />);
+    await user.click(await screen.findByRole("checkbox", { name: "lab" }));
+    await user.click(screen.getByRole("button", { name: "Импортировать 2 контекста" }));
+    await waitFor(() => expect(onImported).toHaveBeenCalled());
+    expect(useConnectionEpoch.getState().epochs).toEqual({ old: 1 });
+  });
+
+  it("импорт только новых контекстов сессий не перезапускает", async () => {
+    vi.mocked(api.applyKubeconfigImport).mockResolvedValue([{ id: "new" }] as ConnectionProfile[]);
+    const onImported = vi.fn();
+    const user = userEvent.setup();
+    renderWithClient(<Mounted initialTargetId={null} onClose={() => {}} onImported={onImported} />);
+    await user.click(await screen.findByRole("button", { name: "Импортировать 1 контекст" }));
+    await waitFor(() => expect(onImported).toHaveBeenCalled());
+    expect(useConnectionEpoch.getState().epochs).toEqual({});
+  });
+
+  it("сбой сохранения: часть контекстов могла записаться, сессии существующих подключений перезапускаются", async () => {
+    vi.mocked(api.applyKubeconfigImport).mockRejectedValue({ code: "INTERNAL", message: "Keychain is locked", retryable: false });
+    const user = userEvent.setup();
+    renderWithClient(<Mounted initialTargetId={null} onClose={() => {}} onImported={vi.fn()} />);
+    await user.click(await screen.findByRole("checkbox", { name: "lab" }));
+    await user.click(screen.getByRole("button", { name: "Импортировать 2 контекста" }));
+    expect(await screen.findByText("Keychain is locked")).toBeInTheDocument();
+    expect(useConnectionEpoch.getState().epochs).toEqual({ old: 1 });
   });
 
   it("сбой сохранения: ошибка, диалог открыт, списки перечитаны", async () => {

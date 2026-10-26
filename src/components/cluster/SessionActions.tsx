@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../api/client";
 import type { ConnectionInfo, ConnectionProfile } from "../../api/types";
-import { afterSignIn } from "../../lib/afterSignIn";
+import { afterSignIn, restartSessions } from "../../lib/afterSignIn";
 import { useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
 
@@ -67,7 +67,14 @@ export function SessionActions({ profile }: { profile: ConnectionProfile }) {
     mutationKey,
     mutationFn: async () => {
       await api.setConnectionToken(id, token);
-      return reconnect(queryClient, id);
+      try {
+        return await reconnect(queryClient, id);
+      } catch (e) {
+        // Токен сохранён, и Rust остановил сессии подключения (`stop_for`). После удачного входа их перезапустит
+        // `afterSignIn`, а при сбое входа открытые списки остались бы «живыми» без сессии.
+        restartSessions([id]);
+        throw e;
+      }
     },
     onSuccess: () => setToken(""),
   });

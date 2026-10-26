@@ -3,6 +3,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionFolder, ImportPreview } from "../../../api/types";
+import { useConnectionEpoch } from "../../../state/connectionEpoch";
 import { renderWithClient } from "../../../test/render";
 
 vi.mock("../../../api/client", async (importOriginal) => {
@@ -53,6 +54,7 @@ function OpenTab() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  useConnectionEpoch.setState({ epochs: {} });
   vi.mocked(api.listFolders).mockResolvedValue(FOLDERS);
   vi.mocked(api.previewImport).mockResolvedValue(PREVIEW);
   vi.mocked(api.applyImport).mockResolvedValue(PREVIEW);
@@ -173,6 +175,34 @@ describe("ImportDialog", () => {
     // Подписчик ключа `["connection", "c2"]` получает свежие данные без повторного открытия вкладки.
     await waitFor(() => expect(screen.getByLabelText("Вкладка")).toHaveTextContent("подключено"));
     expect(api.connect).toHaveBeenCalledTimes(2);
+  });
+
+  it("после импорта перезапускает watch и логи только обновлённых подключений", async () => {
+    // Rust остановил их сессии без события; добавленные, не изменившиеся и папки сессий не имеют.
+    vi.mocked(api.applyImport).mockResolvedValue({
+      ...PREVIEW,
+      updated: [
+        { kind: "connection", id: "c2", name: "ocp-upd", path: ["Проект А"] },
+        { kind: "folder", id: "f2", name: "Старая", path: [] },
+      ],
+      unchanged: [{ kind: "connection", id: "c3", name: "ocp-same", path: [] }],
+    });
+    const user = userEvent.setup();
+    const { onImported } = renderDialog();
+    await screen.findByText(/^Добавится:/);
+    await user.click(screen.getByRole("button", { name: "Импортировать" }));
+    await waitFor(() => expect(onImported).toHaveBeenCalled());
+    expect(useConnectionEpoch.getState().epochs).toEqual({ c2: 1 });
+  });
+
+  it("сбой применения не перезапускает сессии", async () => {
+    vi.mocked(api.applyImport).mockRejectedValue({ code: "INTERNAL", message: "Disk is full", retryable: false });
+    const user = userEvent.setup();
+    renderDialog();
+    await screen.findByText(/^Добавится:/);
+    await user.click(screen.getByRole("button", { name: "Импортировать" }));
+    expect(await screen.findByText("Disk is full")).toBeInTheDocument();
+    expect(useConnectionEpoch.getState().epochs).toEqual({});
   });
 
   it("сбой применения не сбрасывает кэш подключений", async () => {
