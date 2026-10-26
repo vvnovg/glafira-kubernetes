@@ -8,6 +8,10 @@ pub const POLICY_VENDOR: &str = "Glafira";
 pub const POLICY_PRODUCT: &str = "Kubernetes";
 /// Имя, под которым Glafira видна в кластере: `User-Agent` запросов и `fieldManager` изменений.
 pub const CLIENT_NAME: &str = "glafira-kubernetes";
+/// Имя сервера в MCP (`serverInfo.name`), в имени pipe и запасного сокета.
+pub const MCP_SERVER_NAME: &str = "glafira-kubernetes";
+/// Ключ сервера в `mcpServers` клиентов (Claude Desktop, Claude Code).
+pub const MCP_CLIENT_KEY: &str = "glafira-kubernetes";
 
 #[cfg(test)]
 mod tests {

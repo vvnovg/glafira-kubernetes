@@ -9,6 +9,7 @@ pub mod health;
 pub mod k8s;
 pub mod logging;
 pub mod logs;
+pub mod mcp;
 pub mod platform;
 pub mod policy;
 pub mod product;

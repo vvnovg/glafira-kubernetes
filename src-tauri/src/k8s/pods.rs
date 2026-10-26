@@ -474,6 +474,19 @@ pub struct PodDetails {
     pub volumes: Vec<VolumeView>,
 }
 
+/// Тома спецификации пода (или шаблона подов workload'а).
+pub fn volumes_of(spec: &k8s_openapi::api::core::v1::PodSpec) -> Vec<VolumeView> {
+    spec.volumes
+        .as_ref()
+        .map(|vs| {
+            vs.iter()
+                .filter_map(|v| serde_json::to_value(v).ok())
+                .filter_map(|v| volume_view(&v))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Вид тома и его источник — первое заданное поле `volumes[]` кроме имени.
 fn volume_view(v: &serde_json::Value) -> Option<VolumeView> {
     let obj = v.as_object()?;
@@ -536,15 +549,7 @@ pub fn pod_details(p: &Pod) -> PodDetails {
         containers,
         labels: p.metadata.labels.clone().unwrap_or_default(),
         annotations,
-        volumes: spec
-            .and_then(|s| s.volumes.as_ref())
-            .map(|vs| {
-                vs.iter()
-                    .filter_map(|v| serde_json::to_value(v).ok())
-                    .filter_map(|v| volume_view(&v))
-                    .collect()
-            })
-            .unwrap_or_default(),
+        volumes: spec.map(volumes_of).unwrap_or_default(),
     }
 }
 

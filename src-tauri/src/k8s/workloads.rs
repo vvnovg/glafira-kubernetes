@@ -648,6 +648,9 @@ pub struct WorkloadDetails {
     pub pdb: Part<Option<PdbView>>,
     /// История выкладки; у Job и CronJob её нет.
     pub history: Option<Part<Vec<Revision>>>,
+    /// Тома шаблона подов — только для MCP (интерфейс показывает тома на вкладке пода).
+    #[serde(skip)]
+    pub volumes: Vec<crate::k8s::pods::VolumeView>,
 }
 
 fn owned_by(meta: &ObjectMeta, uid: Option<&str>) -> bool {
@@ -876,8 +879,26 @@ pub async fn get_workload(
         hpa,
         pdb,
         history,
+        volumes: p
+            .template
+            .as_ref()
+            .and_then(|t| t.spec.as_ref())
+            .map(crate::k8s::pods::volumes_of)
+            .unwrap_or_default(),
         workload: p.row,
     })
+}
+
+/// Строка workload'а и селектор его подов без HPA, PDB и истории — для частого чтения
+/// (наблюдение MCP за workload'ом).
+pub async fn get_row(
+    r: &ReadClient,
+    namespace: &str,
+    kind: WorkloadKind,
+    workload: &str,
+) -> AppResult<(WorkloadRow, Option<String>)> {
+    let p = parsed(r, namespace, kind, workload).await?;
+    Ok((p.row, p.selector))
 }
 
 #[cfg(test)]

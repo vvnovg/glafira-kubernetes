@@ -147,3 +147,6 @@
 | `src-tauri/src/health/store.rs` | `src-tauri/src/health/store.rs` | `8bbd0bd` | адаптирован: без предложений LLM (этап O3) и лага групп, проекты проверки, объекты Kubernetes |
 | `src-tauri/src/health/service.rs` | `src-tauri/src/health/service.rs` | `8bbd0bd` | адаптирован: сборщик снимка Kubernetes, проекты проверки, без лага групп |
 | `src-tauri/src/commands/health.rs` | `src-tauri/src/commands/health.rs` | `8bbd0bd` | адаптирован: без предложений LLM (этап O3) |
+| `src-tauri/src/mcp/files.rs` | `src-tauri/src/mcp/files.rs` | `8bbd0bd` | адаптирован: ссылка на спеку |
+| `src-tauri/src/mcp/approvals.rs` | `src-tauri/src/mcp/approvals.rs` | `8bbd0bd` | адаптирован: крейт glafira-mcp-core, ссылка на спеку |
+| `src-tauri/src/mcp/backend.rs` | `src-tauri/src/mcp/backend.rs` | `8bbd0bd` | адаптирован: чтения Kubernetes через ReadClient, область llmNamespaces, проверка по проектам, объекты Kubernetes |

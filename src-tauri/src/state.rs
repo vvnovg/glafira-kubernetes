@@ -84,7 +84,9 @@ impl AppState {
         };
         // Чтения при подключении (срок токена: у обычного пользователя 403 — ожидаемый ответ) —
         // не ошибки чтения, внутри которого подключаются.
-        let (result, _) = observe(open(profile, self.secrets.clone(), cancel)).await;
+        // Future подключения в debug-сборке — десятки килобайт: в куче, иначе цепочка вызова
+        // инструмента MCP, внутри которой подключаются, не помещается в стек потока tokio.
+        let (result, _) = observe(Box::pin(open(profile, self.secrets.clone(), cancel))).await;
         if let Some(n) = n {
             self.logins.finish(id, n);
         }
