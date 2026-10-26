@@ -343,7 +343,7 @@
       "infrastructure": "Infrastructure",
       "console": "Web console",
       "operators": "Cluster operators",
-      "operatorsOk": "All {{total}} operators are fine.",
+      "operatorsOk": "Operators: {{total}}, all fine.",
       "operatorsProblems": "Not fine: {{bad}} of {{total}}.",
       "operatorsAll": "Show all",
       "operatorsProblemsOnly": "Only the problems",

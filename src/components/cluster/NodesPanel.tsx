@@ -13,7 +13,7 @@ import { type Column, VirtualTable } from "../common/VirtualTable";
 /** Вкладка «Ноды» (спец. §6.1): список с готовностью и ролями, сведения о выбранной ноде. */
 export function NodesPanel({ connectionId }: { connectionId: string }) {
   const { t } = useTranslation();
-  const [interval, setInterval] = useRefreshInterval();
+  const [interval, setRefreshInterval] = useRefreshInterval();
   const [selected, setSelected] = useState<string | null>(null);
   const q = useQuery({ queryKey: ["nodes", connectionId], queryFn: () => api.listNodes(connectionId), refetchInterval: interval || false });
   const columns: Column<NodeRow>[] = [
@@ -40,7 +40,7 @@ export function NodesPanel({ connectionId }: { connectionId: string }) {
     <div className="page">
       <div className="toolbar">
         <h2>{t("cluster.nodes.title")}</h2>
-        <RefreshControls interval={interval} onInterval={setInterval} onRefresh={() => void q.refetch()} busy={q.isFetching} />
+        <RefreshControls interval={interval} onInterval={setRefreshInterval} onRefresh={() => void q.refetch()} busy={q.isFetching} />
       </div>
       {q.isPending && <p className="muted">{t("common.loading")}</p>}
       {q.error && <ReadError error={q.error} connectionId={connectionId} onRetry={() => void q.refetch()} />}
@@ -48,20 +48,22 @@ export function NodesPanel({ connectionId }: { connectionId: string }) {
       {q.data && (
         <div className="split">
           <VirtualTable label={t("cluster.nodes.title")} rows={q.data.items} columns={columns} rowKey={(n) => n.name} onRowClick={(n) => setSelected(n.name)} selectedKey={selected} />
-          {selected && <NodeDetailsPane connectionId={connectionId} name={selected} />}
+          {selected && <NodeDetailsPane connectionId={connectionId} name={selected} interval={interval} />}
         </div>
       )}
     </div>
   );
 }
 
-function NodeDetailsPane({ connectionId, name }: { connectionId: string; name: string }) {
+/** Сведения о ноде обновляются с тем же автообновлением, что и список. */
+function NodeDetailsPane({ connectionId, name, interval }: { connectionId: string; name: string; interval: number }) {
   const { t } = useTranslation();
-  const q = useQuery({ queryKey: ["node", connectionId, name], queryFn: () => api.getNode(connectionId, name) });
+  const q = useQuery({ queryKey: ["node", connectionId, name], queryFn: () => api.getNode(connectionId, name), refetchInterval: interval || false });
   const d = q.data;
   return (
     <div className="details-pane section" aria-label={name}>
       <h3>{name}</h3>
+      {q.isPending && <p className="muted">{t("common.loading")}</p>}
       {q.error && <ReadError error={q.error} connectionId={connectionId} onRetry={() => void q.refetch()} />}
       {d && (
         <>

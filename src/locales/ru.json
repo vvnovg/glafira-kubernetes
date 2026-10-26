@@ -345,7 +345,7 @@
       "infrastructure": "Инфраструктура",
       "console": "Веб-консоль",
       "operators": "Операторы кластера",
-      "operatorsOk": "Все {{total}} операторов в норме.",
+      "operatorsOk": "Операторов: {{total}}, все в норме.",
       "operatorsProblems": "Не в норме: {{bad}} из {{total}}.",
       "operatorsAll": "Показать все",
       "operatorsProblemsOnly": "Только проблемные",

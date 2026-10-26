@@ -4,6 +4,7 @@ import { api, toAppError } from "../../api/client";
 import type { ApiGroups, AppError, Capabilities, ConnectionInfo, ConnectionProfile } from "../../api/types";
 import { formatDateTime } from "../../lib/age";
 import { needsSignIn } from "../../lib/signIn";
+import { useNow } from "../../lib/useNow";
 import { useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Hint } from "../common/Hint";
@@ -12,6 +13,8 @@ import { LoginWait, reconnect, SessionActions, sessionMutationKey } from "./Sess
 
 /** За сколько до истечения токена показывается предупреждение (спец. §5.2). */
 const TOKEN_WARNING_SEC = 3600;
+/** Как часто сверяется срок токена: предупреждение появляется не позже чем через минуту после порога. */
+const TOKEN_CHECK_MS = 60_000;
 
 const CAPABILITIES: (keyof Capabilities)[] = ["listProjects", "listNodes", "listAllPods", "readClusterOperators", "readClusterVersion"];
 /** Права, которые бывают только у OpenShift. */
@@ -36,19 +39,21 @@ export function ConnectionPanel({ connectionId }: { connectionId: string }) {
   const error = q.error ? toAppError(q.error) : null;
   // Идёт вход, запуск exec-плагина или сохранение токена: второе подключение рядом не запускаем.
   const signingIn = useIsMutating({ mutationKey: sessionMutationKey(connectionId) }) > 0;
+  const now = useNow(TOKEN_CHECK_MS);
 
   if (!profile) return <p className="empty">{connections.isPending ? t("common.loading") : t("connections.form.deleted")}</p>;
 
   const exec = profile.auth.method === "exec";
   const signIn = error !== null && needsSignIn(error, profile);
+  // Подключение заново: свежие сведения и права (после смены токена или прав в кластере).
+  const reconnectNow = () => void reconnect(queryClient, connectionId).catch(() => undefined);
 
   return (
     <div className="page">
       <div className="toolbar">
         <h2>{profile.name}</h2>
         <span className="muted">{profile.apiUrl}</span>
-        {/* Подключение заново: свежие сведения и права (после смены токена или прав в кластере). */}
-        <button type="button" disabled={q.isFetching || signingIn} onClick={() => void reconnect(queryClient, connectionId).catch(() => undefined)}>
+        <button type="button" disabled={q.isFetching || signingIn} onClick={reconnectNow}>
           {t("cluster.connection.reconnect")}
         </button>
         <button type="button" onClick={() => open({ kind: "connection-form", connectionId })}>
@@ -68,7 +73,7 @@ export function ConnectionPanel({ connectionId }: { connectionId: string }) {
       )}
       {!exec && q.isPending && <p className="muted">{t("cluster.connection.connecting")}</p>}
       {error && <ConnectionError error={error} signIn={signIn} onRetry={() => void q.refetch()} profile={profile} />}
-      {q.data && <ConnectionSummary info={q.data} />}
+      {q.data && <ConnectionSummary info={q.data} now={now} busy={q.isFetching || signingIn} onReconnect={reconnectNow} />}
       {q.data && <ClusterOverviewView connectionId={connectionId} />}
     </div>
   );
@@ -89,17 +94,31 @@ function ConnectionError({ error, signIn, onRetry, profile }: { error: AppError;
   );
 }
 
-function ConnectionSummary({ info }: { info: ConnectionInfo }) {
+function ConnectionSummary({ info, now, busy, onReconnect }: { info: ConnectionInfo; now: number; busy: boolean; onReconnect: () => void }) {
   const { t } = useTranslation();
   const openShift = info.platform.kind === "openshift";
   const found = API_GROUPS.filter(([k]) => info.apiGroups[k]).map(([, name]) => name);
-  const expiresIn = info.tokenExpiresAt === null ? null : info.tokenExpiresAt - Date.now() / 1000;
+  const expiresIn = info.tokenExpiresAt === null ? null : info.tokenExpiresAt - now / 1000;
   return (
     <>
-      {expiresIn !== null && expiresIn < TOKEN_WARNING_SEC && (
-        <p className="warn" role="status">
-          {expiresIn > 0 ? t("cluster.connection.tokenExpiresSoon") : t("cluster.connection.tokenExpired")}
-        </p>
+      {/* Область объявления есть, пока у токена есть срок: предупреждение появляется в ней со временем. */}
+      {expiresIn !== null && (
+        <div role="status">
+          {expiresIn < TOKEN_WARNING_SEC && (
+            <p className="warn">
+              {expiresIn > 0 ? (
+                t("cluster.connection.tokenExpiresSoon")
+              ) : (
+                <>
+                  {t("cluster.connection.tokenExpired")}{" "}
+                  <button type="button" disabled={busy} onClick={onReconnect}>
+                    {t("cluster.connection.reconnect")}
+                  </button>
+                </>
+              )}
+            </p>
+          )}
+        </div>
       )}
       <dl className="stats">
         <div>

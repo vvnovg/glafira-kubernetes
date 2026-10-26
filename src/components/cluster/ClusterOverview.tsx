@@ -1,21 +1,45 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api } from "../../api/client";
+import { api, toAppError } from "../../api/client";
 import type { ClusterOverview, OpenShiftOverview, OperatorRow, Part } from "../../api/types";
-import { tr } from "../../i18n/text";
+import { needsSignIn } from "../../lib/signIn";
+import { ErrorBanner } from "../common/ErrorBanner";
 import { Hint } from "../common/Hint";
-import { PartView } from "../common/PartView";
+import { PartView, Unavailable } from "../common/PartView";
 import { ReadError } from "../common/ReadError";
 import { RefreshControls, useRefreshInterval } from "../common/RefreshControls";
+import { reconnect, sessionMutationKey } from "./SessionActions";
 
 /** Какие части обзора скрыты правами (у них ошибка FORBIDDEN). */
 function hiddenByRights(o: ClusterOverview): boolean {
-  const parts: (Part<unknown> | null | undefined)[] = [o.nodes, o.ingressClasses, o.gatewayClasses, o.projects];
+  const parts: (Part<unknown> | null | undefined)[] = [o.readyz, o.nodes, o.ingressClasses, o.gatewayClasses, o.projects];
   const os = o.platformDetails;
   if (os) parts.push(os.clusterVersion, os.infrastructure, os.consoleUrl, os.operators, os.machineConfigPools);
   return parts.some((p) => p?.error?.code === "FORBIDDEN");
+}
+
+/**
+ * Адрес консоли из ответа кластера нельзя отдавать системе как есть: `mailto:` и `tel:` открывают чужие программы.
+ * `link` — только http(s); `text` — разобранный адрес другой схемы показывается текстом; `none` — адрес не разобрать.
+ */
+function consoleTarget(raw: string): "link" | "text" | "none" {
+  try {
+    const { protocol } = new URL(raw);
+    return protocol === "http:" || protocol === "https:" ? "link" : "text";
+  } catch {
+    return "none";
+  }
+}
+
+/** Открывает адрес в браузере; отказ системы (запрет возможностей приложения) не должен остаться необработанным отказом промиса. */
+async function openConsole(url: string): Promise<void> {
+  try {
+    await openUrl(url);
+  } catch {
+    // Адрес остаётся на экране текстом кнопки: его можно скопировать.
+  }
 }
 
 const flag = (v: boolean | null) => (v === true ? "✅" : v === false ? "⚠" : "—");
@@ -23,7 +47,7 @@ const flag = (v: boolean | null) => (v === true ? "✅" : v === false ? "⚠" : 
 /** Обзор кластера (спец. §6.2): API-сервер, ноды, проекты, классы Ingress и Gateway, у OpenShift — обновления, операторы, пулы машин. */
 export function ClusterOverviewView({ connectionId }: { connectionId: string }) {
   const { t } = useTranslation();
-  const [interval, setInterval] = useRefreshInterval();
+  const [interval, setRefreshInterval] = useRefreshInterval();
   const q = useQuery({
     queryKey: ["overview", connectionId],
     queryFn: () => api.getClusterOverview(connectionId),
@@ -34,10 +58,10 @@ export function ClusterOverviewView({ connectionId }: { connectionId: string }) 
     <section className="section">
       <div className="toolbar">
         <h3>{t("cluster.overview.title")}</h3>
-        <RefreshControls interval={interval} onInterval={setInterval} onRefresh={() => void q.refetch()} busy={q.isFetching} />
+        <RefreshControls interval={interval} onInterval={setRefreshInterval} onRefresh={() => void q.refetch()} busy={q.isFetching} />
       </div>
       {q.isPending && <p className="muted">{t("common.loading")}</p>}
-      {q.error && <ReadError error={q.error} connectionId={connectionId} onRetry={() => void q.refetch()} />}
+      {q.error && <OverviewError error={q.error} connectionId={connectionId} onRetry={() => void q.refetch()} />}
       {o && (
         <>
           <dl className="stats">
@@ -48,7 +72,8 @@ export function ClusterOverviewView({ connectionId }: { connectionId: string }) 
                   <Hint k="hints.cluster.readyz" label={t("cluster.overview.apiServer")} />
                 </span>
               </dt>
-              <dd>{o.readyz.ok ? `✅ ${t("cluster.overview.ready")}` : `⚠ ${t("cluster.overview.notReady")}`}</dd>
+              {/* Нет ответа от /readyz — не «не готов»: состояние неизвестно, причина ниже. */}
+              <dd>{o.readyz.error ? "—" : o.readyz.ok ? `✅ ${t("cluster.overview.ready")}` : `⚠ ${t("cluster.overview.notReady")}`}</dd>
             </div>
             <div>
               <dt>{t("cluster.overview.nodes")}</dt>
@@ -63,12 +88,12 @@ export function ClusterOverviewView({ connectionId }: { connectionId: string }) 
               </dd>
             </div>
           </dl>
-          {!o.readyz.ok && o.readyz.failed.length > 0 && (
+          {!o.readyz.error && !o.readyz.ok && o.readyz.failed.length > 0 && (
             <p className="warn">
               {t("cluster.overview.failedChecks")}: <code>{o.readyz.failed.join(", ")}</code>
             </p>
           )}
-          {o.readyz.error && <p className="muted">— {tr(o.readyz.error)}</p>}
+          {o.readyz.error && <Unavailable error={o.readyz.error} />}
           {o.nodes.data && o.nodes.data.roles.length > 0 && (
             <p>
               {t("cluster.overview.byRole")}: {o.nodes.data.roles.map((r) => `${r.role} ${r.ready}/${r.total}`).join(", ")}
@@ -116,6 +141,29 @@ export function ClusterOverviewView({ connectionId }: { connectionId: string }) 
         </>
       )}
     </section>
+  );
+}
+
+/**
+ * Ошибка чтения обзора на вкладке подключения. «Войти снова» из `ReadError` открыл бы эту же вкладку, поэтому при
+ * истёкшей сессии кнопка запускает подключение заново: вход (или причина отказа) показываются выше, на вкладке.
+ */
+function OverviewError({ error, connectionId, onRetry }: { error: unknown; connectionId: string; onRetry: () => void }) {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  // Тот же ключ, что у входа на вкладке: пока идёт подключение, второе рядом не запускается.
+  const signIn = useMutation({ mutationKey: sessionMutationKey(connectionId), mutationFn: () => reconnect(queryClient, connectionId) });
+  const e = toAppError(error);
+  if (!needsSignIn(e)) return <ReadError error={error} connectionId={connectionId} onRetry={onRetry} />;
+  return (
+    <div className="panel">
+      <ErrorBanner error={e} />
+      <div className="toolbar">
+        <button type="button" className="primary" disabled={signIn.isPending} onClick={() => signIn.mutate()}>
+          {t("objects.signInAgain")}
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -190,12 +238,14 @@ function OpenShiftSection({ connectionId, os }: { connectionId: string; os: Open
         <dd>
           <PartView part={os.consoleUrl}>
             {(url) =>
-              url ? (
-                <button type="button" className="link" onClick={() => void openUrl(url)}>
+              !url || consoleTarget(url) === "none" ? (
+                "—"
+              ) : consoleTarget(url) === "link" ? (
+                <button type="button" className="link" onClick={() => void openConsole(url)}>
                   {url}
                 </button>
               ) : (
-                "—"
+                url
               )
             }
           </PartView>
@@ -214,7 +264,13 @@ function OpenShiftSection({ connectionId, os }: { connectionId: string; os: Open
               </button>
             </p>
             {all ? (
-              operators.data ? <OperatorList rows={operators.data} /> : operators.error ? <ReadError error={operators.error} connectionId={connectionId} /> : null
+              operators.data ? (
+                <OperatorList rows={operators.data} />
+              ) : operators.error ? (
+                <ReadError error={operators.error} connectionId={connectionId} onRetry={() => void operators.refetch()} />
+              ) : (
+                <p className="muted">{t("common.loading")}</p>
+              )
             ) : (
               ops.problems.length > 0 && <OperatorList rows={ops.problems} />
             )}

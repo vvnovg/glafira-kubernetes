@@ -1,6 +1,6 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderWithClient } from "../../test/render";
 
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
@@ -360,5 +360,111 @@ describe("ConnectionPanel", () => {
     expect(screen.getAllByRole("button", { name: "Изменить подключение" })).toHaveLength(2);
     await user.click(within(heading.nextElementSibling as HTMLElement).getByRole("button", { name: "Изменить подключение" }));
     expect(useWorkspace.getState().activeId).toBe("connection-form:c1");
+  });
+});
+
+describe("срок токена со временем", () => {
+  const T0 = new Date("2026-10-26T10:00:00Z");
+  const inSeconds = (n: number) => Math.floor(T0.getTime() / 1000) + n;
+  const HOUR = 3_600_000;
+  const SOON = "Токен истекает меньше чем через час — скоро нужно будет войти снова";
+  const GONE = "Срок токена истёк — войдите снова";
+
+  beforeEach(() => {
+    // Подменяются только часы и setInterval (по ним считает срок `useNow`): setTimeout остаётся настоящим, на нём
+    // держатся ожидание запросов и тестовые ожидания.
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+    vi.setSystemTime(T0);
+    // Недопитая очередь `mockReturnValueOnce` упавшего теста не должна доставаться следующему.
+    vi.mocked(api.connect).mockReset();
+    vi.mocked(api.listConnections).mockResolvedValue([profile({ method: "browser" })]);
+  });
+  afterEach(() => vi.useRealTimers());
+
+  const advance = (ms: number) =>
+    act(() => {
+      vi.advanceTimersByTime(ms);
+    });
+  const open = async (tokenExpiresAt: number | null) => {
+    vi.mocked(api.connect).mockResolvedValue({ ...INFO, tokenExpiresAt });
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionPanel connectionId="c1" />);
+    await settled();
+    return user;
+  };
+  // Сведения о подключении и обзор приходят отдельными запросами: дожидаемся обоих, чтобы экран дорисовался до проверок.
+  const settled = async () => {
+    await screen.findByText("dev1");
+    await screen.findByText("3 / 3");
+  };
+
+  it("вкладка открыта при 3 часах до конца: предупреждение появляется на пороге часа, потом «истёк»", async () => {
+    await open(inSeconds(3 * 3600));
+    expect(screen.getByText("Токен действует до")).toBeInTheDocument();
+    expect(screen.queryByText(SOON)).not.toBeInTheDocument();
+    // Осталось 1 ч 36 мин, затем 1 ч 6 мин: порог часа ещё не пройден.
+    await advance(1.4 * HOUR);
+    expect(screen.queryByText(SOON)).not.toBeInTheDocument();
+    await advance(0.5 * HOUR);
+    expect(screen.queryByText(SOON)).not.toBeInTheDocument();
+    // Осталось 54 мин.
+    await advance(0.2 * HOUR);
+    expect(screen.getByText(SOON)).toBeInTheDocument();
+    expect(screen.queryByText(GONE)).not.toBeInTheDocument();
+    await advance(1 * HOUR);
+    expect(screen.getByText(GONE)).toBeInTheDocument();
+    expect(screen.queryByText(SOON)).not.toBeInTheDocument();
+  });
+
+  it("больше часа до конца: предупреждения нет, сколько бы ни шли проверки", async () => {
+    await open(inSeconds(10 * 3600));
+    await advance(5 * HOUR);
+    expect(screen.queryByText(SOON)).not.toBeInTheDocument();
+    expect(screen.queryByText(GONE)).not.toBeInTheDocument();
+  });
+
+  it("токен без срока: ни предупреждения, ни строки срока", async () => {
+    await open(null);
+    await advance(30 * HOUR);
+    expect(screen.queryByText(SOON)).not.toBeInTheDocument();
+    expect(screen.queryByText(GONE)).not.toBeInTheDocument();
+    expect(screen.queryByText("Токен действует до")).not.toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("срок уже истёк при открытии — сразу «истёк», без «скоро»", async () => {
+    await open(inSeconds(-5));
+    expect(screen.getByText(GONE)).toBeInTheDocument();
+    expect(screen.queryByText(SOON)).not.toBeInTheDocument();
+  });
+
+  it("рядом с «истёк» — «Подключиться заново», как на панели инструментов", async () => {
+    const user = await open(inSeconds(1800));
+    expect(screen.getByText(SOON)).toBeInTheDocument();
+    // До истечения кнопки в предупреждении нет: есть только кнопка панели инструментов.
+    expect(within(screen.getByRole("status")).queryByRole("button")).not.toBeInTheDocument();
+    await advance(31 * 60_000);
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent(GONE);
+    vi.mocked(api.connect).mockClear();
+    let finish: (i: ConnectionInfo) => void = () => undefined;
+    vi.mocked(api.connect).mockReturnValueOnce(new Promise((r) => (finish = r)));
+    await user.click(within(status).getByRole("button", { name: "Подключиться заново" }));
+    expect(api.connect).toHaveBeenCalledWith("c1", true);
+    await waitFor(() => expect(within(screen.getByRole("status")).getByRole("button", { name: "Подключиться заново" })).toBeDisabled());
+    finish({ ...INFO, tokenExpiresAt: inSeconds(8 * 3600) });
+    await waitFor(() => expect(screen.queryByText(GONE)).not.toBeInTheDocument());
+  });
+
+  it("кнопка нод — только при праве на ноды", async () => {
+    vi.mocked(api.connect).mockResolvedValue({ ...INFO, capabilities: { ...INFO.capabilities, listNodes: false } });
+    const { unmount } = renderWithClient(<ConnectionPanel connectionId="c1" />);
+    await settled();
+    expect(screen.queryByRole("button", { name: "Ноды" })).not.toBeInTheDocument();
+    unmount();
+    vi.mocked(api.connect).mockResolvedValue({ ...INFO, capabilities: { ...INFO.capabilities, listNodes: true } });
+    renderWithClient(<ConnectionPanel connectionId="c1" />);
+    expect(await screen.findByRole("button", { name: "Ноды" })).toBeInTheDocument();
+    await screen.findByText("3 / 3");
   });
 });
