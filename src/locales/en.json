@@ -161,6 +161,9 @@
       "lost": "The log stream was lost and did not recover in 60 s",
       "badSinceTime": "Invalid start time “{{value}}”: use RFC 3339, for example 2026-10-25T10:00:00Z",
       "saveStopped": "Saving the log was stopped: the connection was closed"
+    },
+    "health": {
+      "annotationNotFound": "The note was deleted or has expired"
     }
   },
   "messages": {

@@ -4,4 +4,5 @@
 pub mod model;
 pub mod rules;
 pub mod snapshot;
+pub mod store;
 pub mod texts;
