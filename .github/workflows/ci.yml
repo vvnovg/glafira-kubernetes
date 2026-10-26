@@ -55,9 +55,15 @@ jobs:
       - name: Стенд — учётные записи и объекты проекта team-a
         run: dev/kind/setup.sh
       - name: Тесты Rust (unit + интеграционные)
+        timeout-minutes: 20
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib --tests
         env:
           GO_IT_KUBECONFIG: ${{ github.workspace }}/dev/kind/out/kubeconfig
+      - name: Стенд при падении — поды и события team-a
+        if: failure()
+        run: |
+          kubectl --context kind-glafira -n team-a get pods -o wide || true
+          kubectl --context kind-glafira -n team-a get events --sort-by=.lastTimestamp || true
 
   platforms:
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')

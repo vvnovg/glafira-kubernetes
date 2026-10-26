@@ -7,7 +7,9 @@ mod common;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use base64::Engine;
 use common::{import, kubeconfig_path, no_cancel};
+use futures::FutureExt;
 use glafira_kubernetes_lib::error::ErrorCode;
 use glafira_kubernetes_lib::k8s::pods::{PodProblem, PodRow, WorkloadRef, list_pods};
 use glafira_kubernetes_lib::k8s::pool::{Connected, open};
@@ -21,6 +23,8 @@ use glafira_kubernetes_lib::watch::{self, Row, RowChange, WatchEvent, WatchKind}
 use tokio_util::sync::CancellationToken;
 
 const NS: &str = "team-a";
+/// Значение ключа `password` Secret `db` из `dev/kind/fixtures.yaml`: в ответах Rust его быть не должно.
+const SECRET: &str = "s3cr3t-value";
 
 async fn connect(context: &str) -> Option<Connected> {
     let path = kubeconfig_path()?;
@@ -28,23 +32,62 @@ async fn connect(context: &str) -> Option<Connected> {
     Some(open(profile, secrets, no_cancel()).await.unwrap())
 }
 
-/// Ждёт, пока `check` не вернёт `Some`, не дольше `limit`.
-async fn until<T, F, Fut>(limit: Duration, mut check: F) -> T
+/// Ждёт, пока `check` не вернёт `Ok`, не дольше `limit`. `Err` — «ещё нет», с описанием того, что
+/// видно сейчас: если время вышло, последнее описание (или ошибка чтения) попадает в сообщение.
+async fn until<T, F, Fut>(what: &str, limit: Duration, mut check: F) -> T
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Option<T>>,
+    Fut: std::future::Future<Output = Result<T, String>>,
 {
+    let mut last = String::from("проверка не успела выполниться");
     let wait = async {
         loop {
-            if let Some(v) = check().await {
-                return v;
+            match check().await {
+                Ok(v) => return v,
+                Err(seen) => last = seen,
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     };
-    tokio::time::timeout(limit, wait)
+    let outcome = tokio::time::timeout(limit, wait).await;
+    match outcome {
+        Ok(v) => v,
+        Err(_) => panic!("не дождались: {what} (до {limit:?}); последнее: {last}"),
+    }
+}
+
+/// Сессия должна завершиться вскоре после отмены.
+async fn finished(task: tokio::task::JoinHandle<()>) {
+    tokio::time::timeout(Duration::from_secs(10), task)
         .await
-        .expect("не дождались")
+        .expect("сессия не завершилась за 10 с после отмены")
+        .unwrap();
+}
+
+/// Значение Secret не должно попасть в ответ ни открытым текстом, ни в base64 (как его хранит API).
+fn assert_no_secret(what: &str, serialized: &str) {
+    let base64 = base64::engine::general_purpose::STANDARD.encode(SECRET);
+    assert!(
+        !serialized.contains(SECRET),
+        "{what}: значение Secret в открытом виде"
+    );
+    assert!(
+        !serialized.contains(&base64),
+        "{what}: значение Secret в base64"
+    );
+}
+
+/// Виды событий watch — для сообщения о том, чего не дождались.
+fn event_kinds(events: &[WatchEvent]) -> Vec<String> {
+    events
+        .iter()
+        .map(|e| match e {
+            WatchEvent::Reset { items, .. } => format!("Reset({})", items.len()),
+            WatchEvent::Changes { changes } => format!("Changes({})", changes.len()),
+            WatchEvent::Polling => "Polling".into(),
+            WatchEvent::Error { error, fatal } => format!("Error({error:?}, fatal={fatal})"),
+        })
+        .collect()
 }
 
 fn by_app<'a>(pods: &'a [PodRow], app: &str) -> Vec<&'a PodRow> {
@@ -78,13 +121,22 @@ async fn problem_pods_are_recognized() {
     let r = c.reader();
     // Kubelet 1.37 пишет CrashLoopBackOff не всегда сразу: бывает, что между первыми перезапусками
     // контейнер остаётся завершённым (статус Error), пока пауза перед перезапуском не вырастет до минут.
-    let pods = until(Duration::from_secs(600), || async {
-        let pods = list_pods(&r, NS, None).await.unwrap().items;
-        by_app(&pods, "crash")
-            .iter()
-            .any(|p| p.status == "CrashLoopBackOff")
-            .then_some(pods)
-    })
+    let pods = until(
+        "под crash в статусе CrashLoopBackOff",
+        Duration::from_secs(600),
+        || async {
+            let pods = list_pods(&r, NS, None).await.unwrap().items;
+            let crash: Vec<_> = by_app(&pods, "crash")
+                .iter()
+                .map(|p| (p.status.clone(), p.restarts))
+                .collect();
+            if crash.iter().any(|(status, _)| status == "CrashLoopBackOff") {
+                Ok(pods)
+            } else {
+                Err(format!("поды crash (статус, перезапуски): {crash:?}"))
+            }
+        },
+    )
     .await;
     let one = |app: &str| by_app(&pods, app)[0].clone();
     let crash = by_app(&pods, "crash")
@@ -153,6 +205,8 @@ async fn workloads_with_details_and_their_pods() {
     let d = workloads::get_workload(&r, NS, WorkloadKind::Deployment, "web")
         .await
         .unwrap();
+    // У web переменная DB_PASSWORD берётся из Secret db: значения в описании нет.
+    assert_no_secret("get_workload web", &serde_json::to_string(&d).unwrap());
     assert_eq!(d.selector.as_deref(), Some("app=web"));
     let history = d.history.unwrap().data.unwrap();
     assert!(history.iter().any(|h| h.current), "{history:?}");
@@ -162,7 +216,8 @@ async fn workloads_with_details_and_their_pods() {
         .map(|e| e.name.as_str())
         .collect();
     assert_eq!(env, ["LOG_LEVEL", "DB_PASSWORD"]);
-    assert!(d.hpa.data.unwrap().is_none() && d.pdb.data.unwrap().is_none());
+    assert!(d.hpa.data.unwrap().is_none(), "HPA у web не задан");
+    assert!(d.pdb.data.unwrap().is_none(), "PDB у web не задан");
     let web_ref = WorkloadRef {
         kind: WorkloadKind::Deployment,
         name: "web".into(),
@@ -176,10 +231,12 @@ async fn workloads_with_details_and_their_pods() {
         y.contains("kind: Deployment") && !y.contains("managedFields"),
         "{y}"
     );
+    assert_no_secret("object_yaml web", &y);
 }
 
 #[tokio::test]
 async fn events_network_config_storage_and_quotas() {
+    use k8s_openapi::api::core::v1::Secret;
     let Some(c) = connect("admin").await else {
         return;
     };
@@ -188,13 +245,22 @@ async fn events_network_config_storage_and_quotas() {
         kind: "Deployment".into(),
         name: "crash".into(),
     };
-    let evs = until(Duration::from_secs(60), || async {
-        let l = events::list_events(&r, NS, Some(&crash)).await.unwrap();
-        l.items
-            .iter()
-            .any(|e| e.reason == "BackOff" && e.kind == "Warning")
-            .then_some(l.items)
-    })
+    let evs = until(
+        "событие BackOff (Warning) у Deployment crash",
+        Duration::from_secs(300),
+        || async {
+            let l = events::list_events(&r, NS, Some(&crash)).await.unwrap();
+            if l.items
+                .iter()
+                .any(|e| e.reason == "BackOff" && e.kind == "Warning")
+            {
+                Ok(l.items)
+            } else {
+                let seen: Vec<_> = l.items.iter().map(|e| (&e.kind, &e.reason)).collect();
+                Err(format!("события (kind, reason): {seen:?}"))
+            }
+        },
+    )
     .await;
     assert!(
         evs.iter().all(|e| e.object.name.starts_with("crash")),
@@ -219,6 +285,16 @@ async fn events_network_config_storage_and_quotas() {
     );
 
     let cfg = configs::get_config(&r, NS).await;
+    // Весь ответ целиком, до того как из него заберут части.
+    assert_no_secret("get_config", &serde_json::to_string(&cfg).unwrap());
+    // Проверка утечки имеет смысл, только пока в кластере лежит именно это значение.
+    let stored: kube::Api<Secret> = kube::Api::namespaced(c.client.clone(), NS);
+    let stored = stored.get("db").await.unwrap().data.unwrap();
+    assert_eq!(
+        stored["password"].0,
+        SECRET.as_bytes(),
+        "Secret db в кластере не совпадает с fixtures.yaml"
+    );
     let cm = cfg.config_maps.data.unwrap();
     assert!(
         cm.iter()
@@ -227,11 +303,6 @@ async fn events_network_config_storage_and_quotas() {
     let secrets = cfg.secrets.data.unwrap();
     let db = secrets.iter().find(|s| s.name == "db").unwrap();
     assert_eq!(db.keys, ["password"]);
-    assert!(
-        !serde_json::to_string(&secrets)
-            .unwrap()
-            .contains("czNjcjN0")
-    );
     let values = configs::config_map_values(&r, NS, "web-config")
         .await
         .unwrap();
@@ -254,6 +325,7 @@ async fn events_network_config_storage_and_quotas() {
         .iter()
         .find(|e| e.resource == "pods")
         .unwrap();
+    assert_eq!(pods.hard, "20", "{pods:?}");
     assert!(pods.used.is_some() && pods.ratio.is_some(), "{pods:?}");
     let lr = &q.limit_ranges.data.unwrap()[0];
     assert!(
@@ -270,22 +342,31 @@ async fn logs_of_a_crashed_and_of_a_running_container() {
     };
     let r = c.reader();
     // Под, у которого уже был предыдущий запуск, и работающий под logger.
-    let (crash, logger) = until(Duration::from_secs(120), || async {
-        let pods = list_pods(&r, NS, None).await.unwrap().items;
-        let crash = by_app(&pods, "crash")
-            .into_iter()
-            .find(|p| p.restarts >= 1)?;
-        let logger = by_app(&pods, "logger").into_iter().find(|p| p.ready == 1)?;
-        Some((crash.name.clone(), logger.name.clone()))
-    })
+    let (crash, logger) = until(
+        "под crash с перезапуском и готовый под logger",
+        Duration::from_secs(120),
+        || async {
+            let pods = list_pods(&r, NS, None).await.unwrap().items;
+            let crash = by_app(&pods, "crash").into_iter().find(|p| p.restarts >= 1);
+            let logger = by_app(&pods, "logger").into_iter().find(|p| p.ready == 1);
+            match (crash, logger) {
+                (Some(crash), Some(logger)) => Ok((crash.name.clone(), logger.name.clone())),
+                (crash, logger) => Err(format!(
+                    "crash с перезапуском: {}, logger готов: {}",
+                    crash.is_some(),
+                    logger.is_some()
+                )),
+            }
+        },
+    )
     .await;
-    let params = |pod: &str, previous: bool, follow: bool| LogParams {
+    let params = |pod: &str, previous: bool, follow: bool, tail_lines: Option<i64>| LogParams {
         connection_id: "c".into(),
         namespace: NS.into(),
         pod: pod.into(),
         container: None,
         previous,
-        tail_lines: None,
+        tail_lines,
         since_seconds: None,
         since_time: None,
         follow,
@@ -295,24 +376,35 @@ async fn logs_of_a_crashed_and_of_a_running_container() {
     let path = dir.path().join("crash.log");
     let source = KubeLogs {
         reader: r.clone(),
-        params: params(&crash, true, false),
+        params: params(&crash, true, false, None),
     };
     // Между перезапусками (статус Error) «предыдущий» запуск kubelet уже мог убрать, и вместо лога
     // приходит одна строка «unable to retrieve container logs»: ждём, пока предыдущий запуск читается.
-    until(Duration::from_secs(300), || async {
-        let n = logs::save(&source, &Matcher::All, &path, false)
-            .await
-            .ok()?;
-        let text = std::fs::read_to_string(&path).unwrap();
-        (n >= 2 && text.contains("starting") && text.contains("boom")).then_some(())
-    })
+    // Ошибки чтения (например, «previous terminated container not found») временные: ждём дальше,
+    // а по истечении времени последняя попадает в сообщение.
+    until(
+        "прошлый запуск crash читается (starting и boom)",
+        Duration::from_secs(300),
+        || async {
+            let n = logs::save(&source, &Matcher::All, &path, false)
+                .await
+                .map_err(|e| format!("чтение лога: {e:?}"))?;
+            let text = std::fs::read_to_string(&path).map_err(|e| format!("файл лога: {e}"))?;
+            if n >= 2 && text.contains("starting") && text.contains("boom") {
+                Ok(())
+            } else {
+                Err(format!("строк: {n}, текст: {text:?}"))
+            }
+        },
+    )
     .await;
 
     let sink: Collected<LogEvent> = Collected::default();
     let cancel = CancellationToken::new();
+    // Хвост — одна строка: остальные две из трёх приходят потоком, а не из накопленного.
     let follow = KubeLogs {
         reader: r.clone(),
-        params: params(&logger, false, true),
+        params: params(&logger, false, true, Some(1)),
     };
     let task = tokio::spawn(logs::run(
         follow,
@@ -321,26 +413,43 @@ async fn logs_of_a_crashed_and_of_a_running_container() {
         sink.clone(),
         cancel.clone(),
     ));
-    let shown = until(Duration::from_secs(20), || {
-        let sink = sink.clone();
-        async move {
-            let lines: Vec<String> = sink
-                .0
-                .lock()
-                .unwrap()
-                .iter()
-                .flat_map(|e| match e {
-                    LogEvent::Lines { lines, .. } => lines.iter().map(|l| l.text.clone()).collect(),
-                    _ => vec![],
-                })
-                .collect();
-            (lines.len() >= 3).then_some(lines)
-        }
-    })
+    let shown = until(
+        "три строки follow (одна из хвоста, две потоком)",
+        Duration::from_secs(20),
+        || {
+            let sink = sink.clone();
+            async move {
+                let lines: Vec<String> = sink
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|e| match e {
+                        LogEvent::Lines { lines, .. } => {
+                            lines.iter().map(|l| l.text.clone()).collect()
+                        }
+                        _ => vec![],
+                    })
+                    .collect();
+                if lines.len() >= 3 {
+                    Ok(lines)
+                } else {
+                    Err(format!("строки: {lines:?}"))
+                }
+            }
+        },
+    )
     .await;
+    assert!(!task.is_finished(), "follow завершился до отмены");
     cancel.cancel();
-    task.await.unwrap();
+    finished(task).await;
     assert!(shown.iter().all(|l| l.starts_with("line ")), "{shown:?}");
+    // Строка потока новее строки из хвоста.
+    let number = |l: &String| -> u64 { l["line ".len()..].trim().parse().unwrap() };
+    assert!(
+        number(shown.last().unwrap()) > number(&shown[0]),
+        "{shown:?}"
+    );
 }
 
 #[tokio::test]
@@ -364,17 +473,24 @@ async fn watch_sees_a_new_pod() {
         sink.clone(),
         cancel.clone(),
     ));
-    until(Duration::from_secs(20), || {
-        let sink = sink.clone();
-        async move {
-            sink.0
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|e| matches!(e, WatchEvent::Reset { items, .. } if !items.is_empty()))
-                .then_some(())
-        }
-    })
+    until(
+        "Reset со списком подов",
+        Duration::from_secs(20),
+        || {
+            let sink = sink.clone();
+            async move {
+                let events = sink.0.lock().unwrap();
+                if events
+                    .iter()
+                    .any(|e| matches!(e, WatchEvent::Reset { items, .. } if !items.is_empty()))
+                {
+                    Ok(())
+                } else {
+                    Err(format!("события: {:?}", event_kinds(&events)))
+                }
+            }
+        },
+    )
     .await;
     let name = format!("watch-probe-{}", uuid::Uuid::new_v4().simple());
     let api: kube::Api<Pod> = kube::Api::namespaced(c.client.clone(), NS);
@@ -384,26 +500,43 @@ async fn watch_sees_a_new_pod() {
     }))
     .unwrap();
     api.create(&Default::default(), &pod).await.unwrap();
-    until(Duration::from_secs(20), || {
-        let (sink, name) = (sink.clone(), name.clone());
-        async move {
-            sink.0
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|e| match e {
+    // Ожидание может упасть: пробный под убирается в любом случае, и только потом паника идёт дальше.
+    let seen = std::panic::AssertUnwindSafe(until(
+        "изменение Upsert с новым подом",
+        Duration::from_secs(20),
+        || {
+            let (sink, name) = (sink.clone(), name.clone());
+            async move {
+                let events = sink.0.lock().unwrap();
+                let found = events.iter().any(|e| match e {
                     WatchEvent::Changes { changes } => changes.iter().any(
                         |c| matches!(c, RowChange::Upsert { row: Row::Pod(p) } if p.name == name),
                     ),
                     _ => false,
-                })
-                .then_some(())
-        }
-    })
+                });
+                if found {
+                    Ok(())
+                } else {
+                    Err(format!("события: {:?}", event_kinds(&events)))
+                }
+            }
+        },
+    ))
+    .catch_unwind()
     .await;
-    api.delete(&name, &Default::default()).await.unwrap();
+    let deleted = api.delete(&name, &Default::default()).await;
     cancel.cancel();
-    task.await.unwrap();
+    finished(task).await;
+    if let Err(panic) = seen {
+        std::panic::resume_unwind(panic);
+    }
+    deleted.unwrap();
+    let events = sink.0.lock().unwrap();
+    assert!(
+        !events.iter().any(|e| matches!(e, WatchEvent::Polling)),
+        "у admin есть право watch, опроса быть не должно: {:?}",
+        event_kinds(&events)
+    );
 }
 
 #[tokio::test]
@@ -425,7 +558,8 @@ async fn cluster_overview_and_the_rights_of_a_service_account() {
     assert!(o.readyz.ok, "readyz читает любой пользователь");
     assert_eq!(o.nodes.error.unwrap().code, ErrorCode::Forbidden);
     let a = access::namespace_access(&r, NS).await.unwrap();
-    assert!(a.resources["pods"].watch && a.resources["pods/log"].get);
+    assert!(a.resources["pods"].watch, "watch подов в team-a");
+    assert!(a.resources["pods/log"].get, "логи подов в team-a");
     assert!(a.resources["deployments.apps"].list);
     let elsewhere = access::namespace_access(&r, "default").await.unwrap();
     assert!(

@@ -1,6 +1,23 @@
 # Объекты проекта team-a для интеграционных тестов чтения (tests/it_read.rs). Образ __HELPER_IMAGE__ —
 # помощник local-path-provisioner, который уже есть на ноде kind: стенд не скачивает образы. В нём только
 # bash, mkdir и rm, поэтому ожидание — `read -t` на пустом канале вместо sleep.
+# ConfigMap и Secret идут первыми: переменные Deployment web берутся из них, и под не стартует без них.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-config
+  namespace: team-a
+data:
+  LOG_LEVEL: debug
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: db
+  namespace: team-a
+stringData:
+  password: s3cr3t-value
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -166,22 +183,6 @@ spec:
             pathType: Prefix
             backend:
               service: { name: web, port: { number: 80 } }
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: web-config
-  namespace: team-a
-data:
-  LOG_LEVEL: debug
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: db
-  namespace: team-a
-stringData:
-  password: s3cr3t-value
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

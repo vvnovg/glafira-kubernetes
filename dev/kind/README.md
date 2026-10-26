@@ -10,11 +10,16 @@ local-path-provisioner (bash), который уже есть на ноде. О�
 
 ```bash
 brew install kind            # или https://kind.sigs.k8s.io/docs/user/quick-start/
+mkdir -p dev/kind/out && export KUBECONFIG="$PWD/dev/kind/out/kind-admin.kubeconfig"
 kind create cluster --name glafira
 dev/kind/setup.sh
 GO_IT_KUBECONFIG="$PWD/dev/kind/out/kubeconfig" cargo test --manifest-path src-tauri/Cargo.toml --tests
 kind delete cluster --name glafira
 ```
+
+`KUBECONFIG` — отдельный файл, `~/.kube/config` не меняется: `kind create cluster` и `kind delete cluster` пишут в него
+(команды идут в одной оболочке, где задан `KUBECONFIG`), а `setup.sh` берёт из него контекст `kind-glafira`. Имя
+`out/kubeconfig` занято: этот файл со своими контекстами `admin` и `dev-token` пишет `setup.sh`.
 
 На свежем кластере `it_read` иногда идёт 4–5 минут: kubelet не всегда сразу показывает CrashLoopBackOff пода `crash`.
 
