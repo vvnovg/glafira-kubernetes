@@ -76,4 +76,15 @@ describe("SettingsPanel", () => {
     expect(useHelpContext.getState().byTab.settings).toBe("getting-started");
     await mcpSettled();
   });
+
+  it("F1 в разделе MCP открывает главу «LLM-ассистенты»", async () => {
+    vi.mocked(api.getLanguageSettings).mockResolvedValue(base);
+    renderWithClient(<SettingsPanel />);
+    const mcp = await screen.findByLabelText("Разрешить MCP-сервер");
+    act(() => mcp.focus());
+    expect(useHelpContext.getState().byTab.settings).toBe("llm-mcp");
+    act(() => screen.getByLabelText("Язык интерфейса").focus());
+    expect(useHelpContext.getState().byTab.settings).toBe("getting-started");
+    await mcpSettled();
+  });
 });
