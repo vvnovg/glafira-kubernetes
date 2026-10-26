@@ -674,14 +674,21 @@
       "parents": "Gateway",
       "backends": "Бэкенды",
       "accepted": "принят",
-      "resolvedRefs": "ссылки"
+      "resolvedRefs": "ссылки",
+      "programmed": "настроен",
+      "certExpired": "истёк",
+      "flagOk": "в порядке",
+      "flagProblem": "проблема"
     },
     "config": {
       "keys": "Ключи",
       "showValues": "Показать значения",
       "hideValues": "Скрыть значения",
-      "binary": "двоичные данные, {{size}} байт",
-      "secretValuesHidden": "Значения Secret не показываются никогда — только имена, типы и ключи."
+      "secretValuesHidden": "Значения Secret не показываются никогда — только имена, типы и ключи.",
+      "binary_one": "двоичные данные, {{count}} байт",
+      "binary_few": "двоичные данные, {{count}} байта",
+      "binary_many": "двоичные данные, {{count}} байт",
+      "binary_other": "двоичные данные, {{count}} байта"
     },
     "storage": {
       "class": "Класс хранилища",

@@ -658,14 +658,19 @@
       "parents": "Gateways",
       "backends": "Backends",
       "accepted": "accepted",
-      "resolvedRefs": "references"
+      "resolvedRefs": "references",
+      "programmed": "programmed",
+      "certExpired": "expired",
+      "flagOk": "OK",
+      "flagProblem": "problem"
     },
     "config": {
       "keys": "Keys",
       "showValues": "Show values",
       "hideValues": "Hide values",
-      "binary": "binary data, {{size}} bytes",
-      "secretValuesHidden": "Secret values are never shown — only names, types and keys."
+      "secretValuesHidden": "Secret values are never shown — only names, types and keys.",
+      "binary_one": "binary data, {{count}} byte",
+      "binary_other": "binary data, {{count}} bytes"
     },
     "storage": {
       "class": "Storage class",

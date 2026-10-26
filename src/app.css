@@ -1,5 +1,8 @@
 /* Экраны чтения кластера (этап O1b); общие стили — в styles.css (перенесён из Kafka-версии). */
 .yaml { background: var(--bg-alt); border: 1px solid var(--border); border-radius: 4px; padding: 8px; overflow: auto; white-space: pre; word-break: normal; }
+/* Значение ConfigMap: свой ограниченный по высоте блок с переносом строк — длинное значение не растягивает таблицу. */
+.config-value { margin: 0; max-height: 240px; white-space: pre-wrap; overflow-wrap: anywhere; }
+th.cap::first-letter { text-transform: uppercase; }
 .kv { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px; }
 .kv code { background: var(--bg-alt); border-radius: 3px; padding: 0 4px; overflow-wrap: anywhere; }
 .problem { color: var(--danger); font-weight: 600; }

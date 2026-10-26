@@ -5,6 +5,12 @@ import { formatAge } from "../../lib/age";
 import { ReadError } from "../common/ReadError";
 import { RefreshControls, useRefreshInterval } from "../common/RefreshControls";
 
+/**
+ * Выделение фазы PVC: ошибка — только `Lost`. `Pending` у класса с `WaitForFirstConsumer` — норма до запуска пода, поэтому
+ * лишь предупреждение; неизвестная или пустая фаза не выделяется.
+ */
+const phaseClass = (phase: string | null) => (phase === "Lost" ? "problem" : phase === "Pending" ? "warn" : undefined);
+
 /** Хранилище проекта (спец. §6.3): PVC — статус, класс, ёмкость, режим доступа, кем смонтирован. */
 export function StorageView({ connectionId, namespace }: { connectionId: string; namespace: string }) {
   const { t } = useTranslation();
@@ -33,7 +39,7 @@ export function StorageView({ connectionId, namespace }: { connectionId: string;
             {q.data.items.map((p) => (
               <tr key={p.name}>
                 <td>{p.name}</td>
-                <td className={p.phase === "Bound" ? undefined : "problem"}>{p.phase ?? "—"}</td>
+                <td className={phaseClass(p.phase)}>{p.phase ?? "—"}</td>
                 <td>{p.class ?? "—"}</td>
                 <td>{p.capacity ?? t("project.storage.requested", { size: p.requested ?? "—" })}</td>
                 <td>{p.accessModes.join(", ") || "—"}</td>

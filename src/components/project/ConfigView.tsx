@@ -20,7 +20,14 @@ function ConfigMapValues({ connectionId, namespace, name }: { connectionId: stri
           <dt>
             <code>{k}</code>
           </dt>
-          <dd>{v.text !== null ? <pre className="yaml">{v.text}</pre> : <span className="muted">{t("project.config.binary", { size: v.binarySize ?? 0 })}</span>}</dd>
+          <dd>
+            {v.text !== null ? (
+              // Длинное значение прокручивается в своём окне и переносится, а не растягивает таблицу.
+              <pre className="yaml config-value">{v.text}</pre>
+            ) : (
+              <span className="muted">{t("project.config.binary", { count: v.binarySize ?? 0 })}</span>
+            )}
+          </dd>
         </div>
       ))}
     </dl>
@@ -65,7 +72,7 @@ export function ConfigView({ connectionId, namespace }: { connectionId: string; 
                         </td>
                         <td>{formatAge(c.created)}</td>
                         <td>
-                          <button type="button" className="link" onClick={() => setShown((s) => (s === c.name ? null : c.name))}>
+                          <button type="button" className="link" aria-expanded={shown === c.name} onClick={() => setShown((s) => (s === c.name ? null : c.name))}>
                             {shown === c.name ? t("project.config.hideValues") : t("project.config.showValues")}
                           </button>
                         </td>
