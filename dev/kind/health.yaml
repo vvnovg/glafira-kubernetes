@@ -1,0 +1,88 @@
+# Объекты проекта team-a для правил проверки (tests/it_health.rs) поверх fixtures.yaml: Service без готовых
+# endpoints, Ingress с отсутствующим Service и Secret TLS, HPA без метрик (на kind нет metrics-server), Route без
+# статуса роутера (на kind его нет), Gateway API с маршрутом на отсутствующий Service, квота, занятая целиком.
+# Квота — последней: в team-a уже два Service (web и orphan), третий она бы не пропустила.
+apiVersion: v1
+kind: Service
+metadata:
+  name: orphan
+  namespace: team-a
+spec:
+  selector: { app: nobody }
+  ports:
+    - port: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: broken
+  namespace: team-a
+spec:
+  tls:
+    - hosts: [broken.example.test]
+      secretName: missing-tls
+  rules:
+    - host: broken.example.test
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: orphan, port: { number: 80 } }
+          - path: /api
+            pathType: Prefix
+            backend:
+              service: { name: missing-svc, port: { number: 8080 } }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: logger
+  namespace: team-a
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: logger }
+  minReplicas: 1
+  maxReplicas: 2
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 80 } }
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: web
+  namespace: team-a
+spec:
+  host: web.apps.example.test
+  to: { kind: Service, name: web }
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: public
+  namespace: team-a
+spec:
+  gatewayClassName: example
+  listeners:
+    - { name: http, port: 80, protocol: HTTP }
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: api
+  namespace: team-a
+spec:
+  parentRefs:
+    - name: public
+  rules:
+    - backendRefs:
+        - { name: missing-svc, port: 8080 }
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: objects
+  namespace: team-a
+spec:
+  hard:
+    services: "2"

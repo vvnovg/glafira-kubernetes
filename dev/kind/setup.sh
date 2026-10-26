@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Стенд интеграционных тестов на kind: проект team-a, сервисная учётная запись glafira-dev с ролью edit
-# только в нём, объекты проекта для тестов чтения (fixtures.yaml) и kubeconfig dev/kind/out/kubeconfig
-# с контекстами admin (сертификат kind) и dev-token (токен glafira-dev, проект team-a).
+# только в нём, объекты проекта для тестов чтения (fixtures.yaml) и проверки (crds.yaml, health.yaml) и
+# kubeconfig dev/kind/out/kubeconfig с контекстами admin (сертификат kind) и dev-token (токен glafira-dev,
+# проект team-a).
 # Перед запуском: kind create cluster --name glafira. KUBECONFIG — отдельный файл, не ~/.kube/config:
 # export KUBECONFIG="$PWD/dev/kind/out/kind-admin.kubeconfig" (до kind create cluster; не out/kubeconfig,
 # его пишет этот скрипт).
@@ -12,6 +13,9 @@ out="$here/out"
 ctx="kind-$cluster"
 k() { kubectl --context "$ctx" "$@"; }
 mkdir -p "$out"
+# CRD Route и Gateway API — до объектов проекта: их виды должны быть уже зарегистрированы.
+k apply -f "$here/crds.yaml"
+k wait --for condition=established --timeout=60s -f "$here/crds.yaml"
 k create namespace team-a --dry-run=client -o yaml | k apply -f -
 k -n team-a create serviceaccount glafira-dev --dry-run=client -o yaml | k apply -f -
 k -n team-a create rolebinding glafira-dev-edit --clusterrole=edit --serviceaccount=team-a:glafira-dev \
@@ -29,6 +33,14 @@ sed "s|__HELPER_IMAGE__|$helper|g" "$here/fixtures.yaml" | k apply -f -
 k -n team-a rollout status deployment/web --timeout=180s
 k -n team-a wait --for=condition=complete job/migrate --timeout=180s
 k -n team-a rollout status deployment/logger --timeout=180s
+k apply -f "$here/health.yaml"
+# Контроллера Gateway API на kind нет: статус маршрута пишет стенд — шлюз маршрут принял, а бэкенда нет.
+k -n team-a patch httproute api --subresource=status --type=merge -p '{"status":{"parents":[{
+  "parentRef":{"name":"public"},"controllerName":"example.com/glafira-stand","conditions":[
+  {"type":"Accepted","status":"True","reason":"Accepted","message":"accepted","observedGeneration":1,
+   "lastTransitionTime":"2026-10-26T00:00:00Z"},
+  {"type":"ResolvedRefs","status":"False","reason":"BackendNotFound","message":"Service missing-svc not found",
+   "observedGeneration":1,"lastTransitionTime":"2026-10-26T00:00:00Z"}]}]}}'
 token="$(k -n team-a create token glafira-dev --duration=24h)"
 kind get kubeconfig --name "$cluster" > "$out/kubeconfig"
 chmod 600 "$out/kubeconfig"
