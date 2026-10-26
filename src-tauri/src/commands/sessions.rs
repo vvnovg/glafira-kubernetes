@@ -2,6 +2,7 @@ use tauri::State;
 use tauri::ipc::Channel;
 
 use crate::error::{AppResult, ErrorCode};
+use crate::logs::{KubeLogs, LogEvent, LogParams, Matcher};
 use crate::sessions::{SessionGuard, Sink};
 use crate::state::AppState;
 use crate::watch::{WatchEvent, WatchKind, WatchParams};
@@ -104,6 +105,63 @@ pub async fn start_watch_impl(
     Ok(id)
 }
 
+/// Логи контейнера (спец. §6.6); возвращает id сессии. Неверный regex — ошибка сразу.
+#[tauri::command]
+pub async fn start_logs(
+    state: State<'_, AppState>,
+    params: LogParams,
+    on_event: Channel<LogEvent>,
+) -> AppResult<String> {
+    start_logs_impl(state.inner(), params, on_event).await
+}
+
+pub async fn start_logs_impl(
+    st: &AppState,
+    params: LogParams,
+    sink: impl Sink<LogEvent>,
+) -> AppResult<String> {
+    let matcher = Matcher::new(params.filter.as_ref())?;
+    let reader = st
+        .read_in(&params.connection_id, &params.namespace, |c| async move {
+            Ok(c.reader())
+        })
+        .await?;
+    let follow = params.follow;
+    let (id, cancel) = st.sessions.register(&params.connection_id);
+    let guard = SessionGuard {
+        sessions: st.sessions.clone(),
+        id: id.clone(),
+    };
+    tokio::spawn(async move {
+        let _guard = guard;
+        crate::logs::run(KubeLogs { reader, params }, follow, matcher, sink, cancel).await;
+    });
+    Ok(id)
+}
+
+/// Сохраняет лог с теми же параметрами (без follow) в файл `path`; возвращает число строк.
+#[tauri::command]
+pub async fn save_logs(
+    state: State<'_, AppState>,
+    params: LogParams,
+    path: String,
+    timestamps: bool,
+) -> AppResult<u64> {
+    let matcher = Matcher::new(params.filter.as_ref())?;
+    let mut params = params;
+    params.follow = false;
+    let (id, ns) = (params.connection_id.clone(), params.namespace.clone());
+    state
+        .read_in(&id, &ns, |c| async move {
+            let logs = KubeLogs {
+                reader: c.reader(),
+                params,
+            };
+            crate::logs::save(&logs, &matcher, std::path::Path::new(&path), timestamps).await
+        })
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,6 +214,34 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(5), ended)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_regex_fails_before_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let st =
+            AppState::new(dir.path(), Arc::new(crate::secrets::MemoryStore::default())).unwrap();
+        let params = LogParams {
+            connection_id: "a".into(),
+            namespace: "team-a".into(),
+            pod: "web-1".into(),
+            container: None,
+            previous: false,
+            tail_lines: None,
+            since_seconds: None,
+            since_time: None,
+            follow: true,
+            filter: Some(crate::logs::LogFilter {
+                text: "[".into(),
+                regex: true,
+                case_sensitive: false,
+            }),
+        };
+        let e = start_logs_impl(&st, params, Collect::default())
+            .await
+            .unwrap_err();
+        assert_eq!(e.key, "errors.logs.badRegex");
+        assert!(st.sessions.is_empty());
     }
 
     #[tokio::test]

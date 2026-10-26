@@ -21,7 +21,7 @@
 | `src-tauri/build.rs` | `src-tauri/build.rs` | `8bbd0bd` | как есть |
 | `src-tauri/capabilities/default.json` | `src-tauri/capabilities/default.json` | `8bbd0bd` | как есть |
 | `index.html` | `index.html` | `8bbd0bd` | адаптирован: заголовок |
-| `.gitignore` | `.gitignore` | `8bbd0bd` | адаптирован: без путей Kafka-версии |
+| `.gitignore` | `.gitignore` | `8bbd0bd` | адаптирован: без путей Kafka-версии; `/logs` — только каталог в корне, не модули `logs/` |
 | `NOTICE` | `NOTICE` | `8bbd0bd` | адаптирован: имя продукта и товарные знаки |
 | `TRADEMARK.md` | `TRADEMARK.md` | `8bbd0bd` | адаптирован: имя продукта и товарные знаки |
 | `SECURITY.md` | `SECURITY.md` | `8bbd0bd` | адаптирован: имя продукта и товарные знаки |

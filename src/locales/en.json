@@ -140,6 +140,10 @@
     },
     "watch": {
       "cronJobPods": "Pods of a CronJob are read by the list, not by watch"
+    },
+    "logs": {
+      "badRegex": "Invalid regular expression: {{error}}",
+      "lost": "The log stream was lost and did not recover in 60 s"
     }
   },
   "messages": {

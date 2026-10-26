@@ -7,6 +7,7 @@ mod dock_name;
 pub mod error;
 pub mod k8s;
 pub mod logging;
+pub mod logs;
 pub mod platform;
 pub mod policy;
 pub mod product;
@@ -83,6 +84,8 @@ pub fn run() {
             commands::settings::get_policy_status,
             commands::sessions::stop_session,
             commands::sessions::start_watch,
+            commands::sessions::start_logs,
+            commands::sessions::save_logs,
             commands::cluster::get_cluster_overview,
             commands::cluster::list_nodes,
             commands::cluster::get_node,
