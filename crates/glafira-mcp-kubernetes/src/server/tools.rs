@@ -12,7 +12,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::KubeServer;
+use super::{KubeServer, mask_text, text_masker};
 use crate::mask::Masker;
 use crate::model::*;
 use crate::observe::{self, Observation};
@@ -319,21 +319,6 @@ fn event_items(b: &mut EventsBody) -> &mut Vec<Event> {
 
 fn events_of(o: &mut Observation) -> &mut Vec<observe::Event> {
     &mut o.events
-}
-
-/// Маскировщик без имён полей: годится только для `patterns` (регулярное выражение пар не
-/// собирается).
-fn text_masker() -> Masker {
-    Masker::new(Vec::<String>::new())
-}
-
-/// Встроенные шаблоны §10.3 поверх текста из кластера (сообщения, пробы, образы). Только
-/// шаблоны, без пар `имя=значение`: в прозе они портят диагностику («Failed to get secret:
-/// not found»). Возвращает число замен.
-fn mask_text(m: &Masker, s: &mut String) -> usize {
-    let (masked, n) = m.patterns(s);
-    *s = masked;
-    n
 }
 
 fn mask_opt(m: &Masker, s: &mut Option<String>) -> usize {

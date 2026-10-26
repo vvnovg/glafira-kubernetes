@@ -1009,6 +1009,8 @@ enum Mode {
     Capped,
     /// В тексте кластера лежат секреты.
     Leaky,
+    /// Проверка отдаёт эту запись (запущенную человеком, например) вместо записи `Fake`.
+    Run(Box<HealthRun>),
 }
 
 struct Odd {
@@ -1256,7 +1258,13 @@ impl Backend for Odd {
     }
 
     fn health(&self, op: HealthOp) -> BoxFuture<'_, Result<HealthOutput, BackendError>> {
-        self.fake.health(op)
+        match (&self.mode, &op) {
+            (Mode::Run(run), HealthOp::Check { .. }) => {
+                let run = HealthRun::clone(run);
+                Box::pin(async move { Ok(HealthOutput::Run(run)) })
+            }
+            _ => self.fake.health(op),
+        }
     }
 }
 
@@ -1659,6 +1667,215 @@ async fn paging_by_run_id_does_not_take_cluster_slots() {
     for h in busy {
         h.await.unwrap();
     }
+}
+
+/// Запись проверки по проектам `projects` (до предела — `total`) с находкой `check.partial` и
+/// по находке в team-a и team-b; в `check.partial` — `params`, а текст — как собирает его
+/// приложение.
+fn wide_run(projects: &[&str], total: usize, params: Value, details: &str) -> HealthRun {
+    let mut partial = finding(
+        "check.partial",
+        Severity::Info,
+        target(TargetKind::Cluster, None, None),
+        false,
+        details.into(),
+    );
+    partial.title = "The check is incomplete".into();
+    partial.params = params.as_object().cloned().unwrap();
+    let mut run = sample_run(false);
+    run.findings = vec![
+        partial,
+        finding(
+            "pod.crashLoop",
+            Severity::Critical,
+            target(TargetKind::Workload, Some("team-a"), Some("web")),
+            false,
+            "d".into(),
+        ),
+        finding(
+            "pod.crashLoop",
+            Severity::Critical,
+            target(TargetKind::Workload, Some("team-b"), Some("other")),
+            false,
+            "d".into(),
+        ),
+    ];
+    run.scope.projects = projects.iter().map(|p| p.to_string()).collect();
+    run.scope.projects_total = total;
+    run
+}
+
+fn partial_params(gaps: Value) -> Value {
+    json!({
+        "projectsChecked": 2, "projectsTotal": 2, "projectLimit": false,
+        "podLimit": false, "timedOut": false,
+        "gapCount": gaps.as_array().unwrap().len(), "gaps": gaps,
+    })
+}
+
+const PARTIAL_DETAILS: &str = "Some objects were not checked: not read: team-b/secrets: FORBIDDEN, nodes: FORBIDDEN. Findings may be missing for them.";
+
+/// Находка, чей текст из кластера несёт секреты в `title`, `details` и `params`.
+fn leaky_finding() -> HealthFinding {
+    let mut f = finding(
+        "container.imagePull",
+        Severity::Warning,
+        target(TargetKind::Workload, Some("team-a"), Some("web")),
+        false,
+        format!("rejected {JWT}; pulling {CRED_IMAGE}"),
+    );
+    f.title = format!("pull failed for {CRED_IMAGE}");
+    f.params = json!({
+        "message": format!("rejected {JWT}"),
+        "image": CRED_IMAGE,
+        "containers": ["Authorization: Bearer abc.def-123", {"image": CRED_IMAGE, "restarts": 3}],
+        "reason": "ErrImagePull",
+        "count": 2,
+        "retry": true,
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    f
+}
+
+#[tokio::test]
+async fn cluster_text_of_findings_goes_through_the_builtin_patterns() {
+    let mut run = sample_run(false);
+    let mut prose = finding(
+        "pod.pending",
+        Severity::Warning,
+        target(TargetKind::Workload, Some("team-a"), Some("api")),
+        false,
+        "Failed to get secret: not found".into(),
+    );
+    prose.params = json!({"message": "Failed to get secret: not found"})
+        .as_object()
+        .cloned()
+        .unwrap();
+    run.findings = vec![leaky_finding(), prose];
+    let e = env_over(Arc::new(Odd {
+        fake: Fake::new(),
+        mode: Mode::Run(Box::new(run)),
+    }))
+    .await;
+    let c = client(&e.ep).await;
+    let v = ok(call(&c, "health_check", json!({"connectionId": "c1"})).await);
+    let f = &v["findings"]["items"][0];
+    assert_eq!(f["title"], format!("pull failed for {CRED_IMAGE_MASKED}"));
+    assert_eq!(
+        f["details"],
+        format!("rejected ***; pulling {CRED_IMAGE_MASKED}")
+    );
+    assert_eq!(
+        f["params"],
+        json!({
+            "message": "rejected ***",
+            "image": CRED_IMAGE_MASKED,
+            "containers": ["Authorization: Bearer ***", {"image": CRED_IMAGE_MASKED, "restarts": 3}],
+            "reason": "ErrImagePull",
+            "count": 2,
+            "retry": true,
+        })
+    );
+    // Проза без секретов остаётся как есть: «secret: not found» — не пара имя=значение.
+    let f = &v["findings"]["items"][1];
+    assert_eq!(f["details"], "Failed to get secret: not found");
+    assert_eq!(f["params"]["message"], "Failed to get secret: not found");
+    // Семь замен: title, details (две), message, image, containers (две); `masked` в ответе нет.
+    assert_masked(&v, 7);
+    assert!(v.get("masked").is_none() && f.get("masked").is_none());
+}
+
+#[tokio::test]
+async fn a_run_wider_than_the_llm_scope_does_not_name_foreign_projects() {
+    let params = partial_params(json!(["team-b/secrets: FORBIDDEN", "nodes: FORBIDDEN"]));
+    let run = wide_run(&["team-a", "team-b"], 2, params, PARTIAL_DETAILS);
+    let e = env_over(Arc::new(Odd {
+        fake: Fake::new(),
+        mode: Mode::Run(Box::new(run)),
+    }))
+    .await;
+    let c = client(&e.ep).await;
+    let v = ok(call(&c, "health_check", json!({"connectionId": "c1"})).await);
+    assert_eq!(v["scope"]["projects"], json!(["team-a"]));
+    assert_eq!(v["scope"]["projectsTotal"], 1);
+    // Поды и ноды — итог проверки; их число проекта не называет.
+    assert_eq!(
+        (v["scope"]["pods"].as_u64(), v["scope"]["nodes"].as_u64()),
+        (Some(10), Some(3))
+    );
+    let items = v["findings"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2, "check.partial и находка team-a");
+    let partial = &items[0];
+    assert_eq!(partial["ruleId"], "check.partial");
+    assert_eq!(
+        partial["params"],
+        json!({
+            "projectsChecked": 1, "projectsTotal": 1, "projectLimit": false,
+            "podLimit": false, "timedOut": false,
+            "gapCount": 1, "gaps": ["nodes: FORBIDDEN"],
+        })
+    );
+    assert_eq!(
+        partial["details"],
+        "Some objects were not checked: not read: nodes: FORBIDDEN. Findings may be missing for them."
+    );
+    let text = serde_json::to_string(&v).unwrap();
+    assert!(!text.contains("team-b"), "{text}");
+}
+
+#[tokio::test]
+async fn a_run_over_all_projects_is_returned_as_it_is() {
+    let params = partial_params(json!(["team-b/secrets: FORBIDDEN", "nodes: FORBIDDEN"]));
+    let run = wide_run(&["team-a", "team-b"], 2, params.clone(), PARTIAL_DETAILS);
+    let e = env_over(Arc::new(Odd {
+        fake: Fake::new(),
+        mode: Mode::Run(Box::new(run)),
+    }))
+    .await;
+    let c = client(&e.ep).await;
+    let v = ok(call(&c, "health_check", json!({"connectionId": "c2"})).await);
+    assert_eq!(v["scope"]["projects"], json!(["team-a", "team-b"]));
+    assert_eq!(v["scope"]["projectsTotal"], 2);
+    let items = v["findings"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 3);
+    assert_eq!(items[0]["params"], params);
+    assert_eq!(items[0]["details"], PARTIAL_DETAILS);
+    assert_eq!(items[2]["target"]["namespace"], "team-b");
+}
+
+#[tokio::test]
+async fn check_partial_left_without_a_reason_in_the_scope_is_dropped() {
+    // Единственная причина — проект вне области: для LLM такой проверки «неполной» не было.
+    let mut params = partial_params(json!(["team-b/secrets: FORBIDDEN"]));
+    params["projectsChecked"] = json!(50);
+    params["projectsTotal"] = json!(80);
+    params["projectLimit"] = json!(true);
+    let details = "Some objects were not checked: only 50 of 80 projects were checked (limit 50); not read: team-b/secrets: FORBIDDEN. Findings may be missing for them.";
+    let run = wide_run(&["team-a", "team-b"], 80, params, details);
+    let e = env_over(Arc::new(Odd {
+        fake: Fake::new(),
+        mode: Mode::Run(Box::new(run)),
+    }))
+    .await;
+    let c = client(&e.ep).await;
+    let v = ok(call(&c, "health_check", json!({"connectionId": "c1"})).await);
+    assert_eq!(v["scope"]["projects"], json!(["team-a"]));
+    assert_eq!(v["scope"]["projectsTotal"], 1);
+    assert_eq!(v["findings"]["total"], 1);
+    let rules: Vec<_> = v["summary"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["ruleId"].as_str().unwrap())
+        .collect();
+    assert_eq!(rules, ["pod.crashLoop"]);
+    let text = serde_json::to_string(&v).unwrap();
+    assert!(
+        !text.contains("team-b") && !text.contains("check.partial"),
+        "{text}"
+    );
 }
 
 fn note(target: Value, title: &str) -> Value {

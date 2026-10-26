@@ -11,6 +11,7 @@ use rmcp::model::{Implementation, InitializeRequestParams, InitializeResult, Ser
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, tool_handler};
 
+use crate::mask::Masker;
 use crate::model::{Backend, ReadOp, ReadOutput, Scope, not_allowed};
 
 mod health_tools;
@@ -73,6 +74,21 @@ pub async fn start(
         KubeServer::new(session, backend.clone(), options.clone())
     })
     .await
+}
+
+/// Маскировщик без имён полей: годится только для `patterns` (регулярное выражение пар не
+/// собирается).
+fn text_masker() -> Masker {
+    Masker::new(Vec::<String>::new())
+}
+
+/// Встроенные шаблоны §10.3 поверх текста из кластера (сообщения, пробы, образы, находки
+/// проверки). Только шаблоны, без пар `имя=значение`: в прозе они портят диагностику
+/// («Failed to get secret: not found»). Возвращает число замен.
+fn mask_text(m: &Masker, s: &mut String) -> usize {
+    let (masked, n) = m.patterns(s);
+    *s = masked;
+    n
 }
 
 #[derive(Clone)]

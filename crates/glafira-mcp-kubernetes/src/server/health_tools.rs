@@ -1,6 +1,9 @@
 //! Инструменты проверки кластера и замечаний (спец. §8, §10.4). Кластер они не меняют: проверка
 //! только читает, замечания пишутся в Glafira и видны человеку рядом с объектами. Находки и
-//! замечания вне области LLM (проекты не из `llmNamespaces`) в ответ не попадают.
+//! замечания вне области LLM (проекты не из `llmNamespaces`) в ответ не попадают, текст находок из
+//! кластера проходит встроенные шаблоны маскировки §10.3.
+
+use std::collections::BTreeSet;
 
 use glafira_mcp_core::fit::{self, Page, TRUNCATED_HINT};
 use glafira_mcp_core::{BackendError, to_value};
@@ -10,11 +13,12 @@ use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, tool, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
-use super::KubeServer;
+use super::{KubeServer, mask_text, text_masker};
 use crate::health::*;
-use crate::model::not_allowed;
+use crate::mask::Masker;
+use crate::model::{Scope, not_allowed};
 
 pub const MAX_AGE_SECONDS_DEFAULT: u32 = 300;
 pub const MAX_AGE_SECONDS_MAX: u32 = 3600;
@@ -139,6 +143,164 @@ fn newest_first(items: &mut [AnnotationView]) {
     });
 }
 
+/// Строки внутри JSON встроенными шаблонами §10.3: массивы и объекты — рекурсивно, ключи
+/// остаются как есть.
+fn mask_json(m: &Masker, v: &mut Value) {
+    match v {
+        Value::String(s) => {
+            mask_text(m, s);
+        }
+        Value::Array(items) => items.iter_mut().for_each(|x| mask_json(m, x)),
+        Value::Object(map) => map.values_mut().for_each(|x| mask_json(m, x)),
+        _ => {}
+    }
+}
+
+/// `title`, `details` и строки в `params` находок несут текст из кластера (причины и сообщения
+/// условий и состояний контейнеров, сообщения Route, Gateway и ClusterOperator, образы): через
+/// встроенные шаблоны §10.3, как в остальных инструментах чтения. Тихо, без счётчика.
+fn mask_findings(m: &Masker, findings: &mut [HealthFinding]) {
+    for f in findings {
+        mask_text(m, &mut f.title);
+        mask_text(m, &mut f.details);
+        f.params.values_mut().for_each(|v| mask_json(m, v));
+    }
+}
+
+/// Проверку мог запустить человек по большему числу проектов, чем видит LLM, и приложение
+/// отдаёт её целиком. Здесь она сужается до области подключения: проекты вне её неотличимы от
+/// отсутствующих (спец. §10.2). Область «все проекты» проверку не меняет.
+///
+/// Находки вне области и чужие проекты в `scope.projects` отбрасываются. `scope.projects_total`
+/// считает проекты области: проверенные и не проверенные из-за предела, но не больше самой
+/// области. `scope.pods` и `scope.nodes` — итог всей проверки, их число проекта не называет и
+/// остаётся прежним.
+fn limit_to_scope(run: &mut HealthRun, scope: &Scope) {
+    let Some(allowed) = &scope.namespaces else {
+        return;
+    };
+    run.findings.retain(|f| in_scope(&f.target, scope));
+    let before = run.scope.projects.len();
+    run.scope.projects.retain(|ns| allowed.contains(ns));
+    let checked = run.scope.projects.len();
+    let skipped = run.scope.projects_total.saturating_sub(before);
+    let total = (checked + skipped).min(allowed.len()).max(checked);
+    let foreign = before != checked || total != run.scope.projects_total;
+    run.scope.projects_total = total;
+    // Числа в `check.partial` пересчитываются, только если проверка охватила чужие проекты.
+    let counts = foreign.then_some((checked, total));
+    run.findings
+        .retain_mut(|f| f.rule_id != "check.partial" || limit_partial(f, allowed, counts));
+}
+
+/// `check.partial` без чужих проектов: пробелы `<проект>/<часть>: <код>` вне области убраны,
+/// `gapCount` уменьшен на них, `projectsChecked`, `projectsTotal` и `projectLimit` — по
+/// проектам области (`counts`). Если текст изменился, `details` собирается заново из `params`.
+/// `false` — находка осталась без причины (ни предела, ни дедлайна, ни пробелов) и отбрасывается:
+/// у проверки только по проектам области её не было бы.
+fn limit_partial(
+    f: &mut HealthFinding,
+    allowed: &BTreeSet<String>,
+    counts: Option<(usize, usize)>,
+) -> bool {
+    let before = f.params.clone();
+    let removed = match f.params.get_mut("gaps") {
+        Some(Value::Array(gaps)) => {
+            let listed = gaps.len();
+            gaps.retain(|g| {
+                g.as_str()
+                    .and_then(|g| g.split_once('/'))
+                    .is_none_or(|(ns, _)| allowed.contains(ns))
+            });
+            listed - gaps.len()
+        }
+        _ => 0,
+    };
+    if removed > 0
+        && let Some(n) = f.params.get("gapCount").and_then(Value::as_u64)
+    {
+        f.params
+            .insert("gapCount".into(), json!(n.saturating_sub(removed as u64)));
+    }
+    if let Some((checked, total)) = counts {
+        for (key, value) in [
+            ("projectsChecked", json!(checked)),
+            ("projectsTotal", json!(total)),
+            ("projectLimit", json!(checked < total)),
+        ] {
+            if let Some(v) = f.params.get_mut(key) {
+                *v = value;
+            }
+        }
+    }
+    if f.params == before {
+        return true;
+    }
+    let flag = |k: &str| f.params.get(k).and_then(Value::as_bool) == Some(true);
+    let counted = f
+        .params
+        .get("gapCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let listed = f
+        .params
+        .get("gaps")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let gaps = counted.max(listed as u64);
+    if !flag("projectLimit") && !flag("podLimit") && !flag("timedOut") && gaps == 0 {
+        return false;
+    }
+    f.details = partial_details(&f.params);
+    true
+}
+
+/// Пояснение `check.partial` теми же словами, что собирает приложение (`texts::english`): после
+/// сужения до области прежний текст называл бы чужие проекты.
+fn partial_details(p: &Map<String, Value>) -> String {
+    let flag = |k: &str| p.get(k).and_then(Value::as_bool) == Some(true);
+    let show = |k: &str| match p.get(k) {
+        Some(Value::String(s)) => s.clone(),
+        Some(v) => v.to_string(),
+        None => String::new(),
+    };
+    let mut parts = Vec::new();
+    if flag("projectLimit") {
+        parts.push(format!(
+            "only {} of {} projects were checked (limit 50)",
+            show("projectsChecked"),
+            show("projectsTotal")
+        ));
+    }
+    if flag("podLimit") {
+        parts.push("only the first 5000 pods were checked".to_string());
+    }
+    if flag("timedOut") {
+        parts.push("the check stopped at its 45 s deadline".to_string());
+    }
+    if p.get("gapCount").and_then(Value::as_u64).unwrap_or(0) > 0 {
+        let gaps = match p.get("gaps") {
+            Some(Value::Array(items)) => items
+                .iter()
+                .map(|g| match g {
+                    Value::String(s) => s.clone(),
+                    v => v.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+            _ => String::new(),
+        };
+        parts.push(format!("not read: {gaps}"));
+    }
+    match parts.is_empty() {
+        true => "Some objects were not checked: findings may be missing for them.".to_string(),
+        false => format!(
+            "Some objects were not checked: {}. Findings may be missing for them.",
+            parts.join("; ")
+        ),
+    }
+}
+
 /// Аргументы вызова для журнала.
 fn args<T: Serialize>(p: &T) -> Value {
     serde_json::to_value(p).unwrap_or(Value::Null)
@@ -208,8 +370,10 @@ impl KubeServer {
             return Err(BackendError::unexpected());
         };
         // Проверка, которую запустил человек, могла охватить и проекты вне области LLM.
-        run.findings.retain(|f| in_scope(&f.target, &scope));
-        run.scope.projects.retain(|ns| scope.allows(ns));
+        limit_to_scope(&mut run, &scope);
+        // Текст находок — из кластера: маскировка до сводки, отбора и обрезки под предел размера,
+        // чтобы итоги и размер считались по тому, что уйдёт модели.
+        mask_findings(&text_masker(), &mut run.findings);
         let filter = FindingFilter {
             rule_ids: p.rule_ids.clone(),
             min_severity: p.min_severity,
@@ -432,6 +596,127 @@ mod tests {
             created_at_ms: created,
             updated_at_ms: updated,
         }
+    }
+
+    fn scope_of(names: &[&str]) -> Scope {
+        Scope {
+            namespaces: Some(names.iter().map(|n| n.to_string()).collect()),
+        }
+    }
+
+    fn partial(params: Value, details: &str) -> HealthFinding {
+        HealthFinding {
+            key: "check.partial:cluster".into(),
+            rule_id: "check.partial".into(),
+            severity: Severity::Info,
+            target: Target {
+                kind: TargetKind::Cluster,
+                namespace: None,
+                name: None,
+                workload_kind: None,
+            },
+            title: "The check is incomplete".into(),
+            details: details.into(),
+            params: params.as_object().cloned().unwrap(),
+            ignored: false,
+        }
+    }
+
+    fn run_of(projects: &[&str], total: usize, finding: HealthFinding) -> HealthRun {
+        HealthRun {
+            run_id: "r".into(),
+            started_at_ms: 0,
+            duration_ms: 0,
+            trigger: json!({ "kind": "ui" }),
+            environment: "prod".into(),
+            incomplete: false,
+            reused: false,
+            scope: HealthScope {
+                projects: projects.iter().map(|p| p.to_string()).collect(),
+                projects_total: total,
+                pods: 7,
+                nodes: None,
+            },
+            findings: vec![finding],
+        }
+    }
+
+    #[test]
+    fn partial_details_follow_the_wording_of_the_app() {
+        let all = json!({
+            "projectLimit": true, "projectsChecked": 2, "projectsTotal": 3,
+            "podLimit": true, "timedOut": true,
+            "gaps": ["nodes: FORBIDDEN", "a/secrets: FORBIDDEN"], "gapCount": 2,
+        });
+        assert_eq!(
+            partial_details(all.as_object().unwrap()),
+            "Some objects were not checked: only 2 of 3 projects were checked (limit 50); only the first 5000 pods were checked; the check stopped at its 45 s deadline; not read: nodes: FORBIDDEN, a/secrets: FORBIDDEN. Findings may be missing for them."
+        );
+        assert_eq!(
+            partial_details(&Map::new()),
+            "Some objects were not checked: findings may be missing for them."
+        );
+    }
+
+    #[test]
+    fn a_project_limit_keeps_the_unchecked_projects_of_the_scope() {
+        // Человек проверил 3 проекта из 80; в области LLM их три, проверены два.
+        let f = partial(
+            json!({"projectLimit": true, "projectsChecked": 3, "projectsTotal": 80,
+                   "podLimit": false, "timedOut": false, "gaps": [], "gapCount": 0}),
+            "Some objects were not checked: only 3 of 80 projects were checked (limit 50). Findings may be missing for them.",
+        );
+        let mut run = run_of(&["a", "b", "x"], 80, f);
+        limit_to_scope(&mut run, &scope_of(&["a", "b", "c"]));
+        assert_eq!(run.scope.projects, ["a", "b"]);
+        assert_eq!((run.scope.projects_total, run.scope.pods), (3, 7));
+        let f = &run.findings[0];
+        assert_eq!(
+            (
+                f.params["projectsChecked"].as_u64(),
+                f.params["projectsTotal"].as_u64()
+            ),
+            (Some(2), Some(3))
+        );
+        assert_eq!(f.params["projectLimit"], true);
+        assert_eq!(
+            f.details,
+            "Some objects were not checked: only 2 of 3 projects were checked (limit 50). Findings may be missing for them."
+        );
+    }
+
+    #[test]
+    fn a_run_over_the_scope_only_is_not_touched() {
+        let params = json!({"projectLimit": false, "projectsChecked": 1, "projectsTotal": 1,
+                            "podLimit": false, "timedOut": false,
+                            "gaps": ["a/secrets: FORBIDDEN"], "gapCount": 1});
+        let f = partial(params.clone(), "text of the app");
+        let mut run = run_of(&["a"], 1, f.clone());
+        limit_to_scope(&mut run, &scope_of(&["a"]));
+        assert_eq!(run.findings, [f]);
+        assert_eq!(run.scope.projects_total, 1);
+        let mut run = run_of(&["a", "b"], 2, partial(params, "text of the app"));
+        limit_to_scope(&mut run, &Scope::default());
+        assert_eq!((run.scope.projects.len(), run.scope.projects_total), (2, 2));
+        assert_eq!(run.findings[0].details, "text of the app");
+    }
+
+    #[test]
+    fn strings_are_masked_at_any_depth_and_keys_stay() {
+        let mut v = json!({
+            "a": "Authorization: Bearer abc.def-123",
+            "b": ["https://ci:hunter2@host/x", {"c": ["Bearer xyz"]}],
+            "n": 1, "t": true, "z": null,
+        });
+        mask_json(&text_masker(), &mut v);
+        assert_eq!(
+            v,
+            json!({
+                "a": "Authorization: Bearer ***",
+                "b": ["https://ci:***@host/x", {"c": ["Bearer ***"]}],
+                "n": 1, "t": true, "z": null,
+            })
+        );
     }
 
     #[test]
