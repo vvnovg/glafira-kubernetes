@@ -714,7 +714,6 @@
     "tail": "Последних строк",
     "since": "Начиная с",
     "sinceAll": "начала",
-    "sinceLast": "последних {{minutes}} мин",
     "follow": "Следить за новыми строками",
     "timestamps": "Время строк",
     "filter": "Фильтр",
@@ -729,6 +728,14 @@
     },
     "save": "Сохранить в файл…",
     "saved": "Сохранено строк: {{count}} — {{path}}",
-    "truncated": "(строка обрезана)"
+    "truncated": "(строка обрезана)",
+    "list": "Строки лога: {{name}}",
+    "sinceMinutes": "{{value}} мин",
+    "sinceHours": "{{value}} ч",
+    "followPrevious": "Предыдущий запуск уже завершён — следить не за чем",
+    "dropped_one": "В окне последние {{max, number}} строк, отброшена {{count, number}} более ранняя строка",
+    "dropped_few": "В окне последние {{max, number}} строк, отброшено {{count, number}} более ранние строки",
+    "dropped_many": "В окне последние {{max, number}} строк, отброшено {{count, number}} более ранних строк",
+    "dropped_other": "В окне последние {{max, number}} строк, отброшено {{count, number}} более ранней строки"
   }
 }

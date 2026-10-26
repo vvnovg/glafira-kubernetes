@@ -18,5 +18,8 @@ th.cap::first-letter { text-transform: uppercase; }
 .facts dt { color: var(--muted); }
 .facts dd { margin: 0; overflow-wrap: anywhere; }
 .log-lines { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; min-height: 360px; }
-.log-line { position: absolute; left: 0; right: 0; padding: 0 8px; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+/* Список прокручивается с клавиатуры, поэтому фокус на нём виден. */
+.log-lines:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* Строка не обрезается: `min-width: max-content` растягивает её за край окна, и `.vlist` (overflow: auto) прокручивается вбок. */
+.log-line { position: absolute; left: 0; right: 0; min-width: max-content; padding: 0 8px; white-space: pre; }
 input.narrow { width: 70px; }

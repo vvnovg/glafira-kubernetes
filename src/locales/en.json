@@ -696,7 +696,6 @@
     "tail": "Last lines",
     "since": "Since",
     "sinceAll": "the start",
-    "sinceLast": "last {{minutes}} min",
     "follow": "Follow new lines",
     "timestamps": "Line timestamps",
     "filter": "Filter",
@@ -711,6 +710,12 @@
     },
     "save": "Save to file…",
     "saved": "Lines saved: {{count}} — {{path}}",
-    "truncated": "(line truncated)"
+    "truncated": "(line truncated)",
+    "list": "Log lines: {{name}}",
+    "sinceMinutes": "{{value}} min",
+    "sinceHours": "{{value}} h",
+    "followPrevious": "The previous run has already finished — there is nothing to follow",
+    "dropped_one": "The window keeps the last {{max, number}} lines; {{count, number}} older line was dropped",
+    "dropped_other": "The window keeps the last {{max, number}} lines; {{count, number}} older lines were dropped"
   }
 }

@@ -19,7 +19,7 @@ type Sub = "overview" | "logs" | "events" | "yaml";
 
 const WORKLOAD_KINDS: string[] = ["Deployment", "StatefulSet", "DaemonSet", "DeploymentConfig", "Job", "CronJob"] satisfies WorkloadKind[];
 
-/** Вкладка пода (спец. §6.5): обзор с состоянием каждого контейнера, события, YAML. */
+/** Вкладка пода (спец. §6.5–6.6): обзор с состоянием каждого контейнера, логи, события, YAML. */
 export function PodPanel({ connectionId, namespace, name }: { connectionId: string; namespace: string; name: string }) {
   const { t } = useTranslation();
   const [sub, setSub] = useState<Sub>("overview");

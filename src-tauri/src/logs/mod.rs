@@ -84,6 +84,8 @@ pub struct LogLine {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum LogEvent {
     /// Строки, подошедшие под фильтр; `scanned` и `shown` — сколько всего просмотрено и показано.
+    /// Без строк — только новые счётчики (идут строки, не подходящие под фильтр) или сигнал, что
+    /// поток снова открылся после `Reconnecting`.
     Lines {
         lines: Vec<LogLine>,
         scanned: u64,
@@ -442,6 +444,8 @@ pub async fn run(
     cancel: CancellationToken,
 ) {
     let (mut scanned, mut shown) = (0u64, 0u64);
+    // Счётчики последнего отправленного `Lines`: изменились — они уходят и без новых строк.
+    let mut sent = (0u64, 0u64);
     let mut last: Option<Timestamp> = None;
     let mut since: Option<Timestamp> = None;
     let mut lost_at: Option<Instant> = None;
@@ -483,9 +487,22 @@ pub async fn run(
                 continue;
             }
         };
+        // Поток открылся после `Reconnecting` — даже если он молчит, интерфейс не должен
+        // оставаться в «переподключении» до первой строки.
+        if lost_at.is_some() {
+            sent = (scanned, shown);
+            if !sink.send(LogEvent::Lines {
+                lines: Vec::new(),
+                scanned,
+                shown,
+            }) {
+                return;
+            }
+        }
         let opened_at = Instant::now();
         let mut batch: Batch<LogLine> = Batch::default();
-        let mut tick = tokio::time::interval(BATCH_WINDOW);
+        // Первый тик — через окно, а не сразу: пока ничего не прочитано, отправлять нечего.
+        let mut tick = tokio::time::interval_at(opened_at + BATCH_WINDOW, BATCH_WINDOW);
         // После переподключения строки до `last` включительно уже показаны.
         let resume_after = since.and(last);
         let mut deadline = idle.map(|d| Instant::now() + d);
@@ -493,9 +510,18 @@ pub async fn run(
             let line = tokio::select! {
                 _ = cancel.cancelled() => return,
                 _ = tick.tick() => {
-                    if batch.is_due()
-                        && !sink.send(LogEvent::Lines { lines: batch.take(), scanned, shown })
-                    {
+                    let lines = if batch.is_due() {
+                        batch.take()
+                    } else if batch.is_empty() && (scanned, shown) != sent {
+                        // Строки идут, но не подходят под фильтр (или пакет уже ушёл): счётчики
+                        // доходят и без новых строк. Неполный пакет ждёт своего срока, чтобы
+                        // счётчики не обгоняли строки.
+                        Vec::new()
+                    } else {
+                        continue;
+                    };
+                    sent = (scanned, shown);
+                    if !sink.send(LogEvent::Lines { lines, scanned, shown }) {
                         return;
                     }
                     continue;
@@ -528,25 +554,27 @@ pub async fn run(
                     text,
                     truncated,
                 };
-                if let Some(full) = batch.push(line)
-                    && !sink.send(LogEvent::Lines {
+                if let Some(full) = batch.push(line) {
+                    sent = (scanned, shown);
+                    if !sink.send(LogEvent::Lines {
                         lines: full,
                         scanned,
                         shown,
-                    })
-                {
-                    return;
+                    }) {
+                        return;
+                    }
                 }
             }
         };
-        if !batch.is_empty()
-            && !sink.send(LogEvent::Lines {
+        if !batch.is_empty() {
+            sent = (scanned, shown);
+            if !sink.send(LogEvent::Lines {
                 lines: batch.take(),
                 scanned,
                 shown,
-            })
-        {
-            return;
+            }) {
+                return;
+            }
         }
         // Без follow обрыв и таймаут — ошибка, а не конец лога.
         if !follow {
@@ -1035,15 +1063,18 @@ mod tests {
         follow: bool,
         wait: Duration,
     ) -> Vec<LogEvent> {
+        run_with(source, follow, Matcher::All, wait).await
+    }
+
+    async fn run_with(
+        source: impl LogSource + 'static,
+        follow: bool,
+        matcher: Matcher,
+        wait: Duration,
+    ) -> Vec<LogEvent> {
         let sink = Collect::default();
         let cancel = CancellationToken::new();
-        let task = tokio::spawn(run(
-            source,
-            follow,
-            Matcher::All,
-            sink.clone(),
-            cancel.clone(),
-        ));
+        let task = tokio::spawn(run(source, follow, matcher, sink.clone(), cancel.clone()));
         tokio::time::sleep(wait).await;
         cancel.cancel();
         tokio::time::timeout(Duration::from_secs(1), task)
@@ -1051,6 +1082,91 @@ mod tests {
             .expect("сессия кончилась по отмене")
             .unwrap();
         sink.items()
+    }
+
+    /// События целиком, и пустые `Lines` тоже: `L<строк>:<показано>/<просмотрено>`.
+    fn trace(events: &[LogEvent]) -> Vec<String> {
+        events
+            .iter()
+            .map(|e| match e {
+                LogEvent::Lines {
+                    lines,
+                    scanned,
+                    shown,
+                } => format!("L{}:{shown}/{scanned}", lines.len()),
+                LogEvent::Reconnecting { .. } => "R".into(),
+                LogEvent::End { scanned, shown } => format!("E:{shown}/{scanned}"),
+                LogEvent::Error { error } => format!("X:{}", error.key),
+            })
+            .collect()
+    }
+
+    /// Строка, которая приходит позже остальных.
+    fn late(after: Duration, line: String) -> Lines {
+        futures::stream::once(async move {
+            tokio::time::sleep(after).await;
+            Ok(line)
+        })
+        .boxed()
+    }
+
+    /// Молчащий контейнер и фильтр, под который ничего не подходит: счётчики доходят до
+    /// интерфейса без строк, один раз на изменение, а при первом открытии пустого события нет.
+    #[tokio::test(start_paused = true)]
+    async fn a_quiet_stream_still_reports_counters() {
+        let none = || {
+            Matcher::new(Some(&LogFilter {
+                text: "zzz".into(),
+                regex: false,
+                case_sensitive: false,
+            }))
+            .unwrap()
+        };
+        let source = Steps::new(vec![Ok(held(&[&format!("{T1} a"), &format!("{T2} b")]))]);
+        let events = run_with(source, true, none(), Duration::from_secs(5)).await;
+        assert_eq!(trace(&events), ["L0:0/2"]);
+
+        // Пакет со строкой уходит вместе со счётчиками; позже просмотренные строки — пустым событием.
+        let mixed: Lines = lines(&[&format!("{T1} err one")])
+            .chain(late(Duration::from_secs(1), format!("{T2} info")))
+            .chain(futures::stream::pending())
+            .boxed();
+        let errors = Matcher::new(Some(&LogFilter {
+            text: "err".into(),
+            regex: false,
+            case_sensitive: false,
+        }))
+        .unwrap();
+        let events = run_with(
+            Steps::new(vec![Ok(mixed)]),
+            true,
+            errors,
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(trace(&events), ["L1:1/1", "L0:1/2"]);
+    }
+
+    /// После `Reconnecting` и удачного открытия уходит пустое `Lines` — раньше первой строки и
+    /// даже если строк так и нет; неудачные попытки открытия его не дают.
+    #[tokio::test(start_paused = true)]
+    async fn a_successful_reopen_after_reconnecting_is_announced_before_any_line() {
+        let one = format!("{T1} one");
+        let refused = || crate::k8s::errors::from_transport_text("connection refused");
+        let source = Steps::new(vec![
+            Ok(lines(&[&one])),
+            Err(refused()),
+            Ok(lines(&[&one])
+                .chain(late(Duration::from_secs(3), format!("{T3} three")))
+                .chain(futures::stream::pending())
+                .boxed()),
+        ]);
+        let events = run_for(source, true, Duration::from_secs(20)).await;
+        assert_eq!(trace(&events), ["L1:1/1", "R", "L0:1/1", "L1:2/2"]);
+
+        let silent = Steps::new(vec![Ok(lines(&[&one])), Ok(held(&[]))]);
+        let events = run_for(silent, true, Duration::from_secs(20)).await;
+        assert_eq!(trace(&events), ["L1:1/1", "R", "L0:1/1"]);
     }
 
     /// Конец лога — `End`, а не обрыв: под удалили (404 при переподключении или при проверке
