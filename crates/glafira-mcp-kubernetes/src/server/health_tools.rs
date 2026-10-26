@@ -167,6 +167,9 @@ fn mask_findings(m: &Masker, findings: &mut [HealthFinding]) {
     }
 }
 
+/// Находка о неполной проверке.
+const CHECK_PARTIAL: &str = "check.partial";
+
 /// Проверку мог запустить человек по большему числу проектов, чем видит LLM, и приложение
 /// отдаёт её целиком. Здесь она сужается до области подключения: проекты вне её неотличимы от
 /// отсутствующих (спец. §10.2). Область «все проекты» проверку не меняет.
@@ -174,11 +177,13 @@ fn mask_findings(m: &Masker, findings: &mut [HealthFinding]) {
 /// Находки вне области и чужие проекты в `scope.projects` отбрасываются. `scope.projects_total`
 /// считает проекты области: проверенные и не проверенные из-за предела, но не больше самой
 /// области. `scope.pods` и `scope.nodes` — итог всей проверки, их число проекта не называет и
-/// остаётся прежним.
+/// остаётся прежним. `incomplete` и находка `check.partial` в приложении возникают по одному
+/// условию: если находка была и после сужения её не осталось, проверка для LLM полная.
 fn limit_to_scope(run: &mut HealthRun, scope: &Scope) {
     let Some(allowed) = &scope.namespaces else {
         return;
     };
+    let had_partial = run.findings.iter().any(|f| f.rule_id == CHECK_PARTIAL);
     run.findings.retain(|f| in_scope(&f.target, scope));
     let before = run.scope.projects.len();
     run.scope.projects.retain(|ns| allowed.contains(ns));
@@ -190,7 +195,10 @@ fn limit_to_scope(run: &mut HealthRun, scope: &Scope) {
     // Числа в `check.partial` пересчитываются, только если проверка охватила чужие проекты.
     let counts = foreign.then_some((checked, total));
     run.findings
-        .retain_mut(|f| f.rule_id != "check.partial" || limit_partial(f, allowed, counts));
+        .retain_mut(|f| f.rule_id != CHECK_PARTIAL || limit_partial(f, allowed, counts));
+    if had_partial && !run.findings.iter().any(|f| f.rule_id == CHECK_PARTIAL) {
+        run.incomplete = false;
+    }
 }
 
 /// `check.partial` без чужих проектов: пробелы `<проект>/<часть>: <код>` вне области убраны,
@@ -699,6 +707,33 @@ mod tests {
         limit_to_scope(&mut run, &Scope::default());
         assert_eq!((run.scope.projects.len(), run.scope.projects_total), (2, 2));
         assert_eq!(run.findings[0].details, "text of the app");
+    }
+
+    #[test]
+    fn incomplete_is_cleared_only_when_the_partial_finding_leaves() {
+        let foreign_only = || {
+            partial(
+                json!({"projectLimit": false, "projectsChecked": 2, "projectsTotal": 2,
+                       "podLimit": false, "timedOut": false,
+                       "gaps": ["b/secrets: FORBIDDEN"], "gapCount": 1}),
+                "text of the app",
+            )
+        };
+        let mut run = run_of(&["a", "b"], 2, foreign_only());
+        run.incomplete = true;
+        limit_to_scope(&mut run, &scope_of(&["a"]));
+        assert!(run.findings.is_empty() && !run.incomplete);
+        // Находки о неполноте не было вовсе: флаг не наш, остаётся как есть.
+        let mut run = run_of(&["a", "b"], 2, foreign_only());
+        run.findings.clear();
+        run.incomplete = true;
+        limit_to_scope(&mut run, &scope_of(&["a"]));
+        assert!(run.incomplete);
+        // Область «все проекты» проверку не меняет.
+        let mut run = run_of(&["a", "b"], 2, foreign_only());
+        run.incomplete = true;
+        limit_to_scope(&mut run, &Scope::default());
+        assert!(run.incomplete && run.findings.len() == 1);
     }
 
     #[test]

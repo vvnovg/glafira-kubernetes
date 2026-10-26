@@ -1790,7 +1790,8 @@ async fn cluster_text_of_findings_goes_through_the_builtin_patterns() {
 #[tokio::test]
 async fn a_run_wider_than_the_llm_scope_does_not_name_foreign_projects() {
     let params = partial_params(json!(["team-b/secrets: FORBIDDEN", "nodes: FORBIDDEN"]));
-    let run = wide_run(&["team-a", "team-b"], 2, params, PARTIAL_DETAILS);
+    let mut run = wide_run(&["team-a", "team-b"], 2, params, PARTIAL_DETAILS);
+    run.incomplete = true;
     let e = env_over(Arc::new(Odd {
         fake: Fake::new(),
         mode: Mode::Run(Box::new(run)),
@@ -1800,6 +1801,8 @@ async fn a_run_wider_than_the_llm_scope_does_not_name_foreign_projects() {
     let v = ok(call(&c, "health_check", json!({"connectionId": "c1"})).await);
     assert_eq!(v["scope"]["projects"], json!(["team-a"]));
     assert_eq!(v["scope"]["projectsTotal"], 1);
+    // Пробел в области остался: check.partial на месте, и проверка по-прежнему неполная.
+    assert_eq!(v["incomplete"], true);
     // Поды и ноды — итог проверки; их число проекта не называет.
     assert_eq!(
         (v["scope"]["pods"].as_u64(), v["scope"]["nodes"].as_u64()),
@@ -1828,7 +1831,8 @@ async fn a_run_wider_than_the_llm_scope_does_not_name_foreign_projects() {
 #[tokio::test]
 async fn a_run_over_all_projects_is_returned_as_it_is() {
     let params = partial_params(json!(["team-b/secrets: FORBIDDEN", "nodes: FORBIDDEN"]));
-    let run = wide_run(&["team-a", "team-b"], 2, params.clone(), PARTIAL_DETAILS);
+    let mut run = wide_run(&["team-a", "team-b"], 2, params.clone(), PARTIAL_DETAILS);
+    run.incomplete = true;
     let e = env_over(Arc::new(Odd {
         fake: Fake::new(),
         mode: Mode::Run(Box::new(run)),
@@ -1838,6 +1842,7 @@ async fn a_run_over_all_projects_is_returned_as_it_is() {
     let v = ok(call(&c, "health_check", json!({"connectionId": "c2"})).await);
     assert_eq!(v["scope"]["projects"], json!(["team-a", "team-b"]));
     assert_eq!(v["scope"]["projectsTotal"], 2);
+    assert_eq!(v["incomplete"], true);
     let items = v["findings"]["items"].as_array().unwrap();
     assert_eq!(items.len(), 3);
     assert_eq!(items[0]["params"], params);
@@ -1853,7 +1858,8 @@ async fn check_partial_left_without_a_reason_in_the_scope_is_dropped() {
     params["projectsTotal"] = json!(80);
     params["projectLimit"] = json!(true);
     let details = "Some objects were not checked: only 50 of 80 projects were checked (limit 50); not read: team-b/secrets: FORBIDDEN. Findings may be missing for them.";
-    let run = wide_run(&["team-a", "team-b"], 80, params, details);
+    let mut run = wide_run(&["team-a", "team-b"], 80, params, details);
+    run.incomplete = true;
     let e = env_over(Arc::new(Odd {
         fake: Fake::new(),
         mode: Mode::Run(Box::new(run)),
@@ -1871,6 +1877,8 @@ async fn check_partial_left_without_a_reason_in_the_scope_is_dropped() {
         .map(|r| r["ruleId"].as_str().unwrap())
         .collect();
     assert_eq!(rules, ["pod.crashLoop"]);
+    // Флаг и находка согласованы: причины неполноты в области нет — проверка полная.
+    assert_eq!(v["incomplete"], false);
     let text = serde_json::to_string(&v).unwrap();
     assert!(
         !text.contains("team-b") && !text.contains("check.partial"),
