@@ -135,3 +135,8 @@
 | `crates/glafira-mcp-core/tests/gui_stdio.rs` | `crates/glafira-mcp/tests/gui_stdio.rs` | `8bbd0bd` | как есть |
 | `crates/glafira-mcp-core/tests/manifest.rs` | `crates/glafira-mcp/tests/manifest.rs` | `8bbd0bd` | адаптирован: запрещены зависимости Kubernetes и приложения |
 | `crates/glafira-mcp-core/tests/server.rs` | `crates/glafira-mcp/tests/server.rs` | `8bbd0bd` | адаптирован: игрушечный обработчик вместо инструментов Kafka |
+| `crates/glafira-mcp-kubernetes/Cargo.toml` | `crates/glafira-mcp/Cargo.toml` | `8bbd0bd` | адаптирован: поверх glafira-mcp-core, regex для маскировки |
+| `crates/glafira-mcp-kubernetes/src/model.rs` | `crates/glafira-mcp/src/model.rs` | `8bbd0bd` | адаптирован: операции и ответы Kubernetes, область LLM (`Scope`) |
+| `crates/glafira-mcp-kubernetes/src/health.rs` | `crates/glafira-mcp/src/health.rs` | `8bbd0bd` | адаптирован: объекты Kubernetes с проектом, проекты проверки, фильтр области |
+| `crates/glafira-mcp-kubernetes/src/observe.rs` | `crates/glafira-mcp/src/observe.rs` | `8bbd0bd` | адаптирован: хронология workload'а вместо группы |
+| `crates/glafira-mcp-kubernetes/tests/manifest.rs` | `crates/glafira-mcp/tests/manifest.rs` | `8bbd0bd` | адаптирован: запрещены kube, k8s-openapi, reqwest и приложение |
