@@ -2,7 +2,9 @@
 //! `ClusterSnapshot`: сеть и файлы здесь не трогаются. Правила `resources.*` — этап O3.
 
 mod cluster;
+mod network;
 pub mod pods;
+mod project;
 mod workloads;
 
 use serde_json::Value;
@@ -157,6 +159,8 @@ pub fn evaluate(s: &ClusterSnapshot, env: Environment) -> Vec<Finding> {
     cluster::check(s, &mut out);
     pods::check(s, &mut out);
     workloads::check(s, &mut out);
+    project::check(s, &mut out);
+    network::check(s, &mut out);
     cluster::partial(s, &mut out);
     out.into_sorted()
 }
