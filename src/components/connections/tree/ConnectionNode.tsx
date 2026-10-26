@@ -74,15 +74,24 @@ function ProjectsNode({ connectionId }: { connectionId: string }) {
     <>
       {q.isPending && <p className="tree-notice">{t("common.loading")}</p>}
       {q.error && (
-        <p className="tree-error" role="alert">
-          {tr(toAppError(q.error))}
-        </p>
+        <>
+          <p className="tree-error" role="alert">
+            {tr(toAppError(q.error))}
+          </p>
+          <p className="tree-notice">
+            <button type="button" className="link" onClick={() => void q.refetch()}>
+              {t("common.retry")}
+            </button>
+          </p>
+        </>
       )}
-      {q.data?.error && <p className="tree-notice">{t("sidebar.projectsFromProfile")}</p>}
+      {/* Кластер не отдал список: проекты берутся из профиля. Если и там пусто — одно сообщение вместо «из профиля» и «Проектов нет». */}
+      {q.data?.error && <p className="tree-notice">{t(all?.length === 0 ? "sidebar.noProjectsFromProfile" : "sidebar.projectsFromProfile")}</p>}
       {all && all.length >= FILTER_FROM && (
         <input className="tree-filter" aria-label={t("sidebar.projectsFilter")} placeholder={t("sidebar.projectsFilter")} value={filter} onChange={(e) => setFilter(e.target.value)} />
       )}
-      {all && all.length === 0 && <p className="tree-notice">{t("sidebar.noProjects")}</p>}
+      {all && all.length === 0 && !q.data?.error && <p className="tree-notice">{t("sidebar.noProjects")}</p>}
+      {all && all.length > 0 && items.length === 0 && <p className="tree-notice">{t("sidebar.noMatches")}</p>}
       <ul>
         {items.map((p) => (
           <li key={p.name}>

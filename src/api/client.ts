@@ -110,8 +110,9 @@ export const api = {
   getNode: (connectionId: string, name: string) => call<NodeDetails>("get_node", { connectionId, name }),
   listClusterOperators: (connectionId: string) => call<OperatorRow[]>("list_cluster_operators", { connectionId }),
   listProjects: (connectionId: string) => call<ProjectList>("list_projects", { connectionId }),
-  getNamespaceAccess: (connectionId: string, namespace: string) =>
-    call<NamespaceAccess>("get_namespace_access", { connectionId, namespace }),
+  /** `force` — ручное обновление: Rust забывает кэш прав проекта (он живёт 5 минут) и читает заново. */
+  getNamespaceAccess: (connectionId: string, namespace: string, force = false) =>
+    call<NamespaceAccess>("get_namespace_access", { connectionId, namespace, force }),
   listWorkloads: (connectionId: string, namespace: string) => call<WorkloadList>("list_workloads", { connectionId, namespace }),
   getWorkload: (connectionId: string, namespace: string, kind: WorkloadKind, name: string) =>
     call<WorkloadDetails>("get_workload", { connectionId, namespace, kind, name }),

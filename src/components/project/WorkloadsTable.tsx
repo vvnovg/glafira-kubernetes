@@ -1,5 +1,7 @@
+import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { api } from "../../api/client";
 import type { WorkloadKind, WorkloadRow } from "../../api/types";
 import { formatAge } from "../../lib/age";
 import { workloadKey } from "../../lib/useWatchList";
@@ -20,6 +22,12 @@ export function WorkloadsTable({ connectionId, namespace, rows }: { connectionId
   const open = useWorkspace((s) => s.open);
   const [kind, setKind] = useState<WorkloadKind | "">("");
   const [filter, setFilter] = useState("");
+  // Сведения о подключении — из вкладки подключения; сама таблица не подключается.
+  const info = useQuery({ queryKey: ["connection", connectionId], queryFn: () => api.connect(connectionId, false), enabled: false });
+  // DeploymentConfig есть только там, где есть группа API `apps.openshift.io`. Сведений о подключении может ещё не быть
+  // (проект открыт из дерева) — тогда вид предлагается, только если такие строки уже пришли.
+  const withDeploymentConfigs = info.data?.apiGroups.deploymentConfigs === true || kind === "DeploymentConfig" || rows.some((w) => w.kind === "DeploymentConfig");
+  const kinds = KINDS.filter((k) => k !== "DeploymentConfig" || withDeploymentConfigs);
   const shown = useMemo(() => {
     const f = filter.trim().toLowerCase();
     return rows.filter((w) => (!kind || w.kind === kind) && (!f || w.name.toLowerCase().includes(f))).sort((a, b) => a.name.localeCompare(b.name) || a.kind.localeCompare(b.kind));
@@ -38,7 +46,7 @@ export function WorkloadsTable({ connectionId, namespace, rows }: { connectionId
           {t("project.workloads.kind")}
           <select value={kind} onChange={(e) => setKind(e.target.value as WorkloadKind | "")}>
             <option value="">{t("objects.events.all")}</option>
-            {KINDS.map((k) => (
+            {kinds.map((k) => (
               <option key={k} value={k}>
                 {k}
               </option>

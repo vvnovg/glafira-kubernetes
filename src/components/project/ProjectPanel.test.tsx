@@ -1,6 +1,6 @@
 import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderWithClient } from "../../test/render";
 
 vi.mock("@tanstack/react-virtual", () => ({
@@ -27,7 +27,7 @@ vi.mock("../../api/client", async (importOriginal) => {
 });
 
 import { api } from "../../api/client";
-import type { NamespaceAccess, WatchEvent } from "../../api/types";
+import type { AppError, ConnectionInfo, KindError, NamespaceAccess, WatchEvent } from "../../api/types";
 import { useWorkspace } from "../../state/workspace";
 import { podRow, workloadRow } from "../../test/objects";
 import { ProjectPanel } from "./ProjectPanel";
@@ -107,5 +107,185 @@ describe("ProjectPanel", () => {
     renderWithClient(<ProjectPanel connectionId="c1" namespace="team-a" />);
     await waitFor(() => expect(screen.queryByRole("tab", { name: "События" })).not.toBeInTheDocument());
     expect(screen.getByRole("tab", { name: "Поды" })).toBeInTheDocument();
+  });
+});
+
+const forbiddenKind = (kind: KindError["kind"], resource: string): KindError => ({
+  kind,
+  error: { code: "FORBIDDEN", key: "errors.k8s.forbiddenIn", params: { verb: "list", resource, namespace: "team-a" }, message: "x", retryable: false },
+});
+
+describe("обзор проекта: виды workloads, которые не прочитались", () => {
+  it("ни один вид не прочитан — причины по видам, а не «Все workloads в норме»", async () => {
+    vi.mocked(api.listWorkloads).mockResolvedValue({
+      items: [],
+      errors: [forbiddenKind("Deployment", "deployments"), forbiddenKind("StatefulSet", "statefulsets"), forbiddenKind("Job", "jobs")],
+      truncated: false,
+    });
+    renderWithClient(<ProjectPanel connectionId="c1" namespace="team-a" />);
+    expect(await screen.findByText("Deployment: — Нет прав: list deployments в проекте «team-a»")).toBeInTheDocument();
+    expect(screen.getByText("StatefulSet: — Нет прав: list statefulsets в проекте «team-a»")).toBeInTheDocument();
+    expect(screen.getByText("Job: — Нет прав: list jobs в проекте «team-a»")).toBeInTheDocument();
+    expect(screen.queryByText("Все workloads в норме.")).not.toBeInTheDocument();
+  });
+
+  it("часть видов прочитана: проблемные workloads и причины рядом, «в норме» нет", async () => {
+    vi.mocked(api.listWorkloads).mockResolvedValue({
+      items: [workloadRow("web", { problem: "unavailable" }), workloadRow("api")],
+      errors: [forbiddenKind("DaemonSet", "daemonsets")],
+      truncated: false,
+    });
+    renderWithClient(<ProjectPanel connectionId="c1" namespace="team-a" />);
+    expect(await screen.findByRole("button", { name: "Deployment/web" })).toBeInTheDocument();
+    expect(screen.getByText("DaemonSet: — Нет прав: list daemonsets в проекте «team-a»")).toBeInTheDocument();
+    expect(screen.queryByText("Все workloads в норме.")).not.toBeInTheDocument();
+  });
+
+  it("часть видов не прочитана, прочитанные в порядке: причины без «в норме»", async () => {
+    vi.mocked(api.listWorkloads).mockResolvedValue({ items: [workloadRow("api")], errors: [forbiddenKind("CronJob", "cronjobs")], truncated: false });
+    renderWithClient(<ProjectPanel connectionId="c1" namespace="team-a" />);
+    expect(await screen.findByText("CronJob: — Нет прав: list cronjobs в проекте «team-a»")).toBeInTheDocument();
+    expect(screen.queryByText("Все workloads в норме.")).not.toBeInTheDocument();
+  });
+
+  it("все виды прочитаны и в порядке — «Все workloads в норме»", async () => {
+    vi.mocked(api.listWorkloads).mockResolvedValue({ items: [workloadRow("api")], errors: [], truncated: false });
+    renderWithClient(<ProjectPanel connectionId="c1" namespace="team-a" />);
+    expect(await screen.findByText("Все workloads в норме.")).toBeInTheDocument();
+  });
+});
+
+describe("права проекта: перечитывание", () => {
+  afterEach(() => vi.useRealTimers());
+
+  const READ_EVENTS_DENIED: NamespaceAccess = {
+    resources: { pods: { get: true, list: true, watch: true }, events: { get: false, list: false, watch: false } },
+    incomplete: false,
+  };
+  const READ_EVENTS_GRANTED: NamespaceAccess = {
+    resources: { pods: { get: true, list: true, watch: true }, events: { get: true, list: true, watch: true } },
+    incomplete: false,
+  };
+
+  it("права перечитываются раз в 5 минут, скрытая подвкладка возвращается", async () => {
+    vi.mocked(api.getNamespaceAccess).mockResolvedValueOnce(READ_EVENTS_DENIED).mockResolvedValue(READ_EVENTS_GRANTED);
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    renderWithClient(<ProjectPanel connectionId="c1" namespace="team-a" />);
+    await screen.findByRole("tab", { name: "Поды" });
+    await waitFor(() => expect(screen.queryByRole("tab", { name: "События" })).not.toBeInTheDocument());
+    expect(api.getNamespaceAccess).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      vi.advanceTimersByTime(4 * 60_000);
+    });
+    expect(api.getNamespaceAccess).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(await screen.findByRole("tab", { name: "События" })).toBeInTheDocument();
+    expect(api.getNamespaceAccess).toHaveBeenCalledTimes(2);
+    // Автоматическое чтение — из кэша Rust, без ручного обновления.
+    expect(api.getNamespaceAccess).toHaveBeenLastCalledWith("c1", "team-a");
+  });
+
+  it("«Обновить» в обзоре читает права заново и возвращает подвкладку", async () => {
+    vi.mocked(api.getNamespaceAccess).mockResolvedValueOnce(READ_EVENTS_DENIED).mockResolvedValue(READ_EVENTS_GRANTED);
+    const user = userEvent.setup();
+    renderWithClient(<ProjectPanel connectionId="c1" namespace="team-a" />);
+    await screen.findByRole("tab", { name: "Поды" });
+    await waitFor(() => expect(screen.queryByRole("tab", { name: "События" })).not.toBeInTheDocument());
+    expect(api.getNamespaceAccess).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "Обновить" }));
+    expect(await screen.findByRole("tab", { name: "События" })).toBeInTheDocument();
+    expect(api.getNamespaceAccess).toHaveBeenCalledTimes(2);
+    expect(api.getNamespaceAccess).toHaveBeenLastCalledWith("c1", "team-a", true);
+    // Обзор обновился вместе с правами.
+    expect(api.listPods).toHaveBeenCalledTimes(2);
+  });
+
+  it("права не прочитались при обновлении — ошибка показывается, подвкладки остаются", async () => {
+    vi.mocked(api.getNamespaceAccess)
+      .mockResolvedValueOnce(READ_EVENTS_GRANTED)
+      .mockRejectedValue({ code: "CONNECTION_FAILED", key: "errors.k8s.connect", message: "x", retryable: true });
+    const user = userEvent.setup();
+    renderWithClient(<ProjectPanel connectionId="c1" namespace="team-a" />);
+    await screen.findByRole("tab", { name: "События" });
+    await user.click(screen.getByRole("button", { name: "Обновить" }));
+    expect(await screen.findByText("Не удаётся подключиться к серверу")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "События" })).toBeInTheDocument();
+  });
+});
+
+describe("подключение недоступно: одна ошибка на вкладку", () => {
+  const DOWN: AppError = { code: "CONNECTION_FAILED", key: "errors.k8s.connect", message: "x", retryable: true };
+
+  it("все запросы и права отказали одинаково — один баннер, у разделов «—»", async () => {
+    vi.mocked(api.getNamespaceAccess).mockRejectedValue(DOWN);
+    vi.mocked(api.listPods).mockRejectedValue(DOWN);
+    vi.mocked(api.listWorkloads).mockRejectedValue(DOWN);
+    vi.mocked(api.getQuotas).mockRejectedValue(DOWN);
+    vi.mocked(api.listEvents).mockRejectedValue(DOWN);
+    renderWithClient(<ProjectPanel connectionId="c1" namespace="team-a" />);
+    await waitFor(() => expect(screen.getAllByText("—")).toHaveLength(4));
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    expect(screen.getAllByText("Не удаётся подключиться к серверу")).toHaveLength(1);
+  });
+
+  it("права прочитались, а обзор нет — баннер у первого раздела, у остальных «—»", async () => {
+    vi.mocked(api.listPods).mockRejectedValue(DOWN);
+    vi.mocked(api.listWorkloads).mockRejectedValue(DOWN);
+    vi.mocked(api.getQuotas).mockRejectedValue(DOWN);
+    vi.mocked(api.listEvents).mockRejectedValue(DOWN);
+    const user = userEvent.setup();
+    renderWithClient(<ProjectPanel connectionId="c1" namespace="team-a" />);
+    await waitFor(() => expect(screen.getAllByText("—")).toHaveLength(3));
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    // «Повторить» перечитывает обзор целиком.
+    vi.mocked(api.listPods).mockResolvedValue({ items: [podRow("web-a")], truncated: false });
+    vi.mocked(api.listWorkloads).mockResolvedValue({ items: [workloadRow("api")], errors: [], truncated: false });
+    vi.mocked(api.getQuotas).mockResolvedValue({ quotas: { data: [] }, limitRanges: { data: [] } });
+    vi.mocked(api.listEvents).mockResolvedValue({ items: [], truncated: false });
+    await user.click(screen.getByRole("button", { name: "Повторить" }));
+    expect(await screen.findByText("Все workloads в норме.")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("разные ошибки разделов показываются каждая", async () => {
+    vi.mocked(api.listPods).mockRejectedValue(DOWN);
+    vi.mocked(api.getQuotas).mockRejectedValue({ code: "INTERNAL", message: "Quotas are broken", retryable: false });
+    renderWithClient(<ProjectPanel connectionId="c1" namespace="team-a" />);
+    expect(await screen.findByText("Не удаётся подключиться к серверу")).toBeInTheDocument();
+    expect(await screen.findByText("Quotas are broken")).toBeInTheDocument();
+    expect(screen.getAllByRole("alert")).toHaveLength(2);
+  });
+});
+
+describe("таблица workloads: вид DeploymentConfig", () => {
+  const info = (deploymentConfigs: boolean) =>
+    ({ apiGroups: { routes: true, projects: true, deploymentConfigs, gatewayApi: false } }) as Partial<ConnectionInfo>;
+  const openWorkloads = async (prepare?: (client: ReturnType<typeof renderWithClient>["client"]) => void) => {
+    const user = userEvent.setup();
+    const { client } = renderWithClient(<ProjectPanel connectionId="c1" namespace="team-a" />);
+    prepare?.(client);
+    await user.click(await screen.findByRole("tab", { name: "Workloads" }));
+    await waitFor(() => expect(api.startWatch).toHaveBeenCalled());
+    return screen.getByLabelText("Вид");
+  };
+  const kinds = (select: HTMLElement) => Array.from(select.querySelectorAll("option")).map((o) => o.textContent);
+
+  it("в кластере нет apps.openshift.io — DeploymentConfig не предлагается", async () => {
+    const select = await openWorkloads((client) => client.setQueryData(["connection", "c1"], info(false)));
+    expect(kinds(select)).toEqual(["все", "Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"]);
+  });
+
+  it("группа apps.openshift.io есть — предлагается", async () => {
+    const select = await openWorkloads((client) => client.setQueryData(["connection", "c1"], info(true)));
+    expect(kinds(select)).toContain("DeploymentConfig");
+  });
+
+  it("сведений о подключении нет: вид появляется, когда пришла строка DeploymentConfig", async () => {
+    const select = await openWorkloads();
+    expect(kinds(select)).not.toContain("DeploymentConfig");
+    act(() => emit({ type: "reset", items: [workloadRow("legacy", { kind: "DeploymentConfig" })], errors: [], truncated: false }));
+    expect(kinds(screen.getByLabelText("Вид"))).toContain("DeploymentConfig");
   });
 });

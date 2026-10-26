@@ -1,13 +1,12 @@
-import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api } from "../../api/client";
 import type { WorkloadRow } from "../../api/types";
-import { tr } from "../../i18n/text";
 import { useWatchList, workloadKey } from "../../lib/useWatchList";
 import { ReadError } from "../common/ReadError";
 import { SubTabs } from "../common/SubTabs";
 import { ProjectEvents } from "../objects/EventList";
+import { KindErrors } from "./KindErrors";
+import { useNamespaceAccess } from "./useNamespaceAccess";
 import { PodList } from "../objects/PodList";
 import { WatchStatusLine } from "../objects/WatchStatusLine";
 import { WORKLOAD_RESOURCES, canList } from "./access";
@@ -20,7 +19,8 @@ type Sub = "overview" | "workloads" | "pods" | "events";
 export function ProjectPanel({ connectionId, namespace }: { connectionId: string; namespace: string }) {
   const { t } = useTranslation();
   const [sub, setSub] = useState<Sub>("overview");
-  const access = useQuery({ queryKey: ["access", connectionId, namespace], queryFn: () => api.getNamespaceAccess(connectionId, namespace) });
+  // Права перечитываются по таймеру и по «Обновить» в обзоре, иначе подвкладка, скрытая по устаревшим правам, не вернулась бы.
+  const access = useNamespaceAccess(connectionId, namespace);
   const a = access.data;
   const tabs: { id: Sub; label: string; visible: boolean }[] = [
     { id: "overview", label: t("objects.tabs.overview"), visible: true },
@@ -52,11 +52,7 @@ function ProjectWorkloads({ connectionId, namespace }: { connectionId: string; n
     <div className="section">
       <WatchStatusLine state={watch} />
       {watch.status === "error" && watch.error && <ReadError error={watch.error} connectionId={connectionId} />}
-      {watch.kindErrors.map((e) => (
-        <p key={e.kind} className="muted">
-          {e.kind}: — {tr(e.error)}
-        </p>
-      ))}
+      <KindErrors errors={watch.kindErrors} />
       <WorkloadsTable connectionId={connectionId} namespace={namespace} rows={watch.rows} />
     </div>
   );

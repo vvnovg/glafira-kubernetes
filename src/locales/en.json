@@ -411,7 +411,8 @@
     "nodes": "Nodes",
     "projectsFilter": "Filter projects",
     "projectsFromProfile": "The cluster does not list projects for you — the projects of the profile are shown",
-    "noProjects": "No projects"
+    "noProjects": "No projects",
+    "noProjectsFromProfile": "The cluster does not list projects for you, and the profile has none"
   },
   "settings": {
     "title": "Settings",

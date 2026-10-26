@@ -415,7 +415,8 @@
     "nodes": "Ноды",
     "projectsFilter": "Фильтр проектов",
     "projectsFromProfile": "Кластер не даёт список проектов — показаны проекты из профиля",
-    "noProjects": "Проектов нет"
+    "noProjects": "Проектов нет",
+    "noProjectsFromProfile": "Кластер не даёт список проектов, а в профиле их нет"
   },
   "settings": {
     "title": "Настройки",
