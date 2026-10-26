@@ -27,6 +27,8 @@ pub struct AppState {
     pub sessions: Arc<crate::sessions::Sessions>,
     /// Права пользователя в проектах (кэш на 5 минут).
     pub access: Arc<crate::k8s::access::AccessCache>,
+    /// Проверка кластера, скрытые находки и замечания LLM (`health/<id>.json`).
+    pub health: Arc<crate::health::service::HealthService>,
 }
 
 impl AppState {
@@ -40,6 +42,7 @@ impl AppState {
             logins: Arc::new(crate::auth::Logins::default()),
             sessions: Arc::new(crate::sessions::Sessions::default()),
             access: Arc::new(crate::k8s::access::AccessCache::default()),
+            health: Arc::new(crate::health::service::HealthService::open(data_dir)),
         })
     }
 
@@ -173,11 +176,17 @@ impl AppState {
         self.access.forget_connection(id);
     }
 
-    /// Удаляет подключение целиком: профиль, секреты, клиент и сессии. Блокирующий вызов
-    /// (keychain).
+    /// Удаляет подключение целиком: профиль, секреты, клиент, сессии и данные проверки.
+    /// Блокирующий вызов (keychain).
     pub fn delete_connection_full(&self, id: &str) -> AppResult<()> {
         self.connections.delete(id)?;
         self.sessions.stop_for(id);
+        if let Err(e) = self.health.forget(id) {
+            tracing::warn!(
+                "failed to delete health data of connection {id}: {}",
+                e.message
+            );
+        }
         for field in crate::secrets::CONNECTION_SECRET_FIELDS {
             self.secrets
                 .delete(&crate::secrets::secret_key(id, field))?;

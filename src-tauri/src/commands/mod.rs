@@ -3,6 +3,7 @@ pub mod auth;
 pub mod cluster;
 pub mod connections;
 pub mod folders;
+pub mod health;
 pub mod kubeconfig;
 pub mod objects;
 pub mod projects;

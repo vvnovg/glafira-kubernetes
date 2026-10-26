@@ -429,25 +429,53 @@ pub async fn list_kind(
     namespace: &str,
     kind: WorkloadKind,
 ) -> AppResult<(Listed<WorkloadRow>, Option<AppError>)> {
+    let (facts, skipped) = list_facts(r, namespace, kind).await?;
+    Ok((facts.map(|f| f.row), skipped))
+}
+
+/// Workload вместе с условиями и шаблоном подов — для проверки (спец. §8).
+#[derive(Debug, Clone)]
+pub struct WorkloadFacts {
+    pub row: WorkloadRow,
+    pub conditions: Vec<ConditionView>,
+    pub template: Option<PodTemplateSpec>,
+}
+
+impl From<Parsed> for WorkloadFacts {
+    fn from(p: Parsed) -> Self {
+        Self {
+            row: p.row,
+            conditions: p.conditions,
+            template: p.template,
+        }
+    }
+}
+
+/// Как `list_kind`, но с условиями и шаблоном подов каждого workload'а.
+pub async fn list_facts(
+    r: &ReadClient,
+    namespace: &str,
+    kind: WorkloadKind,
+) -> AppResult<(Listed<WorkloadFacts>, Option<AppError>)> {
     let lp = ListParams::default();
     let ns = Some(namespace);
     macro_rules! typed {
         ($t:ty, $f:ident) => {
-            (r.list::<$t>(ns, &lp).await?.map(|o| $f(&o)), None)
+            (r.list::<$t>(ns, &lp).await?.map(|o| $f(&o).into()), None)
         };
     }
     Ok(match kind {
-        WorkloadKind::Deployment => typed!(Deployment, deployment_row),
-        WorkloadKind::StatefulSet => typed!(StatefulSet, stateful_set_row),
-        WorkloadKind::DaemonSet => typed!(DaemonSet, daemon_set_row),
-        WorkloadKind::Job => typed!(Job, job_row),
-        WorkloadKind::CronJob => typed!(CronJob, cron_job_row),
+        WorkloadKind::Deployment => typed!(Deployment, parse_deployment),
+        WorkloadKind::StatefulSet => typed!(StatefulSet, parse_stateful_set),
+        WorkloadKind::DaemonSet => typed!(DaemonSet, parse_daemon_set),
+        WorkloadKind::Job => typed!(Job, parse_job),
+        WorkloadKind::CronJob => typed!(CronJob, parse_cron_job),
         WorkloadKind::DeploymentConfig => {
             let l = r.list_dynamic(&deployment_configs(), ns, &lp).await?;
             let (mut items, mut skipped) = (Vec::new(), None);
             for o in &l.items {
                 match parse_deployment_config(o) {
-                    Ok(p) => items.push(p.row),
+                    Ok(p) => items.push(p.into()),
                     Err(e) => {
                         skipped.get_or_insert(e);
                     }

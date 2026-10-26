@@ -23,7 +23,7 @@ pub mod watch;
 
 use std::sync::Arc;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 use crate::secrets::KeyringStore;
 use crate::state::AppState;
@@ -44,6 +44,13 @@ pub fn run() {
             let policy = crate::policy::sources::load();
             tracing::info!(managed = policy.status.managed, "policy");
             let st = AppState::new(&dir, Arc::new(KeyringStore::default()))?.with_policy(policy);
+            let handle = app.handle().clone();
+            st.health.set_notify(Arc::new(move |id: &str| {
+                let payload = serde_json::json!({ "connectionId": id });
+                if let Err(e) = handle.emit(crate::health::CHANGED_EVENT, payload) {
+                    tracing::warn!("health event not sent: {e}");
+                }
+            }));
             app.manage(st);
             Ok(())
         })
@@ -104,6 +111,12 @@ pub fn run() {
             commands::objects::list_pvcs,
             commands::objects::get_quotas,
             commands::objects::get_yaml,
+            commands::health::run_health_check,
+            commands::health::get_health,
+            commands::health::set_finding_ignored,
+            commands::health::set_annotation_status,
+            commands::health::delete_annotation,
+            commands::health::delete_all_annotations,
         ])
         .run(tauri::generate_context!())
         .expect("error while building tauri application");

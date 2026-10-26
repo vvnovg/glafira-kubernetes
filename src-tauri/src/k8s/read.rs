@@ -392,6 +392,39 @@ impl ReadClient {
         watcher(self.dynamic(ar, Some(namespace.as_str())), config)
     }
 
+    /// Имена объектов namespace без их содержимого (`PartialObjectMeta`): так читаются Secret —
+    /// их значения в Glafira не приходят вовсе. Страницы и предел — как у `list`.
+    pub async fn names<K>(&self, namespace: &str) -> AppResult<Listed<String>>
+    where
+        K: Resource<Scope = NamespaceResourceScope, DynamicType = ()>
+            + Clone
+            + DeserializeOwned
+            + Debug,
+    {
+        check_namespace(namespace)?;
+        let api: Api<K> = Api::namespaced(self.client.clone(), namespace);
+        let mut items = Vec::new();
+        let mut token: Option<String> = None;
+        for _ in 0..MAX_ITEMS.div_ceil(PAGE_SIZE as usize) + EXTRA_PAGES {
+            let mut page = ListParams::default().limit(PAGE_SIZE);
+            if let Some(t) = &token {
+                page = page.continue_token(t);
+            }
+            let list = self.call(api.list_metadata(&page)).await?;
+            items.extend(list.items.into_iter().filter_map(|m| m.metadata.name));
+            token = list.metadata.continue_.filter(|t| !t.is_empty());
+            if items.len() >= MAX_ITEMS || token.is_none() {
+                let truncated = items.len() > MAX_ITEMS || token.is_some();
+                items.truncate(MAX_ITEMS);
+                return Ok(Listed { items, truncated });
+            }
+        }
+        Ok(Listed {
+            items,
+            truncated: true,
+        })
+    }
+
     /// Права пользователя в namespace (`SelfSubjectRulesReview`). Проверка создаётся запросом
     /// POST, но в кластере ничего не меняет.
     pub async fn rules_review(&self, namespace: &str) -> AppResult<SubjectRulesReviewStatus> {
@@ -637,6 +670,33 @@ mod tests {
             !seen.forbidden && seen.broken.is_none(),
             "404 не отмечается"
         );
+    }
+
+    /// Имена Secret читаются списком метаданных: значения в ответе сервер не присылает.
+    #[tokio::test]
+    async fn names_are_read_as_metadata_only() {
+        let (client, server) = mock_client(|s| {
+            let next = if s.uri.contains("continue=t1") {
+                ""
+            } else {
+                "t1"
+            };
+            (
+                200,
+                serde_json::json!({"apiVersion": "meta.k8s.io/v1", "kind": "PartialObjectMetadataList",
+                    "metadata": {"continue": next},
+                    "items": [{"apiVersion": "meta.k8s.io/v1", "kind": "PartialObjectMetadata",
+                        "metadata": {"name": format!("tls-{next}"), "namespace": "team-a"}}]}),
+            )
+        });
+        let l = reader(client)
+            .names::<k8s_openapi::api::core::v1::Secret>("team-a")
+            .await
+            .unwrap();
+        assert_eq!(l.items, ["tls-t1", "tls-"]);
+        let seen = server.await.unwrap();
+        assert_eq!(seen[0].path(), "/api/v1/namespaces/team-a/secrets");
+        assert!(seen.iter().all(|s| s.uri.contains("limit=500")));
     }
 
     #[tokio::test]
