@@ -109,7 +109,8 @@ fn session_report(
     })
 }
 
-/// Логи контейнера (спец. §6.6); возвращает id сессии. Неверный regex — ошибка сразу.
+/// Логи контейнера (спец. §6.6); возвращает id сессии. Неверный regex или время начала — ошибка
+/// сразу.
 #[tauri::command]
 pub async fn start_logs(
     state: State<'_, AppState>,
@@ -125,6 +126,7 @@ pub async fn start_logs_impl(
     sink: impl Sink<LogEvent>,
 ) -> AppResult<String> {
     let matcher = Matcher::new(params.filter.as_ref())?;
+    crate::logs::check_since(&params)?;
     // Как у watch: сессия на учёте ещё до подключения, и отключение, пока идёт вход
     // (exec-плагин), её остановит (`stop_for`). При ошибке её снимает с учёта `guard`.
     let (id, cancel) = st.sessions.register(&params.connection_id);
@@ -142,7 +144,8 @@ pub async fn start_logs_impl(
         // Подключение отключили, пока сессия подключалась: её уже сняли с учёта.
         return Ok(id);
     }
-    let follow = params.follow;
+    // Лог прежнего экземпляра контейнера не растёт: follow ему не нужен.
+    let follow = params.follow && !params.previous;
     let report = session_report(st, &params.connection_id, &params.namespace, used);
     tokio::spawn(async move {
         let _guard = guard;
@@ -163,19 +166,38 @@ pub async fn save_logs(
     path: String,
     timestamps: bool,
 ) -> AppResult<u64> {
+    save_logs_impl(state.inner(), params, path, timestamps).await
+}
+
+/// Сохранение — тоже сессия подключения: отключение и удаление подключения (`stop_for`), как и
+/// перезагрузка страницы (`stop_all`), его останавливают, и файл не появляется.
+pub async fn save_logs_impl(
+    st: &AppState,
+    params: LogParams,
+    path: String,
+    timestamps: bool,
+) -> AppResult<u64> {
     let matcher = Matcher::new(params.filter.as_ref())?;
+    crate::logs::check_since(&params)?;
     let mut params = params;
     params.follow = false;
-    let (id, ns) = (params.connection_id.clone(), params.namespace.clone());
-    state
-        .read_in(&id, &ns, |c| async move {
-            let logs = KubeLogs {
-                reader: c.reader(),
-                params,
-            };
-            crate::logs::save(&logs, &matcher, std::path::Path::new(&path), timestamps).await
-        })
-        .await
+    let (id, cancel) = st.sessions.register(&params.connection_id);
+    let _guard = SessionGuard {
+        sessions: st.sessions.clone(),
+        id,
+    };
+    let (cid, ns) = (params.connection_id.clone(), params.namespace.clone());
+    let save = st.read_in(&cid, &ns, |c| async move {
+        let logs = KubeLogs {
+            reader: c.reader(),
+            params,
+        };
+        crate::logs::save(&logs, &matcher, std::path::Path::new(&path), timestamps).await
+    });
+    tokio::select! {
+        _ = cancel.cancelled() => Err(crate::logs::save_stopped()),
+        r = save => r,
+    }
 }
 
 #[cfg(test)]
@@ -426,6 +448,72 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         assert_eq!(requests.load(Ordering::SeqCst), 0, "лог не открыт");
         assert!(sink.items().is_empty());
+    }
+
+    /// Неверное время начала — ошибка до сессии, а не весь лог.
+    #[tokio::test]
+    async fn an_invalid_start_time_fails_before_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let st =
+            AppState::new(dir.path(), Arc::new(crate::secrets::MemoryStore::default())).unwrap();
+        let params = || LogParams {
+            since_time: Some("yesterday".into()),
+            ..log_params()
+        };
+        let e = start_logs_impl(&st, params(), Collect::default())
+            .await
+            .unwrap_err();
+        assert_eq!(e.key, "errors.logs.badSinceTime");
+        let path = dir.path().join("web-1.log").display().to_string();
+        let e = save_logs_impl(&st, params(), path, false)
+            .await
+            .unwrap_err();
+        assert_eq!(e.key, "errors.logs.badSinceTime");
+        assert!(st.sessions.is_empty());
+    }
+
+    /// Отключение останавливает и сохранение лога (здесь — пока оно ждёт подключения): файла
+    /// нет, на учёте ничего не осталось.
+    #[tokio::test]
+    async fn a_disconnect_stops_saving_a_log() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let st =
+            AppState::new(dir.path(), Arc::new(crate::secrets::MemoryStore::default())).unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let connected = {
+            let requests = requests.clone();
+            crate::k8s::pool::test_connected(move |_| {
+                requests.fetch_add(1, Ordering::SeqCst);
+                (200, serde_json::json!({}))
+            })
+        };
+        assert!(
+            st.pool
+                .insert_if_current("a", st.pool.generation("a"), connected)
+        );
+        let out = tempfile::tempdir().unwrap();
+        let path = out.path().join("web-1.log");
+        let turn = st.pool.connect_lock("a").await;
+        let task = {
+            let (st, path) = (st.clone(), path.display().to_string());
+            tokio::spawn(async move { save_logs_impl(&st, log_params(), path, false).await })
+        };
+        let registered = async {
+            while st.sessions.is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), registered)
+            .await
+            .expect("сохранение на учёте");
+        assert_eq!(st.sessions.stop_for("a"), 1);
+        let e = task.await.unwrap().unwrap_err();
+        assert_eq!(e.key, "errors.logs.saveStopped");
+        drop(turn);
+        assert!(st.sessions.is_empty());
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
     }
 
     /// Кластер отклонил токен при открытии лога: ошибка в сессии, клиент подключения сброшен.

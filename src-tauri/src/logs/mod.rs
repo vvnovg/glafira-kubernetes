@@ -1,23 +1,27 @@
 //! Логи контейнера (спец. §6.6): хвост (по умолчанию 500 строк) или с момента, предыдущий
 //! контейнер, follow. Фильтр (подстрока или regex) применяется здесь, до отправки в интерфейс;
-//! строка длиннее 64 КБ обрезается. В follow при потере соединения — переподключение с
-//! `sinceTime` последней строки (повторы отбрасываются), через 60 с без восстановления — ошибка.
+//! строка длиннее 64 КБ обрезается, байты не в UTF-8 заменяются (U+FFFD). В follow при потере
+//! соединения — переподключение с `sinceTime` последней строки (повторы отбрасываются), через
+//! 60 с без восстановления — ошибка; контейнер завершился или пода нет — конец лога. Без follow
+//! строка ждётся не дольше таймаута запроса, а обрыв — ошибка.
 
 use std::path::Path;
 use std::time::Duration;
 
-use futures::AsyncBufReadExt;
 use futures::future::BoxFuture;
 use futures::stream::{BoxStream, StreamExt};
+use futures::{AsyncBufRead, AsyncBufReadExt};
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::jiff::Timestamp;
 use serde::{Deserialize, Serialize};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{AppError, AppResult, ErrorCode};
-use crate::k8s::errors::breaks_client;
+use crate::k8s::errors::{breaks_client, chain_text, from_transport_text, timeout};
 use crate::k8s::read::ReadClient;
 use crate::sessions::{BATCH_WINDOW, Batch, Sink};
+use crate::storage::fs::AtomicFile;
 
 /// Сколько строк с конца читается, если не задано ни начало, ни число строк.
 pub const DEFAULT_TAIL: i64 = 500;
@@ -25,6 +29,13 @@ pub const DEFAULT_TAIL: i64 = 500;
 pub const MAX_LINE: usize = 64 * 1024;
 /// Сколько follow ждёт восстановления соединения.
 pub const RECONNECT_FOR: Duration = Duration::from_secs(60);
+/// Сколько байт строки читается для просмотра: `MAX_LINE` и запас на время в начале строки,
+/// чтобы `truncate` увидел, что строка длиннее. Остаток длинной строки пропускается.
+const READ_LINE: usize = MAX_LINE + 1024;
+/// Строка длиннее при сохранении в файл обрезается: память на одну строку ограничена.
+pub const SAVE_LINE: usize = 16 * 1024 * 1024;
+/// Сколько байт копится перед записью в файл при сохранении.
+const SAVE_CHUNK: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -172,9 +183,55 @@ pub fn truncate(text: &str) -> (String, bool) {
     (text[..end].to_string(), true)
 }
 
+/// Строки потока байтов. Не UTF-8 — с заменой (U+FFFD), а не ошибкой; от строки длиннее `cap`
+/// байт остаётся начало, остальное до конца строки пропускается: память на строку ограничена.
+pub fn lossy_lines(
+    reader: impl AsyncBufRead + Send + 'static,
+    cap: usize,
+) -> BoxStream<'static, std::io::Result<String>> {
+    futures::stream::unfold(Some(Box::pin(reader)), move |reader| async move {
+        let mut reader = reader?;
+        let mut line = Vec::new();
+        loop {
+            let (used, done) = match reader.fill_buf().await {
+                Err(e) => return Some((Err(e), None)),
+                Ok([]) => {
+                    return (!line.is_empty()).then(|| (Ok(decode(line)), None));
+                }
+                Ok(buf) => {
+                    let (used, done) = match buf.iter().position(|b| *b == b'\n') {
+                        Some(i) => (i + 1, true),
+                        None => (buf.len(), false),
+                    };
+                    let room = cap.saturating_sub(line.len());
+                    line.extend_from_slice(&buf[..used.min(room)]);
+                    (used, done)
+                }
+            };
+            reader.consume_unpin(used);
+            if done {
+                return Some((Ok(decode(line)), Some(reader)));
+            }
+        }
+    })
+    .boxed()
+}
+
+/// Текст строки без `\n` (и `\r` перед ним).
+fn decode(mut line: Vec<u8>) -> String {
+    if line.last() == Some(&b'\n') {
+        line.pop();
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+    }
+    String::from_utf8(line).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+}
+
 /// Откуда читается лог: в приложении — API-сервер, в тестах — заготовленные строки.
 pub trait LogSource: Send + Sync {
-    /// Поток строк (с временем в начале): по параметрам сессии или, при переподключении, с `since`.
+    /// Поток строк (с временем в начале) для просмотра: по параметрам сессии или, при
+    /// переподключении, с `since`. От строки длиннее `MAX_LINE` может прийти только начало.
     fn open(
         &self,
         since: Option<Timestamp>,
@@ -182,6 +239,16 @@ pub trait LogSource: Send + Sync {
 
     /// Работает ли ещё контейнер: если нет, конец потока — конец лога, а не обрыв.
     fn running(&self) -> BoxFuture<'_, AppResult<bool>>;
+
+    /// Поток строк для сохранения в файл: строки целиком (до `SAVE_LINE`).
+    fn open_whole(&self) -> BoxFuture<'_, AppResult<BoxStream<'static, std::io::Result<String>>>> {
+        self.open(None)
+    }
+
+    /// Сколько ждать следующей строки лога без follow; `None` — сколько угодно.
+    fn read_timeout(&self) -> Option<Duration> {
+        None
+    }
 }
 
 /// Лог контейнера через API-сервер.
@@ -195,7 +262,8 @@ impl KubeLogs {
         let p = &self.params;
         let mut lp = kube::api::LogParams {
             container: p.container.clone(),
-            follow: p.follow,
+            // У прежнего экземпляра контейнера лог уже не растёт.
+            follow: p.follow && !p.previous,
             previous: p.previous,
             timestamps: true,
             ..Default::default()
@@ -211,12 +279,12 @@ impl KubeLogs {
         }
         lp
     }
-}
 
-impl LogSource for KubeLogs {
-    fn open(
+    /// Строки лога: от каждой — не больше `cap` байт.
+    fn lines(
         &self,
         since: Option<Timestamp>,
+        cap: usize,
     ) -> BoxFuture<'_, AppResult<BoxStream<'static, std::io::Result<String>>>> {
         Box::pin(async move {
             let lp = self.kube_params(since);
@@ -224,12 +292,34 @@ impl LogSource for KubeLogs {
                 .reader
                 .log_stream(&self.params.namespace, &self.params.pod, &lp)
                 .await?;
-            Ok(r.lines().boxed())
+            Ok(lossy_lines(r, cap))
         })
     }
+}
 
+impl LogSource for KubeLogs {
+    fn open(
+        &self,
+        since: Option<Timestamp>,
+    ) -> BoxFuture<'_, AppResult<BoxStream<'static, std::io::Result<String>>>> {
+        self.lines(since, READ_LINE)
+    }
+
+    fn open_whole(&self) -> BoxFuture<'_, AppResult<BoxStream<'static, std::io::Result<String>>>> {
+        self.lines(None, SAVE_LINE)
+    }
+
+    fn read_timeout(&self) -> Option<Duration> {
+        Some(self.reader.timeout())
+    }
+
+    /// Прежний экземпляр контейнера (`previous`) уже не работает: его лог кончается вместе с
+    /// потоком.
     fn running(&self) -> BoxFuture<'_, AppResult<bool>> {
         Box::pin(async move {
+            if self.params.previous {
+                return Ok(false);
+            }
             let pod: Pod = self
                 .reader
                 .get(&self.params.namespace, &self.params.pod)
@@ -257,29 +347,56 @@ pub struct Reported<S, F> {
     pub report: F,
 }
 
+impl<S, F: Fn(&AppError)> Reported<S, F> {
+    fn noted<T>(&self, r: AppResult<T>) -> AppResult<T> {
+        if let Err(e) = &r {
+            (self.report)(e);
+        }
+        r
+    }
+}
+
 impl<S: LogSource, F: Fn(&AppError) + Send + Sync> LogSource for Reported<S, F> {
     fn open(
         &self,
         since: Option<Timestamp>,
     ) -> BoxFuture<'_, AppResult<BoxStream<'static, std::io::Result<String>>>> {
-        Box::pin(async move {
-            let r = self.source.open(since).await;
-            if let Err(e) = &r {
-                (self.report)(e);
-            }
-            r
-        })
+        Box::pin(async move { self.noted(self.source.open(since).await) })
     }
 
     fn running(&self) -> BoxFuture<'_, AppResult<bool>> {
-        Box::pin(async move {
-            let r = self.source.running().await;
-            if let Err(e) = &r {
-                (self.report)(e);
-            }
-            r
-        })
+        Box::pin(async move { self.noted(self.source.running().await) })
     }
+
+    fn open_whole(&self) -> BoxFuture<'_, AppResult<BoxStream<'static, std::io::Result<String>>>> {
+        Box::pin(async move { self.noted(self.source.open_whole().await) })
+    }
+
+    fn read_timeout(&self) -> Option<Duration> {
+        self.source.read_timeout()
+    }
+}
+
+/// `since_time` — время RFC 3339. Неверное время иначе молча читало бы весь лог.
+pub fn check_since(p: &LogParams) -> AppResult<()> {
+    match p.since_time.as_deref() {
+        Some(t) if t.parse::<Timestamp>().is_err() => Err(app_err!(
+            ErrorCode::InvalidInput,
+            "errors.logs.badSinceTime",
+            "Invalid start time “{{value}}”: use RFC 3339, for example 2026-10-25T10:00:00Z",
+            value = t
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Сохранение лога остановлено: подключение отключили или удалили.
+pub fn save_stopped() -> AppError {
+    app_err!(
+        ErrorCode::ConnectionFailed,
+        "errors.logs.saveStopped",
+        "Saving the log was stopped: the connection was closed"
+    )
 }
 
 fn lost() -> AppError {
@@ -288,6 +405,27 @@ fn lost() -> AppError {
         "errors.logs.lost",
         "The log stream was lost and did not recover in 60 s"
     )
+}
+
+/// Ошибка чтения уже открытого потока: таймаут строки или сеть.
+fn read_error(e: &std::io::Error) -> AppError {
+    match e.kind() {
+        std::io::ErrorKind::TimedOut => timeout(),
+        _ => from_transport_text(&chain_text(e)),
+    }
+}
+
+/// Следующая строка потока; не пришла к `deadline` — ошибка `TimedOut`.
+async fn next_before(
+    stream: &mut BoxStream<'static, std::io::Result<String>>,
+    deadline: Option<Instant>,
+) -> Option<std::io::Result<String>> {
+    match deadline {
+        Some(at) => tokio::time::timeout_at(at, stream.next())
+            .await
+            .unwrap_or_else(|_| Some(Err(std::io::ErrorKind::TimedOut.into()))),
+        None => stream.next().await,
+    }
 }
 
 /// Пауза перед попыткой переподключения: 1, 2, 4, 8, затем 10 с.
@@ -306,8 +444,10 @@ pub async fn run(
     let (mut scanned, mut shown) = (0u64, 0u64);
     let mut last: Option<Timestamp> = None;
     let mut since: Option<Timestamp> = None;
-    let mut lost_at: Option<tokio::time::Instant> = None;
+    let mut lost_at: Option<Instant> = None;
     let mut attempt = 0;
+    // Без follow строка ждётся не дольше таймаута запроса.
+    let idle = if follow { None } else { source.read_timeout() };
     loop {
         let opened = tokio::select! {
             _ = cancel.cancelled() => return,
@@ -315,9 +455,18 @@ pub async fn run(
         };
         let mut stream = match opened {
             Ok(s) => s,
-            // Учётные данные и TLS повтор не починит: их ошибка сразу, а не `errors.logs.lost`
-            // через минуту.
-            Err(error) if lost_at.is_none() || breaks_client(error.code) => {
+            // Пода больше нет (удалили, пока шло переподключение): лог кончился.
+            Err(error) if lost_at.is_some() && error.code == ErrorCode::NotFound => {
+                sink.send(LogEvent::End { scanned, shown });
+                return;
+            }
+            // Первое открытие не повторяется. Учётные данные, TLS и права повтор не починит:
+            // их ошибка сразу, а не `errors.logs.lost` через минуту.
+            Err(error)
+                if lost_at.is_none()
+                    || breaks_client(error.code)
+                    || error.code == ErrorCode::Forbidden =>
+            {
                 sink.send(LogEvent::Error { error });
                 return;
             }
@@ -334,11 +483,13 @@ pub async fn run(
                 continue;
             }
         };
+        let opened_at = Instant::now();
         let mut batch: Batch<LogLine> = Batch::default();
         let mut tick = tokio::time::interval(BATCH_WINDOW);
         // После переподключения строки до `last` включительно уже показаны.
         let resume_after = since.and(last);
-        loop {
+        let mut deadline = idle.map(|d| Instant::now() + d);
+        let failure = loop {
             let line = tokio::select! {
                 _ = cancel.cancelled() => return,
                 _ = tick.tick() => {
@@ -349,9 +500,14 @@ pub async fn run(
                     }
                     continue;
                 }
-                line = stream.next() => line,
+                line = next_before(&mut stream, deadline) => line,
             };
-            let Some(Ok(raw)) = line else { break };
+            let raw = match line {
+                Some(Ok(raw)) => raw,
+                Some(Err(e)) => break Some(e),
+                None => break None,
+            };
+            deadline = idle.map(|d| Instant::now() + d);
             let (ts, text) = split_line(&raw);
             if resume_after.is_some_and(|after| ts.is_some_and(|t| t <= after)) {
                 continue;
@@ -359,8 +515,9 @@ pub async fn run(
             // Строки приходят — соединение восстановлено.
             lost_at = None;
             attempt = 0;
-            if ts.is_some() {
-                last = ts;
+            // Время строк не идёт назад: с него начнётся переподключение.
+            if let Some(t) = ts {
+                last = Some(last.map_or(t, |l| l.max(t)));
             }
             scanned += 1;
             if matcher.matches(text) {
@@ -381,7 +538,7 @@ pub async fn run(
                     return;
                 }
             }
-        }
+        };
         if !batch.is_empty()
             && !sink.send(LogEvent::Lines {
                 lines: batch.take(),
@@ -391,11 +548,32 @@ pub async fn run(
         {
             return;
         }
-        if !follow || matches!(source.running().await, Ok(false)) {
+        // Без follow обрыв и таймаут — ошибка, а не конец лога.
+        if !follow {
+            sink.send(match failure {
+                Some(e) => LogEvent::Error {
+                    error: read_error(&e),
+                },
+                None => LogEvent::End { scanned, shown },
+            });
+            return;
+        }
+        let running = tokio::select! {
+            _ = cancel.cancelled() => return,
+            r = source.running() => r,
+        };
+        // Контейнер завершился или пода больше нет: лог кончился.
+        if matches!(&running, Ok(false)) || running.is_err_and(|e| e.code == ErrorCode::NotFound) {
             sink.send(LogEvent::End { scanned, shown });
             return;
         }
-        let started = *lost_at.get_or_insert_with(tokio::time::Instant::now);
+        // Поток продержался дольше `RECONNECT_FOR` — соединение восстанавливалось, даже если
+        // строк не было: контейнер молчит, а прокси рвёт соединения без данных.
+        if opened_at.elapsed() >= RECONNECT_FOR {
+            lost_at = None;
+            attempt = 0;
+        }
+        let started = *lost_at.get_or_insert_with(Instant::now);
         if started.elapsed() >= RECONNECT_FOR {
             sink.send(LogEvent::Error { error: lost() });
             return;
@@ -417,36 +595,66 @@ pub async fn run(
     }
 }
 
-/// Сохраняет лог (без follow) в файл: подошедшие под фильтр строки целиком, с временем, если
-/// `timestamps`. Возвращает число записанных строк.
+/// Сохраняет лог (без follow) в файл: подошедшие под фильтр строки целиком (до `SAVE_LINE`), с
+/// временем, если `timestamps`. Строки пишутся частями во временный файл рядом (0600), и файл
+/// появляется по пути, только когда лог прочитан весь: при ошибке, таймауте строки и отмене
+/// (future брошен) его нет. Возвращает число записанных строк.
 pub async fn save(
     source: &impl LogSource,
     matcher: &Matcher,
     path: &Path,
     timestamps: bool,
 ) -> AppResult<u64> {
-    let mut stream = source.open(None).await?;
-    let mut out = String::new();
+    let mut stream = source.open_whole().await?;
+    let idle = source.read_timeout();
+    let target = path.to_path_buf();
+    let mut file = blocking(move || AtomicFile::create(&target)).await?;
+    let mut out = Vec::new();
     let mut n = 0;
-    while let Some(raw) = stream.next().await {
-        let raw = raw?;
+    loop {
+        let next = match idle {
+            Some(d) => tokio::time::timeout(d, stream.next())
+                .await
+                .map_err(|_| timeout())?,
+            None => stream.next().await,
+        };
+        let Some(raw) = next else { break };
+        let raw = raw.map_err(|e| read_error(&e))?;
         let (ts, text) = split_line(&raw);
         if !matcher.matches(text) {
             continue;
         }
         if timestamps && let Some(t) = ts {
-            out.push_str(&t.to_string());
-            out.push(' ');
+            out.extend_from_slice(t.to_string().as_bytes());
+            out.push(b' ');
         }
-        out.push_str(text);
-        out.push('\n');
+        out.extend_from_slice(text.as_bytes());
+        out.push(b'\n');
         n += 1;
+        if out.len() >= SAVE_CHUNK {
+            file = write_part(file, std::mem::take(&mut out)).await?;
+        }
     }
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || std::fs::write(path, out))
-        .await
-        .map_err(|e| AppError::internal_with(e.to_string()))??;
+    let file = write_part(file, out).await?;
+    blocking(move || file.commit()).await?;
     Ok(n)
+}
+
+/// Часть файла пишется в фоновом потоке: запись на диск не занимает поток tokio.
+async fn write_part(mut file: AtomicFile, bytes: Vec<u8>) -> AppResult<AtomicFile> {
+    blocking(move || {
+        file.write_all(&bytes)?;
+        Ok(file)
+    })
+    .await
+}
+
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> AppResult<T> + Send + 'static,
+) -> AppResult<T> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| AppError::internal_with(e.to_string()))?
 }
 
 #[cfg(test)]
@@ -748,6 +956,340 @@ mod tests {
         assert_eq!(*reported.lock().unwrap(), ["errors.k8s.unauthorized"]);
     }
 
+    type Lines = BoxStream<'static, std::io::Result<String>>;
+
+    /// Источник по шагам: каждый `open` берёт следующий поток или ошибку (дальше — поток без
+    /// строк, который не кончается); `running` — заданный ответ, а `None` — ответа нет.
+    struct Steps {
+        opens: Mutex<std::collections::VecDeque<AppResult<Lines>>>,
+        since: std::sync::Arc<Mutex<Vec<Option<Timestamp>>>>,
+        running: Option<AppResult<bool>>,
+        timeout: Option<Duration>,
+    }
+
+    impl Steps {
+        fn new(opens: Vec<AppResult<Lines>>) -> Self {
+            Self {
+                opens: Mutex::new(opens.into()),
+                since: Default::default(),
+                running: Some(Ok(true)),
+                timeout: None,
+            }
+        }
+    }
+
+    impl LogSource for Steps {
+        fn open(
+            &self,
+            since: Option<Timestamp>,
+        ) -> BoxFuture<'_, AppResult<BoxStream<'static, std::io::Result<String>>>> {
+            self.since.lock().unwrap().push(since);
+            let next = self
+                .opens
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| Ok(futures::stream::pending().boxed()));
+            Box::pin(async move { next })
+        }
+
+        fn running(&self) -> BoxFuture<'_, AppResult<bool>> {
+            let running = self.running.clone();
+            Box::pin(async move {
+                match running {
+                    Some(r) => r,
+                    None => futures::future::pending().await,
+                }
+            })
+        }
+
+        fn read_timeout(&self) -> Option<Duration> {
+            self.timeout
+        }
+    }
+
+    fn lines(xs: &[&str]) -> Lines {
+        let xs: Vec<_> = xs.iter().map(|x| Ok(x.to_string())).collect();
+        futures::stream::iter(xs).boxed()
+    }
+
+    /// Строки, и дальше поток молчит.
+    fn held(xs: &[&str]) -> Lines {
+        lines(xs).chain(futures::stream::pending()).boxed()
+    }
+
+    /// Поток без строк, который кончается через `after`.
+    fn quiet_for(after: Duration) -> Lines {
+        futures::stream::once(tokio::time::sleep(after))
+            .filter_map(|_| async { None })
+            .boxed()
+    }
+
+    fn status(code: u16) -> AppError {
+        crate::k8s::errors::from_status(&kube::core::Status::failure("x", "Reason").with_code(code))
+    }
+
+    /// Запускает сессию на `wait` (время на паузе); после отмены она кончается сразу.
+    async fn run_for(
+        source: impl LogSource + 'static,
+        follow: bool,
+        wait: Duration,
+    ) -> Vec<LogEvent> {
+        let sink = Collect::default();
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(run(
+            source,
+            follow,
+            Matcher::All,
+            sink.clone(),
+            cancel.clone(),
+        ));
+        tokio::time::sleep(wait).await;
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("сессия кончилась по отмене")
+            .unwrap();
+        sink.items()
+    }
+
+    /// Конец лога — `End`, а не обрыв: под удалили (404 при переподключении или при проверке
+    /// контейнера). 403 при переподключении повтор не починит — ошибка сразу.
+    #[tokio::test(start_paused = true)]
+    async fn the_end_of_a_log_is_not_a_lost_connection() {
+        let one = format!("{T1} one");
+        let wait = Duration::from_secs(120);
+        let deleted = Steps::new(vec![Ok(lines(&[&one])), Err(status(404))]);
+        assert_eq!(
+            texts(&run_for(deleted, true, wait).await),
+            ["one", "<reconnecting>", "<end 1/1>"]
+        );
+        let mut gone = Steps::new(vec![Ok(lines(&[&one]))]);
+        gone.running = Some(Err(status(404)));
+        assert_eq!(
+            texts(&run_for(gone, true, wait).await),
+            ["one", "<end 1/1>"]
+        );
+        let forbidden = Steps::new(vec![Ok(lines(&[&one])), Err(status(403))]);
+        assert_eq!(
+            texts(&run_for(forbidden, true, wait).await),
+            ["one", "<reconnecting>", "<error errors.k8s.forbidden>"]
+        );
+    }
+
+    /// Переподключение удалось, контейнер молчит дольше минуты, и поток снова рвётся: это новый
+    /// обрыв, а не тот же, что минуту назад.
+    #[tokio::test(start_paused = true)]
+    async fn a_reconnect_that_stays_open_is_a_recovery() {
+        let source = Steps::new(vec![
+            Ok(lines(&[&format!("{T1} one")])),
+            Ok(quiet_for(Duration::from_secs(120))),
+        ]);
+        let events = run_for(source, true, Duration::from_secs(300)).await;
+        assert_eq!(texts(&events), ["one", "<reconnecting>", "<reconnecting>"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconnect_starts_from_the_latest_line() {
+        let source = Steps::new(vec![Ok(lines(&[
+            &format!("{T3} three"),
+            &format!("{T1} one"),
+        ]))]);
+        let since = source.since.clone();
+        run_for(source, true, Duration::from_secs(5)).await;
+        let since = since.lock().unwrap().clone();
+        assert_eq!(
+            since[1].map(|t| t.to_string()).as_deref(),
+            Some("2026-10-25T10:00:01Z")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancel_does_not_wait_for_the_container_check() {
+        let mut source = Steps::new(vec![Ok(lines(&[&format!("{T1} one")]))]);
+        source.running = None;
+        assert_eq!(
+            texts(&run_for(source, true, Duration::from_secs(1)).await),
+            ["one"]
+        );
+    }
+
+    /// Без follow обрыв потока и строка, которой нет дольше таймаута запроса, — ошибка, а не
+    /// конец лога; у сохранения — тоже, и файла нет.
+    #[tokio::test(start_paused = true)]
+    async fn without_follow_a_broken_or_stalled_stream_is_an_error() {
+        let one = format!("{T1} one");
+        let broken = futures::stream::iter(vec![
+            Ok(one.clone()),
+            Err(std::io::Error::other("connection reset by peer")),
+        ])
+        .boxed();
+        assert_eq!(
+            texts(&run_for(Steps::new(vec![Ok(broken)]), false, Duration::from_secs(1)).await),
+            ["one", "<error errors.k8s.connect>"]
+        );
+        let stalled = || {
+            let mut s = Steps::new(vec![Ok(held(&[&one]))]);
+            s.timeout = Some(Duration::from_secs(5));
+            s
+        };
+        assert_eq!(
+            texts(&run_for(stalled(), false, Duration::from_secs(30)).await),
+            ["one", "<error errors.k8s.timeout>"]
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let e = save(
+            &stalled(),
+            &Matcher::All,
+            &dir.path().join("web-1.log"),
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.key, "errors.k8s.timeout");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "ни файла, ни временного файла"
+        );
+    }
+
+    #[tokio::test]
+    async fn lines_are_cut_at_the_cap_and_decoded_lossily() {
+        let data = b"short\r\n0123456789abcdef\n\xffok\nlast".to_vec();
+        // Маленький буфер: строки приходят частями.
+        let reader = futures::io::BufReader::with_capacity(4, futures::io::Cursor::new(data));
+        let got: Vec<String> = lossy_lines(reader, 10).map(|l| l.unwrap()).collect().await;
+        assert_eq!(got, ["short", "0123456789", "\u{FFFD}ok", "last"]);
+    }
+
+    /// Ответ API: `body` на запрос лога, под — на остальные (их число — в `others`).
+    fn kube_logs(
+        body: Vec<u8>,
+        previous: bool,
+        follow: bool,
+    ) -> (
+        KubeLogs,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<Vec<crate::k8s::testing::Seen>>,
+    ) {
+        let others = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = others.clone();
+        let (client, server) = crate::k8s::testing::mock_raw(move |s| {
+            if s.path().ends_with("/log") {
+                (200, body.clone())
+            } else {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let pod = crate::k8s::pods::fixtures::running("web-1");
+                (200, serde_json::to_vec(&pod).unwrap())
+            }
+        });
+        let logs = KubeLogs {
+            reader: ReadClient::new(client, Duration::from_secs(5)),
+            params: LogParams {
+                connection_id: "a".into(),
+                namespace: "team-a".into(),
+                pod: "web-1".into(),
+                container: None,
+                previous,
+                tail_lines: None,
+                since_seconds: None,
+                since_time: None,
+                follow,
+                filter: None,
+            },
+        };
+        (logs, others, server)
+    }
+
+    /// Сессия без отмены: ждёт, пока она кончится сама.
+    async fn run_to_end(source: impl LogSource + 'static, follow: bool) -> Vec<LogEvent> {
+        let sink = Collect::default();
+        let task = tokio::spawn(run(
+            source,
+            follow,
+            Matcher::All,
+            sink.clone(),
+            CancellationToken::new(),
+        ));
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("лог кончился")
+            .unwrap();
+        sink.items()
+    }
+
+    #[tokio::test]
+    async fn lines_that_are_not_utf8_are_shown_and_saved_with_replacement() {
+        let body = [
+            format!("{T1} one\n").into_bytes(),
+            format!("{T2} bad ").into_bytes(),
+            b"\xff\xfe end\n".to_vec(),
+            format!("{T3} three\n").into_bytes(),
+        ]
+        .concat();
+        let (logs, _, _server) = kube_logs(body.clone(), false, false);
+        assert_eq!(
+            texts(&run_to_end(logs, false).await),
+            ["one", "bad \u{FFFD}\u{FFFD} end", "three", "<end 3/3>"]
+        );
+        let (logs, _, _server) = kube_logs(body, false, false);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("web-1.log");
+        assert_eq!(save(&logs, &Matcher::All, &path, false).await.unwrap(), 3);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "one\nbad \u{FFFD}\u{FFFD} end\nthree\n"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "в логе бывают секреты");
+        }
+    }
+
+    /// Лог прежнего экземпляра контейнера с follow: конец потока — конец лога, без
+    /// переподключения и без проверки контейнера.
+    #[tokio::test]
+    async fn previous_with_follow_ends_without_reconnecting() {
+        let body = format!("{T1} first\n{T2} second\n").into_bytes();
+        let (logs, others, server) = kube_logs(body, true, true);
+        assert_eq!(
+            texts(&run_to_end(logs, true).await),
+            ["first", "second", "<end 2/2>"]
+        );
+        assert_eq!(others.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let seen = server.await.unwrap();
+        let uris: Vec<&str> = seen.iter().map(|s| s.uri.as_str()).collect();
+        assert!(uris.iter().all(|u| !u.contains("follow")), "{uris:?}");
+    }
+
+    #[test]
+    fn a_start_time_must_be_rfc3339() {
+        let bad = LogParams {
+            connection_id: "a".into(),
+            namespace: "team-a".into(),
+            pod: "web-1".into(),
+            container: None,
+            previous: false,
+            tail_lines: None,
+            since_seconds: None,
+            since_time: Some("yesterday".into()),
+            follow: false,
+            filter: None,
+        };
+        assert_eq!(
+            check_since(&bad).unwrap_err().key,
+            "errors.logs.badSinceTime"
+        );
+        let ok = LogParams {
+            since_time: Some(T1.into()),
+            ..bad
+        };
+        assert!(check_since(&ok).is_ok());
+    }
+
     #[tokio::test]
     async fn kube_logs_ask_for_a_tail_with_timestamps_and_save_writes_a_file() {
         let (client, server) = crate::k8s::testing::mock_raw(|s| {
@@ -758,8 +1300,9 @@ mod tests {
                 (200, serde_json::to_vec(&pod).unwrap())
             }
         });
+        let reader = ReadClient::new(client, Duration::from_secs(5));
         let logs = KubeLogs {
-            reader: ReadClient::new(client, Duration::from_secs(5)),
+            reader: reader.clone(),
             params: LogParams {
                 connection_id: "a".into(),
                 namespace: "team-a".into(),
@@ -773,7 +1316,19 @@ mod tests {
                 filter: None,
             },
         };
-        assert!(logs.running().await.unwrap());
+        assert!(
+            !logs.running().await.unwrap(),
+            "прежний экземпляр контейнера не работает"
+        );
+        let current = KubeLogs {
+            reader,
+            params: LogParams {
+                previous: false,
+                ..logs.params.clone()
+            },
+        };
+        assert!(current.running().await.unwrap());
+        drop(current);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("web-1.log");
         let matcher = Matcher::new(Some(&LogFilter {

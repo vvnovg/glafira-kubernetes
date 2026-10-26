@@ -34,31 +34,75 @@ fn create_private(path: &Path) -> std::io::Result<File> {
 /// Атомарная запись: временный файл → fsync → rename → fsync каталога.
 /// При сбое на любом шаге исходный файл остаётся нетронутым.
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> AppResult<()> {
-    let dir = path
-        .parent()
+    let mut f = AtomicFile::create(path)?;
+    f.write_all(bytes)?;
+    f.commit()
+}
+
+fn write_failed(path: &Path, e: std::io::Error) -> AppError {
+    app_err!(
+        ErrorCode::Internal,
+        "errors.storage.writeFailed",
+        "Failed to write {{path}}: {{error}}",
+        path = path.display(),
+        error = e
+    )
+}
+
+/// Файл, который появляется по пути только целиком, — как `atomic_write`, но данные пишутся
+/// частями: во временный файл рядом (0600), `commit` — fsync, rename и fsync каталога. Без
+/// `commit` (ошибка, отмена) временный файл удаляется.
+pub struct AtomicFile {
+    path: PathBuf,
+    tmp: PathBuf,
+    file: Option<File>,
+}
+
+impl AtomicFile {
+    pub fn create(path: &Path) -> AppResult<Self> {
+        let tmp = tmp_path(path);
+        let file = fs::create_dir_all(parent(path))
+            .and_then(|_| create_private(&tmp))
+            .map_err(|e| write_failed(path, e))?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            tmp,
+            file: Some(file),
+        })
+    }
+
+    pub fn write_all(&mut self, bytes: &[u8]) -> AppResult<()> {
+        match &mut self.file {
+            Some(f) => f.write_all(bytes).map_err(|e| write_failed(&self.path, e)),
+            None => Ok(()),
+        }
+    }
+
+    pub fn commit(mut self) -> AppResult<()> {
+        let result = (|| -> std::io::Result<()> {
+            if let Some(f) = self.file.take() {
+                f.sync_all()?;
+            }
+            fs::rename(&self.tmp, &self.path)?;
+            sync_dir(parent(&self.path));
+            Ok(())
+        })();
+        result.map_err(|e| write_failed(&self.path, e))
+    }
+}
+
+impl Drop for AtomicFile {
+    /// Временного файла после rename уже нет, и удалять нечего.
+    fn drop(&mut self) {
+        self.file.take();
+        let _ = fs::remove_file(&self.tmp);
+    }
+}
+
+fn parent(path: &Path) -> &Path {
+    path.parent()
         .filter(|d| !d.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let tmp = tmp_path(path);
-    let result = (|| -> std::io::Result<()> {
-        fs::create_dir_all(dir)?;
-        let mut f = create_private(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-        drop(f);
-        fs::rename(&tmp, path)?;
-        sync_dir(dir);
-        Ok(())
-    })();
-    result.map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        app_err!(
-            ErrorCode::Internal,
-            "errors.storage.writeFailed",
-            "Failed to write {{path}}: {{error}}",
-            path = path.display(),
-            error = e
-        )
-    })
+        .unwrap_or(Path::new("."))
 }
 
 /// fsync каталога фиксирует rename на диске (POSIX). На Windows каталог так не открыть — пропускаем.
