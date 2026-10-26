@@ -88,12 +88,15 @@ pub fn check(s: &ClusterSnapshot, out: &mut Findings) {
             let target = || Target::workload(ns, w.kind, &w.name);
             let owned: Vec<&PodSnap> = groups.get(&target()).cloned().unwrap_or_default();
             // `by_owner` не отдаёт удаляемые поды, а «подов нет вовсе» с ними неверно: владельца
-            // сопоставляем так же, как `by_owner`, но по всем подам проекта.
-            let any_pods = project.pods.iter().flatten().any(|p| {
-                p.owner
-                    .as_ref()
-                    .is_some_and(|o| workload_kind(&o.kind) == Some(w.kind) && o.name == w.name)
-            });
+            // сопоставляем так же, как `by_owner`, но по всем подам проекта. Поды не прочитаны
+            // (`None`) — нет прав или список не поместился в предел: что их нет вовсе, неизвестно,
+            // и от создания workload'а нехватка не считается.
+            let any_pods = project.pods.is_none()
+                || project.pods.iter().flatten().any(|p| {
+                    p.owner
+                        .as_ref()
+                        .is_some_and(|o| workload_kind(&o.kind) == Some(w.kind) && o.name == w.name)
+                });
             let (desired, available) = (w.desired.unwrap_or(0), w.available.unwrap_or(0));
             if LONG_LIVED.contains(&w.kind)
                 && desired > 0
@@ -391,6 +394,17 @@ mod tests {
         );
         assert_eq!(ids(&v), ["workload.unavailable db"]);
         assert_eq!(v[0].params["minutes"], 10);
+    }
+
+    #[test]
+    fn workload_with_unread_pods_does_not_count_from_creation() {
+        // Поды проекта не прочитаны (`None`): что их нет вовсе, неизвестно.
+        let mut p = with(
+            vec![],
+            vec![workload(WorkloadKind::StatefulSet, "db", 3, 0)],
+        );
+        p.pods = None;
+        assert_eq!(ids(&run(vec![p], Environment::Prod)), Vec::<String>::new());
     }
 
     #[test]

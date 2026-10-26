@@ -20,7 +20,7 @@ use tokio::time::Instant;
 
 use super::model::TargetKind;
 use super::snapshot::*;
-use crate::error::{AppError, AppResult};
+use crate::error::{AppError, AppResult, ErrorCode};
 use crate::k8s::cluster::ConnectionInfo;
 use crate::k8s::network::{
     endpoints_by_service, gateway_route_row, gateways, grpc_routes, http_routes, ingress_row,
@@ -91,13 +91,35 @@ impl Reader<'_> {
         self.gap(part, namespace, "TIMEOUT".into());
     }
 
-    /// Запрос под слотом и дедлайном; ошибка — разрыв `part` и `None`. После дедлайна новые
-    /// запросы не уходят. Запрос — в куче (`BoxFuture`): у проекта их десяток, и вместе они
-    /// не помещались бы в стек потока runtime.
+    /// Запрос под слотом и дедлайном; ошибка — разрыв `part` и `None`. Ответ 404 — вида нет
+    /// в кластере (GRPCRoute до Gateway API 1.1, IngressClass до 1.19): `None` без разрыва, как
+    /// в интерфейсе (`k8s::network`). После дедлайна новые запросы не уходят. Запрос — в куче
+    /// (`BoxFuture`): у проекта их десяток, и вместе они не помещались бы в стек потока runtime.
     fn read<'s, T: Send + 's>(
         &'s self,
         part: &'s str,
         namespace: Option<&'s str>,
+        fut: impl Future<Output = AppResult<T>> + Send + 's,
+    ) -> BoxFuture<'s, Option<T>> {
+        self.run(part, namespace, true, fut)
+    }
+
+    /// Как `read`, но 404 — такой же разрыв, как остальные ошибки: у `/readyz` и списка проектов
+    /// «вида нет» не бывает, а молчаливое `None` скрыло бы, что не прочитано ничего.
+    fn read_required<'s, T: Send + 's>(
+        &'s self,
+        part: &'s str,
+        namespace: Option<&'s str>,
+        fut: impl Future<Output = AppResult<T>> + Send + 's,
+    ) -> BoxFuture<'s, Option<T>> {
+        self.run(part, namespace, false, fut)
+    }
+
+    fn run<'s, T: Send + 's>(
+        &'s self,
+        part: &'s str,
+        namespace: Option<&'s str>,
+        absent_is_none: bool,
         fut: impl Future<Output = AppResult<T>> + Send + 's,
     ) -> BoxFuture<'s, Option<T>> {
         Box::pin(async move {
@@ -111,6 +133,7 @@ impl Reader<'_> {
             };
             match tokio::time::timeout_at(self.deadline, run).await {
                 Ok(Ok(v)) => Some(v),
+                Ok(Err(e)) if absent_is_none && e.code == ErrorCode::NotFound => None,
                 Ok(Err(e)) => {
                     self.gap(part, namespace, code(&e));
                     None
@@ -288,14 +311,20 @@ pub fn pod_snap(p: &Pod) -> PodSnap {
 }
 
 fn workload_snap(f: WorkloadFacts) -> WorkloadSnap {
+    // `Progressing` и `Available` разбирает `workload.rolloutStuck`, а он — про Deployment
+    // и DeploymentConfig; у остальных видов одноимённое условие означало бы другое.
+    let rollout = matches!(
+        f.row.kind,
+        WorkloadKind::Deployment | WorkloadKind::DeploymentConfig
+    );
     WorkloadSnap {
         kind: f.row.kind,
         name: f.row.name,
         created: f.row.created,
         desired: f.row.desired,
         available: f.row.available,
-        progressing: find(&f.conditions, "Progressing"),
-        available_cond: find(&f.conditions, "Available"),
+        progressing: find(&f.conditions, "Progressing").filter(|_| rollout),
+        available_cond: find(&f.conditions, "Available").filter(|_| rollout),
         containers: f
             .template
             .and_then(|t| t.spec)
@@ -436,7 +465,7 @@ async fn projects(
         }
         None => {
             let list = rd
-                .read(
+                .read_required(
                     "projects",
                     None,
                     crate::k8s::projects::list_projects(rd.r, info.api_groups.projects, profile),
@@ -544,6 +573,9 @@ async fn project(rd: &Reader<'_>, info: &ConnectionInfo, ns: &str) -> ProjectSna
                 .extend(objs.iter().map(|o| gateway_route_snap(kind, o)));
         }
     }
+    // Route ожидались (группа API есть), но не прочитались: какой Ingress OpenShift обслуживает
+    // через Routes, неизвестно, и класс такого Ingress правило не проверяет.
+    let routes_unread = groups.routes && route_objs.is_none();
     let ready = slices.as_deref().map(endpoints_by_service);
     let mounted = pods.as_deref().map(mounts);
     ProjectSnap {
@@ -581,7 +613,7 @@ async fn project(rd: &Reader<'_>, info: &ConnectionInfo, ns: &str) -> ProjectSna
                         backends,
                         tls_secrets: row.tls.iter().filter_map(|t| t.secret.clone()).collect(),
                         created: row.created,
-                        has_routes: !row.routes.is_empty(),
+                        has_routes: routes_unread || !row.routes.is_empty(),
                     }
                 })
                 .collect()
@@ -637,19 +669,17 @@ async fn project(rd: &Reader<'_>, info: &ConnectionInfo, ns: &str) -> ProjectSna
 async fn cluster(rd: &Reader<'_>, info: &ConnectionInfo, s: &mut ClusterSnapshot) {
     let caps = &info.capabilities;
     let lp = ListParams::default();
-    let readyz = async {
+    // Как любое чтение: под слотом и дедлайном, ошибка — разрыв `readyz`.
+    let readyz = rd.read_required("readyz", None, async {
         let r = crate::k8s::overview::readyz(rd.r).await;
         match r.error {
-            None => Some(Readyz {
+            None => Ok(Readyz {
                 ok: r.ok,
                 failed: r.failed,
             }),
-            Some(e) => {
-                rd.gap("readyz", None, code(&e));
-                None
-            }
+            Some(e) => Err(e),
         }
-    };
+    });
     let nodes = async {
         match caps.list_nodes {
             true => rd.list("nodes", None, rd.r.list_cluster::<Node>(&lp)).await,
@@ -778,24 +808,31 @@ pub async fn collect(
         futures::future::join_all(names.iter().map(|ns| Box::pin(project(&rd, info, ns))))
     );
     s.projects = projects;
-    // Не больше `limits.pods` подов: проекты по порядку, остальные поды не проверяются.
+    // Не больше `limits.pods` подов: проекты по порядку. Проект, чей список не поместился,
+    // и все после него не прочитаны (`None`): обрезанный список правила приняли бы за полный
+    // (`workload.unavailable` для workload'а, чьи поды отрезаны). Об этом говорит `pod_limit`.
     let mut budget = limits.pods;
     let mut pod_limit = false;
     for p in &mut s.projects {
-        if let Some(pods) = &mut p.pods {
-            if pods.len() > budget {
-                pods.truncate(budget);
-                pod_limit = true;
-            }
-            budget -= pods.len();
+        let count = p.pods.as_ref().map_or(0, Vec::len);
+        if count > budget {
+            p.pods = None;
+            pod_limit = true;
+            budget = 0;
+        } else {
+            budget -= count;
         }
     }
+    // Разрывы приходят в порядке завершения запросов; в `check.partial` — по порядку: сначала
+    // кластер, затем проекты по имени, внутри — по части.
+    let mut gaps = std::mem::take(&mut *rd.gaps.lock().unwrap_or_else(|e| e.into_inner()));
+    gaps.sort_by(|a, b| (&a.namespace, &a.part, &a.code).cmp(&(&b.namespace, &b.part, &b.code)));
     s.coverage = Coverage {
         projects_total: total,
         projects_checked: s.projects.len(),
         pod_limit,
         timed_out: *rd.timed_out.lock().unwrap_or_else(|e| e.into_inner()),
-        gaps: std::mem::take(&mut *rd.gaps.lock().unwrap_or_else(|e| e.into_inner())),
+        gaps,
     };
     s
 }
@@ -1021,12 +1058,16 @@ mod tests {
             (s.coverage.projects_total, s.coverage.projects_checked),
             (3, 2)
         );
-        let pods: Vec<usize> = s
+        let pods: Vec<Option<usize>> = s
             .projects
             .iter()
-            .map(|p| p.pods.as_ref().unwrap().len())
+            .map(|p| p.pods.as_ref().map(Vec::len))
             .collect();
-        assert_eq!(pods, [2, 1]);
+        assert_eq!(
+            pods,
+            [Some(2), None],
+            "список, не поместившийся в предел, не прочитан целиком — поды проекта `None`"
+        );
         assert!(s.coverage.pod_limit && s.coverage.partial());
         drop(r);
         let seen = server.await.unwrap();
@@ -1058,6 +1099,289 @@ mod tests {
         assert!(s.coverage.timed_out);
         assert!(s.coverage.gaps.iter().any(|g| g.code == "TIMEOUT"));
         assert!(s.projects[0].pods.is_none());
+    }
+
+    fn not_found() -> (u16, Vec<u8>) {
+        let (code, v) = crate::k8s::testing::status(404, "NotFound", "not found");
+        (code, serde_json::to_vec(&v).unwrap())
+    }
+
+    fn gap_lines(s: &ClusterSnapshot) -> Vec<String> {
+        s.coverage
+            .gaps
+            .iter()
+            .map(|g| {
+                format!(
+                    "{} {} {}",
+                    g.namespace.as_deref().unwrap_or("-"),
+                    g.part,
+                    g.code
+                )
+            })
+            .collect()
+    }
+
+    /// Права на всё есть: разрывов не бывает, пока кластер не откажет.
+    fn admin() -> Capabilities {
+        Capabilities {
+            list_projects: true,
+            list_nodes: true,
+            list_all_pods: true,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn an_absent_kind_is_not_a_gap() {
+        // Gateway API 1.0 без GRPCRoute v1 и кластер без IngressClass отвечают 404.
+        let (client, _server) = mock_raw(|s| match s.path() {
+            p if p.ends_with("/grpcroutes") || p.ends_with("/ingressclasses") => not_found(),
+            _ => list("List", vec![]),
+        });
+        let r = ReadClient::new(client, Duration::from_secs(5));
+        let mut i = info(admin());
+        i.api_groups.gateway_api = true;
+        let s = collect(
+            &r,
+            &i,
+            &sample_profile("c1"),
+            Some(&["a".to_string()]),
+            LIMITS,
+            NOW,
+        )
+        .await;
+        assert_eq!(gap_lines(&s), Vec::<String>::new());
+        assert!(!s.coverage.partial());
+        let a = &s.projects[0];
+        assert_eq!(
+            a.gateway_routes.as_deref().map(<[_]>::len),
+            Some(0),
+            "HTTPRoute прочитан, GRPCRoute — вида нет"
+        );
+        assert!(a.gateways.is_some());
+        assert!(s.ingress_classes.is_none(), "нет вида — нет классов");
+    }
+
+    #[tokio::test]
+    async fn readyz_and_projects_are_required_so_not_found_is_a_gap() {
+        let (client, _server) = mock_raw(|s| match s.path() {
+            "/readyz" | "/api/v1/namespaces" => not_found(),
+            _ => list("List", vec![]),
+        });
+        let r = ReadClient::new(client, Duration::from_secs(5));
+        let s = collect(&r, &info(admin()), &sample_profile("c1"), None, LIMITS, NOW).await;
+        assert!(s.readyz.is_none());
+        assert_eq!(
+            gap_lines(&s),
+            ["- projects NOT_FOUND", "- readyz NOT_FOUND"],
+            "у /readyz и списка проектов вида, которого может не быть, нет"
+        );
+    }
+
+    #[tokio::test]
+    async fn readyz_goes_through_the_slot_and_the_deadline() {
+        let (client, server) = mock_raw(cluster);
+        let r = ReadClient::new(client, Duration::from_secs(5));
+        // Свободных слотов нет: ни один запрос, и `/readyz` тоже, не уходит до дедлайна.
+        let rd = Reader {
+            r: &r,
+            slots: Semaphore::new(0),
+            deadline: Instant::now() + Duration::from_millis(100),
+            gaps: Mutex::new(Vec::new()),
+            timed_out: Mutex::new(false),
+        };
+        let mut s = ClusterSnapshot::empty(NOW, PlatformKind::Kubernetes);
+        super::cluster(&rd, &info(Capabilities::default()), &mut s).await;
+        assert!(s.readyz.is_none());
+        let gaps = std::mem::take(&mut *rd.gaps.lock().unwrap());
+        assert!(
+            gaps.iter()
+                .any(|g| g.part == "readyz" && g.code == "TIMEOUT"),
+            "{gaps:?}"
+        );
+        assert!(*rd.timed_out.lock().unwrap());
+        drop(rd);
+        drop(r);
+        let seen = server.await.unwrap();
+        assert!(
+            !seen.iter().any(|s| s.path() == "/readyz"),
+            "запрос ушёл мимо слота: {seen:?}"
+        );
+    }
+
+    /// Ingress `web` с классом, которого в кластере нет; Routes проекта отвечают по `routes`.
+    fn ingress_with_routes(routes: fn() -> (u16, Vec<u8>)) -> impl Fn(&Seen) -> (u16, Vec<u8>) {
+        move |s| match s.path() {
+            "/apis/networking.k8s.io/v1/ingressclasses" => list(
+                "IngressClassList",
+                vec![json!({"metadata": {"name": "nginx"},
+                    "spec": {"controller": "k8s.io/ingress-nginx"}})],
+            ),
+            "/apis/networking.k8s.io/v1/namespaces/a/ingresses" => list(
+                "IngressList",
+                vec![json!({"metadata": {"name": "web"},
+                    "spec": {"ingressClassName": "traefik",
+                        "defaultBackend": {"service": {"name": "web", "port": {"number": 80}}}}})],
+            ),
+            "/apis/route.openshift.io/v1/namespaces/a/routes" => routes(),
+            _ => list("List", vec![]),
+        }
+    }
+
+    async fn class_missing(routes: fn() -> (u16, Vec<u8>)) -> (Vec<String>, ClusterSnapshot) {
+        let (client, _server) = mock_raw(ingress_with_routes(routes));
+        let r = ReadClient::new(client, Duration::from_secs(5));
+        let mut i = info(admin());
+        i.api_groups.routes = true;
+        let s = collect(
+            &r,
+            &i,
+            &sample_profile("c1"),
+            Some(&["a".to_string()]),
+            LIMITS,
+            NOW,
+        )
+        .await;
+        let findings =
+            crate::health::rules::evaluate(&s, crate::storage::profile::Environment::Prod)
+                .into_iter()
+                .filter(|f| f.rule_id == "ingress.classMissing")
+                .map(|f| f.target.name.clone().unwrap_or_default())
+                .collect();
+        (findings, s)
+    }
+
+    #[tokio::test]
+    async fn unread_routes_do_not_flag_the_ingress_class() {
+        let (found, s) = class_missing(forbidden).await;
+        assert!(s.projects[0].routes.is_none());
+        assert!(gap_lines(&s).contains(&"a routes FORBIDDEN".to_string()));
+        assert_eq!(
+            found,
+            Vec::<String>::new(),
+            "Routes не прочитаны — Ingress может обслуживаться ими"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_routes_without_the_ingress_still_flag_the_class() {
+        let (found, s) = class_missing(|| list("RouteList", vec![])).await;
+        assert!(s.projects[0].routes.is_some());
+        assert_eq!(found, ["web"]);
+    }
+
+    #[tokio::test]
+    async fn gaps_come_out_in_a_stable_order() {
+        let (client, _server) = mock_raw(|s| match s.path() {
+            p if p.ends_with("/secrets") || p == "/api/v1/namespaces/a/pods" => forbidden(),
+            _ => list("List", vec![]),
+        });
+        let r = ReadClient::new(client, Duration::from_secs(5));
+        let requested = ["b", "a"].map(String::from);
+        let s = collect(
+            &r,
+            &info(Capabilities::default()),
+            &sample_profile("c1"),
+            Some(&requested),
+            LIMITS,
+            NOW,
+        )
+        .await;
+        assert_eq!(
+            gap_lines(&s),
+            [
+                "- nodes FORBIDDEN",
+                "- pods (all projects) FORBIDDEN",
+                "a pods FORBIDDEN",
+                "a secrets FORBIDDEN",
+                "b secrets FORBIDDEN",
+            ],
+            "сначала кластер, затем проект, затем часть"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cut_pod_list_does_not_invent_an_unavailable_workload() {
+        let (client, _server) = mock_raw(|s| match s.path() {
+            p if p.ends_with("/pods") => list("PodList", vec![running("web-1"), running("web-2")]),
+            p if p.ends_with("/deployments") => list(
+                "DeploymentList",
+                vec![
+                    json!({"metadata": {"name": "web", "creationTimestamp": "2026-10-25T10:00:00Z"},
+                    "spec": {"replicas": 2, "selector": {"matchLabels": {"app": "web"}},
+                        "template": {"spec": {"containers": [{"name": "web", "image": "web:1"}]}}},
+                    "status": {"availableReplicas": 0}}),
+                ],
+            ),
+            _ => list("List", vec![]),
+        });
+        let r = ReadClient::new(client, Duration::from_secs(5));
+        let limits = Limits { pods: 1, ..LIMITS };
+        let s = collect(
+            &r,
+            &info(admin()),
+            &sample_profile("c1"),
+            Some(&["x".to_string()]),
+            limits,
+            NOW,
+        )
+        .await;
+        assert!(s.coverage.pod_limit && s.projects[0].pods.is_none());
+        let findings: Vec<String> =
+            crate::health::rules::evaluate(&s, crate::storage::profile::Environment::Prod)
+                .iter()
+                .map(|f| f.rule_id.clone())
+                .collect();
+        assert!(
+            !findings.iter().any(|f| f == "workload.unavailable"),
+            "{findings:?}"
+        );
+        assert!(
+            findings.iter().any(|f| f == "check.partial"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn rollout_conditions_are_only_for_deployments() {
+        let facts = |kind: WorkloadKind| WorkloadFacts {
+            row: crate::k8s::workloads::WorkloadRow {
+                kind,
+                name: "w".into(),
+                desired: Some(1),
+                ready: Some(1),
+                available: Some(1),
+                updated: None,
+                images: vec![],
+                created: None,
+                problem: None,
+                schedule: None,
+                suspended: None,
+                last_schedule: None,
+            },
+            conditions: ["Progressing", "Available"]
+                .map(|k| ConditionView {
+                    kind: k.into(),
+                    status: "False".into(),
+                    reason: None,
+                    message: None,
+                    last_transition: None,
+                })
+                .to_vec(),
+            template: None,
+        };
+        for kind in WorkloadKind::ALL {
+            let w = workload_snap(facts(kind));
+            let deploys = matches!(
+                kind,
+                WorkloadKind::Deployment | WorkloadKind::DeploymentConfig
+            );
+            assert_eq!(
+                (w.progressing.is_some(), w.available_cond.is_some()),
+                (deploys, deploys),
+                "{kind:?}"
+            );
+        }
     }
 
     #[test]
