@@ -10,10 +10,24 @@ import { useNamespaceAccess } from "./useNamespaceAccess";
 import { PodList } from "../objects/PodList";
 import { WatchStatusLine } from "../objects/WatchStatusLine";
 import { WORKLOAD_RESOURCES, canList } from "./access";
+import { ConfigView } from "./ConfigView";
+import { NetworkView } from "./NetworkView";
 import { ProjectOverview } from "./ProjectOverview";
+import { QuotasView } from "./QuotasView";
+import { StorageView } from "./StorageView";
 import { WorkloadsTable } from "./WorkloadsTable";
 
-type Sub = "overview" | "workloads" | "pods" | "events";
+type Sub = "overview" | "workloads" | "pods" | "network" | "config" | "storage" | "events" | "quotas";
+
+/** Ресурсы «Сети»: подвкладка видна, если читается хоть один. */
+const NETWORK_RESOURCES = [
+  "services",
+  "ingresses.networking.k8s.io",
+  "routes.route.openshift.io",
+  "gateways.gateway.networking.k8s.io",
+  "httproutes.gateway.networking.k8s.io",
+  "grpcroutes.gateway.networking.k8s.io",
+];
 
 /** Вкладка проекта (спец. §6.3). Подвкладки без прав на чтение не показываются (§5.4); показывается одна, её watch идёт, пока она открыта. */
 export function ProjectPanel({ connectionId, namespace }: { connectionId: string; namespace: string }) {
@@ -26,7 +40,11 @@ export function ProjectPanel({ connectionId, namespace }: { connectionId: string
     { id: "overview", label: t("objects.tabs.overview"), visible: true },
     { id: "workloads", label: t("project.tabs.workloads"), visible: canList(a, ...WORKLOAD_RESOURCES) },
     { id: "pods", label: t("objects.tabs.pods"), visible: canList(a, "pods") },
+    { id: "network", label: t("project.tabs.network"), visible: canList(a, ...NETWORK_RESOURCES) },
+    { id: "config", label: t("project.tabs.config"), visible: canList(a, "configmaps", "secrets") },
+    { id: "storage", label: t("project.tabs.storage"), visible: canList(a, "persistentvolumeclaims") },
     { id: "events", label: t("objects.tabs.events"), visible: canList(a, "events") },
+    { id: "quotas", label: t("project.tabs.quotas"), visible: canList(a, "resourcequotas", "limitranges") },
   ];
   const visible = tabs.filter((x) => x.visible);
   const active = visible.some((x) => x.id === sub) ? sub : "overview";
@@ -40,7 +58,11 @@ export function ProjectPanel({ connectionId, namespace }: { connectionId: string
       {active === "overview" && <ProjectOverview connectionId={connectionId} namespace={namespace} />}
       {active === "workloads" && <ProjectWorkloads connectionId={connectionId} namespace={namespace} />}
       {active === "pods" && <PodList connectionId={connectionId} namespace={namespace} />}
+      {active === "network" && <NetworkView connectionId={connectionId} namespace={namespace} />}
+      {active === "config" && <ConfigView connectionId={connectionId} namespace={namespace} />}
+      {active === "storage" && <StorageView connectionId={connectionId} namespace={namespace} />}
       {active === "events" && <ProjectEvents connectionId={connectionId} namespace={namespace} />}
+      {active === "quotas" && <QuotasView connectionId={connectionId} namespace={namespace} />}
     </div>
   );
 }

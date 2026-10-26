@@ -5,6 +5,7 @@
     "cluster.nodes.taints",
     "cluster.nodes.version",
     "project.tabs.workloads",
-    "project.workloads.title"
+    "project.workloads.title",
+    "project.network.service"
   ]
 }

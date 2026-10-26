@@ -624,7 +624,11 @@
   },
   "project": {
     "tabs": {
-      "workloads": "Workloads"
+      "workloads": "Workloads",
+      "network": "Сеть",
+      "config": "Конфигурация",
+      "storage": "Хранилище",
+      "quotas": "Квоты"
     },
     "workloads": {
       "title": "Workloads",
@@ -648,6 +652,49 @@
       "quotasOk": "Каждая квота занята меньше чем на 80 %.",
       "warnings": "События Warning за последний час",
       "noWarnings": "Предупреждений за последний час нет."
+    },
+    "network": {
+      "name": "Имя",
+      "type": "Тип",
+      "ports": "Порты",
+      "endpoints": "Готовые endpoints",
+      "endpointsUnknown": "Endpoints не видны: {{reason}}",
+      "external": "Внешние адреса",
+      "host": "Хост и путь",
+      "service": "Service",
+      "admitted": "Принят",
+      "certExpires": "Сертификат до",
+      "fromIngress": "из Ingress {{name}}",
+      "class": "Класс",
+      "rules": "Правила",
+      "address": "Адрес",
+      "routesFromIngress": "Routes из этого Ingress: {{names}}",
+      "defaultBackend": "по умолчанию → {{backend}}",
+      "hosts": "Хосты",
+      "parents": "Gateway",
+      "backends": "Бэкенды",
+      "accepted": "принят",
+      "resolvedRefs": "ссылки"
+    },
+    "config": {
+      "keys": "Ключи",
+      "showValues": "Показать значения",
+      "hideValues": "Скрыть значения",
+      "binary": "двоичные данные, {{size}} байт",
+      "secretValuesHidden": "Значения Secret не показываются никогда — только имена, типы и ключи."
+    },
+    "storage": {
+      "class": "Класс хранилища",
+      "capacity": "Ёмкость",
+      "requested": "запрошено {{size}}",
+      "accessModes": "Режимы доступа",
+      "mountedBy": "Кем смонтирован",
+      "unknown": "неизвестно"
+    },
+    "quotas": {
+      "resource": "Ресурс",
+      "used": "Использовано",
+      "hard": "Лимит"
     }
   }
 }

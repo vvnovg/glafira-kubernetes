@@ -610,7 +610,11 @@
   },
   "project": {
     "tabs": {
-      "workloads": "Workloads"
+      "workloads": "Workloads",
+      "network": "Network",
+      "config": "Configuration",
+      "storage": "Storage",
+      "quotas": "Quotas"
     },
     "workloads": {
       "title": "Workloads",
@@ -632,6 +636,49 @@
       "quotasOk": "Every quota is used by less than 80 %.",
       "warnings": "Warning events in the last hour",
       "noWarnings": "No warnings in the last hour."
+    },
+    "network": {
+      "name": "Name",
+      "type": "Type",
+      "ports": "Ports",
+      "endpoints": "Ready endpoints",
+      "endpointsUnknown": "Endpoints are not shown: {{reason}}",
+      "external": "External addresses",
+      "host": "Host and path",
+      "service": "Service",
+      "admitted": "Admitted",
+      "certExpires": "Certificate expires",
+      "fromIngress": "from Ingress {{name}}",
+      "class": "Class",
+      "rules": "Rules",
+      "address": "Address",
+      "routesFromIngress": "Routes from this Ingress: {{names}}",
+      "defaultBackend": "by default → {{backend}}",
+      "hosts": "Hosts",
+      "parents": "Gateways",
+      "backends": "Backends",
+      "accepted": "accepted",
+      "resolvedRefs": "references"
+    },
+    "config": {
+      "keys": "Keys",
+      "showValues": "Show values",
+      "hideValues": "Hide values",
+      "binary": "binary data, {{size}} bytes",
+      "secretValuesHidden": "Secret values are never shown — only names, types and keys."
+    },
+    "storage": {
+      "class": "Storage class",
+      "capacity": "Capacity",
+      "requested": "requested {{size}}",
+      "accessModes": "Access modes",
+      "mountedBy": "Mounted by",
+      "unknown": "unknown"
+    },
+    "quotas": {
+      "resource": "Resource",
+      "used": "Used",
+      "hard": "Limit"
     }
   }
 }
