@@ -9,5 +9,7 @@ pub mod health;
 pub mod mask;
 pub mod model;
 pub mod observe;
+pub mod server;
 
 pub use model::{Backend, ReadOp, ReadOutput, Scope};
+pub use server::{GatewayOptions, INSTRUCTIONS, start};

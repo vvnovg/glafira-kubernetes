@@ -140,3 +140,6 @@
 | `crates/glafira-mcp-kubernetes/src/health.rs` | `crates/glafira-mcp/src/health.rs` | `8bbd0bd` | адаптирован: объекты Kubernetes с проектом, проекты проверки, фильтр области |
 | `crates/glafira-mcp-kubernetes/src/observe.rs` | `crates/glafira-mcp/src/observe.rs` | `8bbd0bd` | адаптирован: хронология workload'а вместо группы |
 | `crates/glafira-mcp-kubernetes/tests/manifest.rs` | `crates/glafira-mcp/tests/manifest.rs` | `8bbd0bd` | адаптирован: запрещены kube, k8s-openapi, reqwest и приложение |
+| `crates/glafira-mcp-kubernetes/src/server/mod.rs` | `crates/glafira-mcp/src/server/mod.rs` | `8bbd0bd` | адаптирован: обработчик поверх `glafira_mcp_core::Session`, инструкции Kubernetes, проверка области LLM |
+| `crates/glafira-mcp-kubernetes/src/server/tools.rs` | `crates/glafira-mcp/src/server/tools.rs` | `8bbd0bd` | адаптирован: 13 инструментов чтения Kubernetes, маскировка в ответах |
+| `crates/glafira-mcp-kubernetes/tests/server.rs` | `crates/glafira-mcp/tests/server.rs` | `8bbd0bd` | адаптирован: фальшивый Backend Kubernetes, область LLM, маскировка |
