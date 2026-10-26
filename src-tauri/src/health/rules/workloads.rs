@@ -37,12 +37,15 @@ pub fn latest_tag(image: &str) -> bool {
 }
 
 /// С какого момента workload не набирает реплик: самый ранний момент, с которого не готов ни
-/// один из его неготовых подов; без неготовых подов (подов не хватает) — условие `Available` =
-/// `False` или создание workload'а.
-fn short_since(w: &WorkloadSnap, pods: &[&PodSnap]) -> Option<i64> {
+/// один из его неготовых подов (только `Running` и `Pending`: завершённые `Failed` и `Succeeded`,
+/// например вытесненные дни назад, нехватки не начинают); без таких подов — условие `Available` =
+/// `False`. Создание workload'а берётся, только если подов нет вовсе (`any_pods` — считая
+/// удаляемые): при выкладке StatefulSet и DaemonSet (у них нет `Available`) один под удаляется, а
+/// остальные готовы — начала нехватки ещё нет.
+fn short_since(w: &WorkloadSnap, pods: &[&PodSnap], any_pods: bool) -> Option<i64> {
     let unready = pods
         .iter()
-        .filter(|p| !p.ready)
+        .filter(|p| !p.ready && matches!(p.phase.as_str(), "Running" | "Pending"))
         .filter_map(|p| p.not_ready_since.or(p.created))
         .min();
     unready.or_else(|| {
@@ -50,7 +53,7 @@ fn short_since(w: &WorkloadSnap, pods: &[&PodSnap]) -> Option<i64> {
             .as_ref()
             .filter(|c| c.is("False"))
             .and_then(|c| c.since)
-            .or(w.created)
+            .or_else(|| w.created.filter(|_| !any_pods))
     })
 }
 
@@ -84,11 +87,18 @@ pub fn check(s: &ClusterSnapshot, out: &mut Findings) {
         for w in project.workloads.iter().flatten() {
             let target = || Target::workload(ns, w.kind, &w.name);
             let owned: Vec<&PodSnap> = groups.get(&target()).cloned().unwrap_or_default();
+            // `by_owner` не отдаёт удаляемые поды, а «подов нет вовсе» с ними неверно: владельца
+            // сопоставляем так же, как `by_owner`, но по всем подам проекта.
+            let any_pods = project.pods.iter().flatten().any(|p| {
+                p.owner
+                    .as_ref()
+                    .is_some_and(|o| workload_kind(&o.kind) == Some(w.kind) && o.name == w.name)
+            });
             let (desired, available) = (w.desired.unwrap_or(0), w.available.unwrap_or(0));
             if LONG_LIVED.contains(&w.kind)
                 && desired > 0
                 && available < desired
-                && let Some(since) = short_since(w, &owned)
+                && let Some(since) = short_since(w, &owned, any_pods)
                 && s.now - since >= GRACE_S
             {
                 out.emit(
@@ -300,6 +310,87 @@ mod tests {
             ),
             (Some(3), Some(1), Some(5))
         );
+    }
+
+    #[test]
+    fn rolling_update_with_a_terminating_pod_is_not_unavailable() {
+        let owned = |name: &str, kind: &str, owner: &str| pod(name, Some((kind, owner)));
+        let mut leaving = owned("db-2", "StatefulSet", "db");
+        leaving.ready = false;
+        leaving.terminating = true;
+        leaving.not_ready_since = Some(NOW - 600);
+        let mut gone = owned("agent-1", "DaemonSet", "agent");
+        gone.terminating = true;
+        let v = run(
+            vec![with(
+                vec![
+                    owned("db-0", "StatefulSet", "db"),
+                    owned("db-1", "StatefulSet", "db"),
+                    leaving,
+                    gone,
+                ],
+                vec![
+                    workload(WorkloadKind::StatefulSet, "db", 3, 2),
+                    workload(WorkloadKind::DaemonSet, "agent", 2, 1),
+                ],
+            )],
+            Environment::Prod,
+        );
+        assert!(
+            ids(&v)
+                .iter()
+                .all(|i| !i.starts_with("workload.unavailable")),
+            "поды есть, но начала нехватки нет — не считаем от создания: {:?}",
+            ids(&v)
+        );
+    }
+
+    #[test]
+    fn finished_pods_do_not_start_the_shortage() {
+        let unready = |name: &str, phase: &str, since: i64| {
+            let mut p = pod(name, Some(("Deployment", "web")));
+            p.ready = false;
+            p.phase = phase.into();
+            p.created = Some(NOW - since);
+            p.not_ready_since = Some(NOW - since);
+            p
+        };
+        let pods = |fresh: i64| {
+            vec![
+                pod("web-1", Some(("Deployment", "web"))),
+                pod("web-2", Some(("Deployment", "web"))),
+                pod("web-3", Some(("Deployment", "web"))),
+                unready("web-4", "Running", fresh),
+                unready("web-old", "Failed", 3 * 86_400),
+                unready("web-done", "Succeeded", 2 * 86_400),
+            ]
+        };
+        let web = || workload(WorkloadKind::Deployment, "web", 4, 3);
+        let v = run(vec![with(pods(10), vec![web()])], Environment::Prod);
+        assert!(ids(&v).is_empty(), "свежий неготовый под: {:?}", ids(&v));
+        let v = run(vec![with(pods(400), vec![web()])], Environment::Prod);
+        assert_eq!(ids(&v), ["workload.unavailable web"]);
+        assert_eq!(
+            v[0].params["minutes"], 6,
+            "от неготового пода, а не от завершённого"
+        );
+    }
+
+    #[test]
+    fn workload_without_any_pods_counts_from_creation() {
+        let mut old = workload(WorkloadKind::StatefulSet, "db", 3, 0);
+        old.created = Some(NOW - 600);
+        let mut young = workload(WorkloadKind::DaemonSet, "agent", 2, 0);
+        young.created = Some(NOW - 120);
+        let v = run(
+            vec![with(
+                vec![pod("other-1", Some(("Deployment", "other")))],
+                vec![old, young],
+            )],
+            Environment::Prod,
+        );
+        assert_eq!(ids(&v), ["workload.unavailable db"]);
+        assert_eq!(v[0].params["minutes"], 10);
     }
 
     #[test]
