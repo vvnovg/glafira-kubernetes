@@ -12,6 +12,8 @@ import { ReadError } from "../common/ReadError";
 import { RefreshControls, useRefreshInterval } from "../common/RefreshControls";
 import { SubTabs } from "../common/SubTabs";
 import { YamlView } from "../common/YamlView";
+import { matchPod } from "../health/findings";
+import { HealthBlock } from "../health/HealthBlock";
 import { LogsView } from "../logs/LogsView";
 import { ContainerCard } from "./ContainerCard";
 import { ObjectEvents } from "./EventList";
@@ -61,6 +63,7 @@ function PodOverview({ connectionId, namespace, name }: { connectionId: string; 
   return (
     <div className="section">
       <RefreshControls interval={interval} onInterval={setInterval} onRefresh={() => void q.refetch()} busy={q.isFetching} />
+      <HealthBlock connectionId={connectionId} match={matchPod(namespace, name)} showTarget />
       {q.isPending && <p className="muted">{t("common.loading")}</p>}
       {q.error && <ReadError error={q.error} connectionId={connectionId} onRetry={() => void q.refetch()} />}
       {q.data && <PodSummary connectionId={connectionId} namespace={namespace} d={q.data} />}

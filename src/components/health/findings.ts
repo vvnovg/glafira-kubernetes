@@ -1,5 +1,5 @@
 import type { TFunction } from "i18next";
-import type { Annotation, Finding, HealthTarget, HealthView, Severity } from "../../api/types";
+import type { Annotation, Finding, HealthTarget, HealthView, Severity, WorkloadKind } from "../../api/types";
 
 export const SEVERITY_RANK: Record<Severity, number> = { info: 0, warning: 1, critical: 2 };
 export const SEVERITIES: Severity[] = ["critical", "warning", "info"];
@@ -105,6 +105,27 @@ export function newestClosedFirst<T extends { closedAtMs?: number; updatedAtMs: 
  * находку своего workload'а (поды одного workload'а дают одну находку со списком `pods`).
  */
 export type Match = (target: HealthTarget, params?: Record<string, unknown>) => boolean;
+
+/** Обзор кластера: сам кластер и ноды. */
+export const matchCluster: Match = (t) => t.kind === "cluster" || t.kind === "node";
+
+/** Проект и всё в нём. */
+export const matchProject =
+  (namespace: string): Match =>
+  (t) =>
+    t.namespace === namespace;
+
+export const matchWorkload =
+  (namespace: string, kind: WorkloadKind, name: string): Match =>
+  (t) =>
+    t.kind === "workload" && t.namespace === namespace && t.workloadKind === kind && t.name === name;
+
+/** Под: его собственные находки и находки его workload'а, в списке подов которых он есть. */
+export const matchPod =
+  (namespace: string, name: string): Match =>
+  (t, params) =>
+    t.namespace === namespace &&
+    ((t.kind === "pod" && t.name === name) || (t.kind === "workload" && Array.isArray(params?.pods) && params.pods.includes(name)));
 
 /** Что относится к объекту: видимые находки и открытые замечания. Без `match` — всё подключение. */
 export function itemsFor(view: HealthView | undefined, match?: Match) {

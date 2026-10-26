@@ -1,11 +1,12 @@
-import { screen } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { checkedView, finding } from "../../../test/health";
 import { renderWithClient } from "../../../test/render";
 
 vi.mock("../../../api/client", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../../../api/client")>();
-  return { ...orig, api: { listProjects: vi.fn(), connect: vi.fn() } };
+  return { ...orig, api: { getHealth: vi.fn().mockResolvedValue({ lastCheck: null, ignored: [], annotations: [] }), listProjects: vi.fn(), connect: vi.fn() } };
 });
 
 import { api } from "../../../api/client";
@@ -150,5 +151,20 @@ describe("ConnectionNode", () => {
     const user = renderNode();
     await user.click(screen.getByRole("button", { name: "Замечания" }));
     expect(useWorkspace.getState().tabs[0]).toMatchObject({ kind: "findings", connectionId: "c1" });
+  });
+
+  it("значки замечаний: у пункта «Замечания» — всё подключение, у проекта — его находки", async () => {
+    vi.mocked(api.getHealth).mockResolvedValue(
+      checkedView([finding("pod.imagePull", "critical", { kind: "pod", namespace: "team-b", name: "pull" }, { image: "x" })]),
+    );
+    vi.mocked(api.listProjects).mockResolvedValue({ items: [project("alpha"), project("team-b")], truncated: false });
+    const user = renderNode();
+    const findings = screen.getByRole("button", { name: "Замечания" }).closest("li")!;
+    expect(await within(findings).findByRole("img", { name: "Критично: 1" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Проекты/ }));
+    const teamB = (await screen.findByRole("button", { name: "team-b" })).closest("li")!;
+    expect(within(teamB).getByRole("img", { name: "Критично: 1" })).toBeInTheDocument();
+    const alpha = screen.getByRole("button", { name: "alpha" }).closest("li")!;
+    expect(within(alpha).queryByRole("img")).not.toBeInTheDocument();
   });
 });

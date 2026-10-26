@@ -7,6 +7,8 @@ import { tr } from "../../../i18n/text";
 import { useWorkspace } from "../../../state/workspace";
 import { EnvBadge } from "../../common/EnvBadge";
 import { TruncatedNote } from "../../common/TruncatedNote";
+import { matchProject } from "../../health/findings";
+import { HealthBadge } from "../../health/HealthBlock";
 
 /** С какого числа проектов показывается фильтр. */
 const FILTER_FROM = 8;
@@ -62,6 +64,7 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
           <button type="button" className="link" onClick={() => open({ kind: "findings", connectionId: c.id })}>
             {t("sidebar.findings")}
           </button>
+          <HealthBadge connectionId={c.id} />
         </li>
       </ul>
     </li>
@@ -110,6 +113,7 @@ function ProjectsNode({ connectionId }: { connectionId: string }) {
             <button type="button" className="link" title={p.displayName ?? undefined} onClick={() => open({ kind: "project", connectionId, namespace: p.name })}>
               {p.favorite ? `★ ${p.name}` : p.name}
             </button>
+            <HealthBadge connectionId={connectionId} match={matchProject(p.name)} />
           </li>
         ))}
       </ul>

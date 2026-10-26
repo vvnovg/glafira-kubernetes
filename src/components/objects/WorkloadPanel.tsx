@@ -12,6 +12,8 @@ import { ReadError } from "../common/ReadError";
 import { RefreshControls, useRefreshInterval } from "../common/RefreshControls";
 import { SubTabs } from "../common/SubTabs";
 import { YamlView } from "../common/YamlView";
+import { matchWorkload } from "../health/findings";
+import { HealthBlock } from "../health/HealthBlock";
 import { ContainerCard } from "./ContainerCard";
 import { ObjectEvents } from "./EventList";
 import { PodList } from "./PodList";
@@ -57,6 +59,7 @@ function WorkloadOverview({ connectionId, namespace, kind, name }: { connectionI
   return (
     <div className="section">
       <RefreshControls interval={interval} onInterval={setInterval} onRefresh={() => void q.refetch()} busy={q.isFetching} />
+      <HealthBlock connectionId={connectionId} match={matchWorkload(namespace, kind, name)} />
       {q.isPending && <p className="muted">{t("common.loading")}</p>}
       {q.error && <ReadError error={q.error} connectionId={connectionId} onRetry={() => void q.refetch()} />}
       {q.data && <WorkloadSummary d={q.data} />}

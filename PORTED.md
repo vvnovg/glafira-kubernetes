@@ -170,3 +170,5 @@
 | `src/components/health/CheckBar.test.tsx` | `src/components/health/CheckBar.test.tsx` | `8bbd0bd` | адаптирован: охват проверки |
 | `src/components/health/FindingsPanel.tsx` | `src/components/health/FindingsPanel.tsx` | `8bbd0bd` | адаптирован: виды объектов Kubernetes, поиск и по проекту, без предложений LLM |
 | `src/components/health/FindingsPanel.test.tsx` | `src/components/health/FindingsPanel.test.tsx` | `8bbd0bd` | адаптирован: правила Kubernetes, без предложений LLM |
+| `src/components/health/HealthBlock.tsx` | `src/components/health/HealthBlock.tsx` | `8bbd0bd` | адаптирован: без предложений LLM |
+| `src/components/health/HealthBlock.test.tsx` | `src/components/health/HealthBlock.test.tsx` | `8bbd0bd` | адаптирован: объекты Kubernetes, под и находки его workload'а |
