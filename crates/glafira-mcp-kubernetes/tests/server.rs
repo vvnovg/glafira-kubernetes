@@ -488,6 +488,7 @@ async fn projects_are_limited_to_the_llm_scope() {
     let v = ok(call(&c, "list_projects", json!({"connectionId": "c1"})).await);
     assert_eq!(v["total"], 1);
     assert_eq!(v["items"][0]["name"], "team-a");
+    assert_eq!(v["truncated"], false, "кластер отдал список целиком");
     let v = ok(call(
         &c,
         "list_projects",
@@ -645,6 +646,29 @@ async fn long_workload_lists_are_truncated_to_the_size_limit() {
     assert!(v["hint"].as_str().unwrap().contains("100 KB"));
     assert_eq!(v["items"][0]["name"], "w000", "по имени");
     assert_eq!(v["errors"][0]["kind"], "CronJob");
+    // Страница обрезана: следующая начинается сразу за последним показанным workload'ом, а не
+    // там, где кончилась бы запрошенная.
+    assert_eq!(
+        (v["total"].as_u64(), v["nextOffset"].as_u64()),
+        (Some(300), Some(n as u64))
+    );
+    let next = ok(call(
+        &c,
+        "list_workloads",
+        json!({"connectionId": "c1", "namespace": "team-a", "limit": 500, "offset": n}),
+    )
+    .await);
+    assert_eq!(next["items"][0]["name"], format!("w{n:03}"));
+    // Предел страницы по умолчанию (200) больше, чем помещается в 100 КБ.
+    let v = ok(call(
+        &c,
+        "list_workloads",
+        json!({"connectionId": "c1", "namespace": "team-a"}),
+    )
+    .await);
+    let shown = v["items"].as_array().unwrap().len();
+    assert!(shown < 200, "{shown}");
+    assert_eq!(v["nextOffset"], shown);
     let v = ok(call(
         &c,
         "list_workloads",
@@ -766,6 +790,499 @@ async fn one_observation_per_session() {
     let msg = err(&call(&c, "observe_workload", args).await);
     assert!(msg.starts_with("busy:"), "{msg}");
     ok(long.await.unwrap());
+}
+
+// ---- Бэкенд поверх Fake: то, чего в Fake нет (длинные списки, секреты в тексте кластера) ----
+
+const JWT: &str = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N";
+/// Образ, в адресе реестра которого лежат учётные данные.
+const CRED_IMAGE: &str = "https://ci:hunter2@registry.example.com/web:1.4";
+const CRED_IMAGE_MASKED: &str = "https://ci:***@registry.example.com/web:1.4";
+
+/// Что `Odd` меняет в ответах `Fake`.
+enum Mode {
+    /// Столько проектов и подов с длинными именами, что страница не помещается в 100 КБ.
+    Bulk(usize),
+    /// Список проектов обрезан самим бэкендом (предел кластера).
+    Capped,
+    /// В тексте кластера лежат секреты.
+    Leaky,
+}
+
+struct Odd {
+    fake: Arc<Fake>,
+    mode: Mode,
+}
+
+fn odd(mode: Mode) -> Arc<Odd> {
+    Arc::new(Odd {
+        fake: Fake::new(),
+        mode,
+    })
+}
+
+fn project_name(i: usize) -> String {
+    format!("p{i:04}")
+}
+
+fn pod_name(i: usize) -> String {
+    format!("web-{i:04}-{}", "x".repeat(1000))
+}
+
+/// Имя i-го элемента списка из `Mode::Bulk`.
+type NameOf = fn(usize) -> String;
+
+/// Условие, в сообщении которого лежит JWT.
+fn leaky_condition(kind: &str) -> Condition {
+    Condition {
+        kind: kind.into(),
+        status: "False".into(),
+        reason: Some("Rejected".into()),
+        message: Some(format!("rejected {JWT}")),
+        last_transition_seconds_ago: None,
+    }
+}
+
+/// Образ и три пробы с секретами: четыре замены.
+fn leak_spec(c: &mut ContainerSpec) {
+    c.image = CRED_IMAGE.into();
+    c.liveness =
+        Some("exec curl -H 'Authorization: Bearer abc.def-123' http://localhost/health".into());
+    c.readiness = Some("http-get http://app:hunter2@localhost:8080/ready".into());
+    c.startup = Some(format!("exec check {JWT}"));
+}
+
+fn leaky_overview() -> ClusterOverview {
+    ClusterOverview {
+        platform: Platform {
+            kind: PlatformKind::Openshift,
+            label: "OpenShift 4.18".into(),
+            version: Some("4.18".into()),
+            distribution: None,
+        },
+        server_version: "v1.31.0".into(),
+        api_server: ApiServer {
+            ready: Some(true),
+            failed_checks: vec![],
+            error: None,
+        },
+        nodes: Part::Data(NodeCounts {
+            total: 1,
+            ready: 1,
+            roles: vec![],
+        }),
+        ingress_classes: Part::Data(vec![]),
+        gateway_classes: None,
+        openshift: Some(OpenShift {
+            cluster_version: Part::Data(ClusterVersion {
+                version: Some("4.18.1".into()),
+                channel: None,
+                available_updates: 0,
+                failing: Some(leaky_condition("Failing")),
+                progressing: None,
+            }),
+            infrastructure: Part::Data(None),
+            operators: Part::Data(Operators {
+                total: 1,
+                not_ok: vec![Operator {
+                    name: "authentication".into(),
+                    version: None,
+                    available: Some(false),
+                    progressing: None,
+                    degraded: Some(true),
+                    message: Some(format!("authentication: rejected {JWT}")),
+                }],
+            }),
+            machine_config_pools_not_ok: Part::Data(vec![]),
+        }),
+        capabilities: Capabilities::default(),
+    }
+}
+
+fn leaky_node() -> NodeDetails {
+    NodeDetails {
+        name: "w1".into(),
+        roles: vec!["worker".into()],
+        ready: false,
+        unschedulable: false,
+        conditions: vec![leaky_condition("Ready")],
+        taints: vec![],
+        capacity: BTreeMap::new(),
+        allocatable: BTreeMap::new(),
+        usage: Part::error("FORBIDDEN: cannot list pods"),
+        kubelet_version: None,
+        os_image: None,
+        container_runtime: None,
+        age_seconds: None,
+    }
+}
+
+impl Hooks for Odd {
+    fn access(&self, session: &SessionView) -> SessionAccess {
+        self.fake.access(session)
+    }
+
+    fn connection_name(&self, id: &str) -> Option<String> {
+        self.fake.connection_name(id)
+    }
+
+    fn session_closed(&self, session_id: &str) {
+        self.fake.session_closed(session_id)
+    }
+
+    fn sessions_changed(&self) {
+        self.fake.sessions_changed()
+    }
+}
+
+impl Backend for Odd {
+    fn scope(&self, connection_id: &str) -> Option<Scope> {
+        self.fake.scope(connection_id)
+    }
+
+    fn read(&self, op: ReadOp) -> BoxFuture<'_, Result<ReadOutput, BackendError>> {
+        Box::pin(async move {
+            // Чего Fake не отдаёт, то Odd собирает сам.
+            match (&self.mode, &op) {
+                (Mode::Leaky, ReadOp::ClusterOverview { .. }) => {
+                    return Ok(ReadOutput::Cluster(leaky_overview()));
+                }
+                (Mode::Leaky, ReadOp::DescribeNode { .. }) => {
+                    return Ok(ReadOutput::Node(leaky_node()));
+                }
+                _ => {}
+            }
+            let mut out = self.fake.read(op).await?;
+            match (&self.mode, &mut out) {
+                (Mode::Bulk(n), ReadOutput::Projects(l)) => {
+                    l.items = (0..*n)
+                        .map(|i| Project {
+                            name: project_name(i),
+                            display_name: Some("D".repeat(1000)),
+                            phase: Some("Active".into()),
+                        })
+                        .collect();
+                }
+                (Mode::Bulk(n), ReadOutput::Pods(l)) => {
+                    l.items = (0..*n).map(|i| pod(&pod_name(i), None)).collect();
+                }
+                (Mode::Capped, ReadOutput::Projects(l)) => l.truncated = true,
+                (Mode::Leaky, ReadOutput::Workloads(l)) => {
+                    for w in &mut l.items {
+                        w.images = vec![CRED_IMAGE.into()];
+                    }
+                }
+                (Mode::Leaky, ReadOutput::Workload(w)) => {
+                    w.workload.images = vec![CRED_IMAGE.into()];
+                    w.conditions = vec![leaky_condition("Progressing")];
+                    w.containers.iter_mut().for_each(leak_spec);
+                    w.hpa = Part::Data(Some(Hpa {
+                        name: "web".into(),
+                        min_replicas: Some(1),
+                        max_replicas: 3,
+                        current_replicas: Some(1),
+                        desired_replicas: 1,
+                        metrics: vec![],
+                        conditions: vec![leaky_condition("ScalingActive")],
+                    }));
+                    w.history = Some(Part::Data(vec![Revision {
+                        revision: 1,
+                        name: "web-1".into(),
+                        images: vec![CRED_IMAGE.into()],
+                        age_seconds: None,
+                        replicas: Some(1),
+                        current: true,
+                    }]));
+                }
+                (Mode::Leaky, ReadOutput::Pod(p)) => {
+                    p.conditions = vec![leaky_condition("Ready")];
+                    for c in &mut p.containers {
+                        leak_spec(&mut c.spec);
+                        c.image_id = Some(CRED_IMAGE.into());
+                        if let Some(s) = &mut c.state {
+                            s.message = Some(format!("back-off {JWT}"));
+                        }
+                        c.last_state = Some(ContainerState {
+                            state: "terminated".into(),
+                            reason: Some("Error".into()),
+                            message: Some("panic: Bearer abc.def-123".into()),
+                            exit_code: Some(1),
+                            started_seconds_ago: None,
+                            finished_seconds_ago: None,
+                        });
+                    }
+                    p.events = Part::Data(vec![Event {
+                        message: format!("rejected {JWT}"),
+                        ..event("Warning", "BackOff", 10)
+                    }]);
+                }
+                (Mode::Leaky, ReadOutput::Events(l)) => {
+                    l.items[0].message = format!("rejected {JWT}");
+                    // Проза без секретов остаётся как есть: «secret: not found» — не пара имя=значение.
+                    l.items[1].message = "Failed to get secret: not found".into();
+                }
+                (Mode::Leaky, ReadOutput::Network(n)) => {
+                    n.routes = Some(Part::Data(vec![Route {
+                        name: "web".into(),
+                        host: Some("web.example.com".into()),
+                        path: None,
+                        service: Some("web".into()),
+                        port: None,
+                        tls: None,
+                        admitted: Some(false),
+                        admitted_message: Some(format!("rejected {JWT}")),
+                        cert_expires_in_seconds: None,
+                        ingress: None,
+                    }]));
+                    n.http_routes = Some(Part::Data(vec![GatewayRoute {
+                        name: "web".into(),
+                        hostnames: vec![],
+                        parents: vec![RouteParent {
+                            name: "gw".into(),
+                            namespace: None,
+                            section: None,
+                            accepted: Some(leaky_condition("Accepted")),
+                            resolved_refs: None,
+                        }],
+                        backends: vec![],
+                    }]));
+                }
+                _ => {}
+            }
+            Ok(out)
+        })
+    }
+
+    fn health(&self, op: HealthOp) -> BoxFuture<'_, Result<HealthOutput, BackendError>> {
+        self.fake.health(op)
+    }
+}
+
+/// Как `env`, но поверх любого Backend.
+async fn env_over(backend: Arc<dyn Backend>) -> Running {
+    let dir = tempfile::tempdir().unwrap();
+    let ep = endpoint::choose(
+        dir.path(),
+        "glafira-kubernetes",
+        &dir.path().file_name().unwrap().to_string_lossy(),
+    );
+    let audit = Arc::new(AuditLog::new(dir.path()));
+    let mut opts = GatewayOptions::new("glafira-kubernetes", "0.1.0");
+    opts.observe_unit = Duration::from_millis(10);
+    let handle = glafira_mcp_kubernetes::start(&ep, TOKEN.into(), backend, audit.clone(), opts)
+        .await
+        .unwrap();
+    Running {
+        _dir: dir,
+        ep,
+        _handle: handle,
+        audit,
+    }
+}
+
+/// В ответе нет секретов из фикстур, а `***` ровно `n`: каждая замена оставляет одну.
+fn assert_masked(v: &Value, n: usize) {
+    let s = serde_json::to_string(v).unwrap();
+    for secret in ["eyJ", "hunter2", "s3cr3t", "abc.def-123"] {
+        assert!(!s.contains(secret), "{secret}: {s}");
+    }
+    assert_eq!(s.matches("***").count(), n, "{s}");
+}
+
+#[tokio::test]
+async fn a_page_cut_to_the_size_limit_continues_right_after_the_last_shown_item() {
+    let e = env_over(odd(Mode::Bulk(600))).await;
+    let c = client(&e.ep).await;
+    let lists: [(&str, Value, NameOf); 2] = [
+        ("list_projects", json!({"connectionId": "c2"}), project_name),
+        (
+            "list_pods",
+            json!({"connectionId": "c1", "namespace": "team-a"}),
+            pod_name,
+        ),
+    ];
+    for (tool, args, name) in lists {
+        // Предел страницы по умолчанию (200) больше, чем помещается в 100 КБ.
+        let v = ok(call(&c, tool, args.clone()).await);
+        let shown = v["items"].as_array().unwrap().len();
+        assert!(shown > 0 && shown < 200, "{tool}: {shown}");
+        assert_eq!(
+            (v["total"].as_u64(), v["truncated"].as_bool()),
+            (Some(600), Some(true))
+        );
+        assert_eq!(v["nextOffset"], shown, "{tool}");
+        let mut next = args;
+        next["offset"] = shown.into();
+        let v = ok(call(&c, tool, next).await);
+        assert_eq!(
+            v["items"][0]["name"],
+            name(shown),
+            "{tool}: ничего не пропущено"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_project_list_capped_by_the_backend_is_marked_truncated() {
+    let e = env_over(odd(Mode::Capped)).await;
+    let c = client(&e.ep).await;
+    for id in ["c1", "c2"] {
+        let v = ok(call(&c, "list_projects", json!({"connectionId": id})).await);
+        assert_eq!(v["truncated"], true, "{id}");
+        assert!(v["hint"].as_str().unwrap().contains("100 KB"), "{id}");
+    }
+}
+
+#[tokio::test]
+async fn cluster_text_of_workloads_goes_through_the_builtin_patterns() {
+    let e = env_over(odd(Mode::Leaky)).await;
+    let c = client(&e.ep).await;
+    let v = ok(call(
+        &c,
+        "describe_workload",
+        json!({"connectionId": "c1", "namespace": "team-a", "kind": "Deployment", "name": "web"}),
+    )
+    .await);
+    assert_eq!(v["images"], json!([CRED_IMAGE_MASKED]));
+    assert_eq!(v["conditions"][0]["message"], "rejected ***");
+    assert_eq!(v["hpa"]["conditions"][0]["message"], "rejected ***");
+    assert_eq!(v["history"][0]["images"], json!([CRED_IMAGE_MASKED]));
+    let ct = &v["containers"][0];
+    assert_eq!(ct["image"], CRED_IMAGE_MASKED);
+    assert_eq!(
+        ct["liveness"],
+        "exec curl -H 'Authorization: Bearer ***' http://localhost/health"
+    );
+    assert_eq!(
+        ct["readiness"],
+        "http-get http://app:***@localhost:8080/ready"
+    );
+    assert_eq!(ct["startup"], "exec check ***");
+    // Три замены в command, args и аннотациях (как в workload_details_are_masked) и восемь в
+    // тексте кластера: образы (workload, контейнер, ревизия), условия (workload, HPA), три пробы.
+    assert_eq!(v["masked"], 11);
+    assert_masked(&v, 11);
+
+    let v = ok(call(
+        &c,
+        "list_workloads",
+        json!({"connectionId": "c1", "namespace": "team-a"}),
+    )
+    .await);
+    assert_eq!(v["items"][0]["images"], json!([CRED_IMAGE_MASKED]));
+    assert_masked(&v, 3);
+}
+
+#[tokio::test]
+async fn cluster_text_of_pods_and_events_goes_through_the_builtin_patterns() {
+    let e = env_over(odd(Mode::Leaky)).await;
+    let c = client(&e.ep).await;
+    let v = ok(call(
+        &c,
+        "describe_pod",
+        json!({"connectionId": "c1", "namespace": "team-a", "name": "web-1"}),
+    )
+    .await);
+    assert_eq!(v["conditions"][0]["message"], "rejected ***");
+    assert_eq!(v["events"][0]["message"], "rejected ***");
+    let ct = &v["containers"][0];
+    assert_eq!(ct["imageId"], CRED_IMAGE_MASKED);
+    assert_eq!(ct["state"]["message"], "back-off ***");
+    assert_eq!(ct["lastState"]["message"], "panic: Bearer ***");
+    assert_eq!(ct["startup"], "exec check ***");
+    // Три замены в command, args и аннотациях и девять в тексте кластера: условие, событие,
+    // образ, три пробы, imageID, сообщения состояния и прошлого состояния.
+    assert_eq!(v["masked"], 12);
+    assert_masked(&v, 12);
+
+    let v = ok(call(
+        &c,
+        "list_events",
+        json!({"connectionId": "c1", "namespace": "team-a"}),
+    )
+    .await);
+    assert_eq!(v["items"][0]["message"], "rejected ***");
+    assert_eq!(
+        v["items"][1]["message"], "Failed to get secret: not found",
+        "проза без секретов не портится"
+    );
+    assert_masked(&v, 1);
+}
+
+#[tokio::test]
+async fn cluster_text_of_nodes_operators_and_routes_goes_through_the_builtin_patterns() {
+    let e = env_over(odd(Mode::Leaky)).await;
+    let c = client(&e.ep).await;
+    let v = ok(call(
+        &c,
+        "describe_node",
+        json!({"connectionId": "c1", "name": "w1"}),
+    )
+    .await);
+    assert_eq!(v["conditions"][0]["message"], "rejected ***");
+    assert_masked(&v, 1);
+
+    let v = ok(call(&c, "get_cluster_overview", json!({"connectionId": "c1"})).await);
+    assert_eq!(
+        v["openshift"]["operators"]["notOk"][0]["message"],
+        "authentication: rejected ***"
+    );
+    assert_eq!(
+        v["openshift"]["clusterVersion"]["failing"]["message"],
+        "rejected ***"
+    );
+    assert_masked(&v, 2);
+
+    let v = ok(call(
+        &c,
+        "get_network",
+        json!({"connectionId": "c1", "namespace": "team-a"}),
+    )
+    .await);
+    assert_eq!(v["routes"][0]["admittedMessage"], "rejected ***");
+    assert_eq!(
+        v["httpRoutes"][0]["parents"][0]["accepted"]["message"],
+        "rejected ***"
+    );
+    assert_masked(&v, 2);
+}
+
+#[tokio::test]
+async fn warnings_of_an_observation_go_through_the_builtin_patterns() {
+    let fake = Fake::new();
+    let mut warned = wstate(2, &[("web-1", true, 0)]);
+    warned.warnings = vec![Warning {
+        key: "w1".into(),
+        reason: "Failed".into(),
+        object: ObjectRef {
+            kind: "Pod".into(),
+            name: "web-1".into(),
+        },
+        message: format!("pull failed {JWT}"),
+        count: 1,
+    }];
+    fake.states
+        .lock()
+        .unwrap()
+        .extend([wstate(2, &[("web-1", true, 0)]), warned]);
+    let e = env(fake).await;
+    let c = client(&e.ep).await;
+    let v = ok(call(
+        &c,
+        "observe_workload",
+        json!({"connectionId": "c1", "namespace": "team-a",
+            "workload": {"kind": "Deployment", "name": "web"}, "durationSeconds": 10}),
+    )
+    .await);
+    let warning = v["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "warningEvent")
+        .unwrap();
+    assert_eq!(warning["message"], "pull failed ***");
+    assert_eq!(v["summary"]["warnings"], 1);
+    assert_masked(&v, 1);
 }
 
 #[tokio::test]

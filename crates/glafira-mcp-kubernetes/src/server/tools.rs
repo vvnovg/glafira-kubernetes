@@ -43,12 +43,12 @@ fn wrap<T: Serialize>(body: T, truncated: bool) -> Result<Value, BackendError> {
     })
 }
 
-fn fitted<T: Serialize, I>(
-    mut body: T,
-    list: fn(&mut T) -> &mut Vec<I>,
-) -> Result<Value, BackendError> {
-    let truncated = fit::fit(&mut body, list);
-    wrap(body, truncated)
+/// Страница после обрезки под предел размера: следующая начинается сразу за последним
+/// показанным элементом. `next_offset`, посчитанный для запрошенной страницы, пропустил бы
+/// вырезанные.
+fn resume_after_cut<T>(page: &mut Page<T>, offset: usize) {
+    let end = offset.saturating_add(page.items.len());
+    page.next_offset = (end < page.total).then_some(end);
 }
 
 macro_rules! expect {
@@ -321,23 +321,152 @@ fn events_of(o: &mut Observation) -> &mut Vec<observe::Event> {
     &mut o.events
 }
 
-/// Маскирует `command`, `args` контейнеров и аннотации; возвращает число замен.
-fn mask_containers(m: &Masker, containers: &mut [ContainerSpec]) -> usize {
-    let mut n = 0;
-    for c in containers {
-        let (command, a) = m.args(&c.command);
-        let (args, b) = m.args(&c.args);
-        c.command = command;
-        c.args = args;
-        n += a + b;
-    }
+/// Маскировщик без имён полей: годится только для `patterns` (регулярное выражение пар не
+/// собирается).
+fn text_masker() -> Masker {
+    Masker::new(Vec::<String>::new())
+}
+
+/// Встроенные шаблоны §10.3 поверх текста из кластера (сообщения, пробы, образы). Только
+/// шаблоны, без пар `имя=значение`: в прозе они портят диагностику («Failed to get secret:
+/// not found»). Возвращает число замен.
+fn mask_text(m: &Masker, s: &mut String) -> usize {
+    let (masked, n) = m.patterns(s);
+    *s = masked;
     n
+}
+
+fn mask_opt(m: &Masker, s: &mut Option<String>) -> usize {
+    s.as_mut().map_or(0, |s| mask_text(m, s))
+}
+
+fn mask_all(m: &Masker, items: &mut [String]) -> usize {
+    items.iter_mut().map(|s| mask_text(m, s)).sum()
+}
+
+fn mask_conditions(m: &Masker, conditions: &mut [Condition]) -> usize {
+    conditions
+        .iter_mut()
+        .map(|c| mask_opt(m, &mut c.message))
+        .sum()
+}
+
+fn mask_events(m: &Masker, events: &mut [Event]) -> usize {
+    events
+        .iter_mut()
+        .map(|e| mask_text(m, &mut e.message))
+        .sum()
+}
+
+fn mask_state(m: &Masker, state: &mut Option<ContainerState>) -> usize {
+    state.as_mut().map_or(0, |s| mask_opt(m, &mut s.message))
+}
+
+/// `command` и `args` контейнера — имена полей и пары, образ и пробы — встроенные шаблоны;
+/// возвращает число замен.
+fn mask_spec(m: &Masker, c: &mut ContainerSpec) -> usize {
+    let (command, a) = m.args(&c.command);
+    let (args, b) = m.args(&c.args);
+    c.command = command;
+    c.args = args;
+    a + b
+        + mask_text(m, &mut c.image)
+        + mask_opt(m, &mut c.liveness)
+        + mask_opt(m, &mut c.readiness)
+        + mask_opt(m, &mut c.startup)
 }
 
 fn mask_annotations(m: &Masker, a: &mut std::collections::BTreeMap<String, String>) -> usize {
     let (masked, n) = m.annotations(a);
     *a = masked;
     n
+}
+
+/// Весь текст из кластера в `describe_workload`; возвращает число замен.
+fn mask_workload(m: &Masker, w: &mut WorkloadDetails) -> usize {
+    let mut n = mask_all(m, &mut w.workload.images)
+        + mask_conditions(m, &mut w.conditions)
+        + mask_annotations(m, &mut w.annotations);
+    n += w
+        .containers
+        .iter_mut()
+        .map(|c| mask_spec(m, c))
+        .sum::<usize>();
+    if let Part::Data(Some(hpa)) = &mut w.hpa {
+        n += mask_conditions(m, &mut hpa.conditions);
+    }
+    if let Some(Part::Data(history)) = &mut w.history {
+        n += history
+            .iter_mut()
+            .map(|r| mask_all(m, &mut r.images))
+            .sum::<usize>();
+    }
+    n
+}
+
+/// Весь текст из кластера в `describe_pod`; возвращает число замен.
+fn mask_pod(m: &Masker, p: &mut PodDetails) -> usize {
+    let mut n = mask_conditions(m, &mut p.conditions) + mask_annotations(m, &mut p.annotations);
+    for c in &mut p.containers {
+        n += mask_spec(m, &mut c.spec)
+            + mask_opt(m, &mut c.image_id)
+            + mask_state(m, &mut c.state)
+            + mask_state(m, &mut c.last_state);
+    }
+    if let Part::Data(events) = &mut p.events {
+        n += mask_events(m, events);
+    }
+    n
+}
+
+/// Сообщения ClusterOperator'ов и условий ClusterVersion.
+fn mask_overview(m: &Masker, o: &mut ClusterOverview) {
+    let Some(openshift) = &mut o.openshift else {
+        return;
+    };
+    if let Part::Data(version) = &mut openshift.cluster_version {
+        for c in [&mut version.failing, &mut version.progressing]
+            .into_iter()
+            .flatten()
+        {
+            mask_opt(m, &mut c.message);
+        }
+    }
+    if let Part::Data(operators) = &mut openshift.operators {
+        for op in &mut operators.not_ok {
+            mask_opt(m, &mut op.message);
+        }
+    }
+}
+
+/// Сообщения Route о приёме и условия родителей HTTPRoute и GRPCRoute.
+fn mask_network(m: &Masker, n: &mut Network) {
+    if let Some(Part::Data(routes)) = &mut n.routes {
+        for r in routes {
+            mask_opt(m, &mut r.admitted_message);
+        }
+    }
+    for routes in [&mut n.http_routes, &mut n.grpc_routes] {
+        if let Some(Part::Data(routes)) = routes {
+            for parent in routes.iter_mut().flat_map(|r| r.parents.iter_mut()) {
+                for c in [&mut parent.accepted, &mut parent.resolved_refs]
+                    .into_iter()
+                    .flatten()
+                {
+                    mask_opt(m, &mut c.message);
+                }
+            }
+        }
+    }
+}
+
+/// Сообщения событий `Warning` в хронологии наблюдения.
+fn mask_observation(m: &Masker, o: &mut Observation) {
+    for e in &mut o.events {
+        if let observe::EventKind::WarningEvent { message, .. } = &mut e.kind {
+            mask_text(m, message);
+        }
+    }
 }
 
 fn filtered<T>(items: Option<Part<Vec<T>>>, keep: impl Fn(&T) -> bool) -> Option<Part<Vec<T>>> {
@@ -416,6 +545,7 @@ impl KubeServer {
             }
         }
         let mut observation = rec.finish(started_at_ms, started.elapsed().as_millis() as u64);
+        mask_observation(&text_masker(), &mut observation);
         // Предел 100 КБ: лишние события отбрасываются, счётчики сводки остаются полными.
         if fit::fit(&mut observation, events_of) {
             observation.truncated = true;
@@ -468,13 +598,14 @@ impl KubeServer {
                 args!(p),
                 Some(&p.connection_id),
                 async {
-                    let o = expect!(
+                    let mut o = expect!(
                         self.read(ReadOp::ClusterOverview {
                             connection_id: p.connection_id.clone()
                         })
                         .await?,
                         Cluster
                     )?;
+                    mask_overview(&text_masker(), &mut o);
                     to_value(&o)
                 },
             )
@@ -533,13 +664,16 @@ impl KubeServer {
                     }
                     items.retain(|x| fit::matches_filter(&x.name, p.filter.as_deref()));
                     items.sort_by(|a, b| a.name.cmp(&b.name));
-                    fitted(
-                        ProjectsPage {
-                            page: fit::page(items, p.offset.unwrap_or(0) as usize, limit),
-                            list_error: list.error,
-                        },
-                        project_items,
-                    )
+                    let offset = p.offset.unwrap_or(0) as usize;
+                    let mut body = ProjectsPage {
+                        page: fit::page(items, offset, limit),
+                        list_error: list.error,
+                    };
+                    let cut = fit::fit(&mut body, project_items);
+                    if cut {
+                        resume_after_cut(&mut body.page, offset);
+                    }
+                    wrap(body, cut | list.truncated)
                 },
             )
             .await)
@@ -616,7 +750,7 @@ impl KubeServer {
                 args!(p),
                 Some(&p.connection_id),
                 async {
-                    let n = expect!(
+                    let mut n = expect!(
                         self.read(ReadOp::DescribeNode {
                             connection_id: p.connection_id.clone(),
                             name: p.name.clone()
@@ -624,6 +758,7 @@ impl KubeServer {
                         .await?,
                         Node
                     )?;
+                    mask_conditions(&text_masker(), &mut n.conditions);
                     to_value(&n)
                 },
             )
@@ -669,11 +804,19 @@ impl KubeServer {
                             && fit::matches_filter(&w.name, p.filter.as_deref())
                     });
                     items.sort_by(|a, b| a.name.cmp(&b.name).then(a.kind.cmp(&b.kind)));
+                    let m = text_masker();
+                    for w in &mut items {
+                        mask_all(&m, &mut w.images);
+                    }
+                    let offset = p.offset.unwrap_or(0) as usize;
                     let mut body = WorkloadsPage {
-                        page: fit::page(items, p.offset.unwrap_or(0) as usize, limit),
+                        page: fit::page(items, offset, limit),
                         errors,
                     };
                     let cut = fit::fit(&mut body, workload_items);
+                    if cut {
+                        resume_after_cut(&mut body.page, offset);
+                    }
                     wrap(body, cut | truncated)
                 },
             )
@@ -713,9 +856,7 @@ impl KubeServer {
                         .await?,
                         Workload
                     )?;
-                    let m = Masker::default();
-                    let masked = mask_containers(&m, &mut w.containers)
-                        + mask_annotations(&m, &mut w.annotations);
+                    let masked = mask_workload(&Masker::default(), &mut w);
                     to_value(&Masked { body: w, masked })
                 },
             )
@@ -755,8 +896,12 @@ impl KubeServer {
                     items.retain(|x| x.problem.is_some());
                 }
                 items.sort_by(|a, b| a.name.cmp(&b.name));
-                let mut page = fit::page(items, p.offset.unwrap_or(0) as usize, limit);
+                let offset = p.offset.unwrap_or(0) as usize;
+                let mut page = fit::page(items, offset, limit);
                 let cut = fit::fit(&mut page, items_of);
+                if cut {
+                    resume_after_cut(&mut page, offset);
+                }
                 wrap(page, cut | truncated)
             })
             .await)
@@ -792,14 +937,7 @@ impl KubeServer {
                         .await?,
                         Pod
                     )?;
-                    let m = Masker::default();
-                    let mut specs: Vec<ContainerSpec> =
-                        pod.containers.iter().map(|c| c.spec.clone()).collect();
-                    let mut masked = mask_containers(&m, &mut specs);
-                    for (c, s) in pod.containers.iter_mut().zip(specs) {
-                        c.spec = s;
-                    }
-                    masked += mask_annotations(&m, &mut pod.annotations);
+                    let masked = mask_pod(&Masker::default(), &mut pod);
                     to_value(&Masked { body: pod, masked })
                 },
             )
@@ -858,6 +996,7 @@ impl KubeServer {
                         .collect();
                     let more = items.len() > limit;
                     items.truncate(limit);
+                    mask_events(&text_masker(), &mut items);
                     let mut body = EventsBody { items };
                     let cut = fit::fit(&mut body, event_items);
                     wrap(body, cut | more | truncated)
@@ -927,7 +1066,7 @@ impl KubeServer {
                 )?;
                 let f = p.filter.as_deref();
                 let keep = |name: &str| fit::matches_filter(name, f);
-                let n = Network {
+                let mut n = Network {
                     services: filtered(Some(n.services), |s: &Service| keep(&s.name))
                         .unwrap_or(Part::Data(vec![])),
                     endpoints_error: n.endpoints_error,
@@ -938,6 +1077,7 @@ impl KubeServer {
                     http_routes: filtered(n.http_routes, |r: &GatewayRoute| keep(&r.name)),
                     grpc_routes: filtered(n.grpc_routes, |r: &GatewayRoute| keep(&r.name)),
                 };
+                mask_network(&text_masker(), &mut n);
                 let v = to_value(&n)?;
                 if serde_json::to_vec(&v).map_or(0, |b| b.len()) > fit::MAX_RESPONSE_BYTES {
                     return Err(BackendError::new(
