@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../api/client";
 import type { ConnectionInfo, ConnectionProfile } from "../../api/types";
+import { afterSignIn } from "../../lib/afterSignIn";
 import { useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
 
@@ -32,9 +33,13 @@ export const sessionMutationKey = (connectionId: string) => ["session", connecti
 /**
  * Подключение заново (свежие сведения и права). Идёт через запрос вкладки: тот помечается как загружаемый,
  * и панель не запускает рядом второй exec-плагин (бэкенд ставит подключения одного id в очередь).
+ * После него открытые вкладки подключения перечитываются (`afterSignIn`).
  */
-export const reconnect = (queryClient: QueryClient, connectionId: string) =>
-  queryClient.fetchQuery({ queryKey: ["connection", connectionId], queryFn: () => api.connect(connectionId, true) });
+export async function reconnect(queryClient: QueryClient, connectionId: string): Promise<ConnectionInfo> {
+  const info = await queryClient.fetchQuery({ queryKey: ["connection", connectionId], queryFn: () => api.connect(connectionId, true) });
+  afterSignIn(queryClient, connectionId);
+  return info;
+}
 
 /**
  * Что сделать, если сессия истекла или токена нет: войти через браузер, вставить токен
@@ -47,7 +52,10 @@ export function SessionActions({ profile }: { profile: ConnectionProfile }) {
   const open = useWorkspace((s) => s.open);
   const [token, setToken] = useState("");
   const id = profile.id;
-  const done = (info: ConnectionInfo) => queryClient.setQueryData(["connection", id], info);
+  const done = (info: ConnectionInfo) => {
+    queryClient.setQueryData(["connection", id], info);
+    afterSignIn(queryClient, id);
+  };
   // Подключение этой вкладки (в том числе «Подключиться заново» на панели) тоже может запускать exec-плагин.
   const connecting = useIsFetching({ queryKey: ["connection", id], exact: true }) > 0;
   const mutationKey = sessionMutationKey(id);

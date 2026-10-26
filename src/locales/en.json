@@ -7,7 +7,21 @@
     "close": "Close",
     "loading": "Loading…",
     "details": "Details",
-    "readOnly": "Read-only"
+    "readOnly": "Read-only",
+    "refresh": "Refresh",
+    "autoRefresh": "Auto-refresh",
+    "autoRefreshOff": "off",
+    "everySeconds": "every {{n}} s",
+    "copy": "Copy",
+    "copied": "Copied",
+    "empty": "Nothing here",
+    "truncated": "The list is incomplete: only the first 10,000 objects are shown",
+    "age": {
+      "seconds": "{{n}}s",
+      "minutes": "{{n}}m",
+      "hours": "{{n}}h",
+      "days": "{{n}}d"
+    }
   },
   "errors": {
     "generic": "{{message}}",
@@ -422,6 +436,17 @@
       "secrets_one": "Enter a token or key for {{count}} connection after import",
       "secrets_other": "Enter tokens or keys for {{count}} connections after import",
       "apply": "Import"
+    }
+  },
+  "objects": {
+    "signInAgain": "Sign in again",
+    "gone": "The object has been deleted or renamed — close the tab",
+    "conditions": {
+      "type": "Condition",
+      "status": "Status",
+      "reason": "Reason",
+      "message": "Message",
+      "since": "Since"
     }
   }
 }

@@ -1,0 +1,16 @@
+/* Экраны чтения кластера (этап O1b); общие стили — в styles.css (перенесён из Kafka-версии). */
+.yaml { background: var(--bg-alt); border: 1px solid var(--border); border-radius: 4px; padding: 8px; overflow: auto; white-space: pre; word-break: normal; }
+.kv { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px; }
+.kv code { background: var(--bg-alt); border-radius: 3px; padding: 0 4px; overflow-wrap: anywhere; }
+.problem { color: var(--danger); font-weight: 600; }
+.split { display: flex; gap: 8px; flex: 1; min-height: 320px; }
+.split > .vlist { flex: 3; }
+.split > .details-pane { flex: 2; }
+.section { display: flex; flex-direction: column; gap: 6px; }
+.section h3 { margin: 4px 0 0; font-size: 14px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 8px; }
+.card { border: 1px solid var(--border); border-radius: 6px; padding: 8px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.card h4 { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 12px; margin: 0; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; overflow-wrap: anywhere; }

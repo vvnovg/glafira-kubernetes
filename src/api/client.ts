@@ -1,18 +1,43 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
   AppError,
   AppInfo,
+  ClusterOverview,
+  ConfigValue,
+  ConfigView,
   ConnectionFolder,
   ConnectionInfo,
   ConnectionProfile,
+  EventObject,
+  EventRow,
   ExportSummary,
   ImportPreview,
   KubeconfigPreview,
   LanguageSettings,
+  Listed,
+  LogEvent,
+  LogParams,
+  NamespaceAccess,
+  NetworkView,
+  NodeDetails,
+  NodeRow,
+  OperatorRow,
+  PodDetails,
+  PodRow,
   PolicyStatus,
+  ProjectList,
+  PvcRow,
+  QuotasView,
   SecretsInput,
   TestReport,
   TreeItemRef,
+  WatchEvent,
+  WatchParams,
+  WorkloadDetails,
+  WorkloadKind,
+  WorkloadList,
+  WorkloadRef,
+  YamlKind,
 } from "./types";
 
 export function isAppError(e: unknown): e is AppError {
@@ -79,4 +104,46 @@ export const api = {
     call<ImportPreview>("preview_import", { path, targetFolderId, updateExisting }),
   applyImport: (path: string, targetFolderId: string | null, updateExisting: boolean) =>
     call<ImportPreview>("apply_import", { path, targetFolderId, updateExisting }),
+
+  getClusterOverview: (connectionId: string) => call<ClusterOverview>("get_cluster_overview", { connectionId }),
+  listNodes: (connectionId: string) => call<Listed<NodeRow>>("list_nodes", { connectionId }),
+  getNode: (connectionId: string, name: string) => call<NodeDetails>("get_node", { connectionId, name }),
+  listClusterOperators: (connectionId: string) => call<OperatorRow[]>("list_cluster_operators", { connectionId }),
+  listProjects: (connectionId: string) => call<ProjectList>("list_projects", { connectionId }),
+  getNamespaceAccess: (connectionId: string, namespace: string) =>
+    call<NamespaceAccess>("get_namespace_access", { connectionId, namespace }),
+  listWorkloads: (connectionId: string, namespace: string) => call<WorkloadList>("list_workloads", { connectionId, namespace }),
+  getWorkload: (connectionId: string, namespace: string, kind: WorkloadKind, name: string) =>
+    call<WorkloadDetails>("get_workload", { connectionId, namespace, kind, name }),
+  /** Поды проекта или, если задан `workload`, его поды. */
+  listPods: (connectionId: string, namespace: string, workload: WorkloadRef | null = null) =>
+    call<Listed<PodRow>>("list_pods", { connectionId, namespace, workload }),
+  getPod: (connectionId: string, namespace: string, name: string) => call<PodDetails>("get_pod", { connectionId, namespace, name }),
+  /** События проекта или объекта; у workload'а — вместе с его подами. */
+  listEvents: (connectionId: string, namespace: string, object: EventObject | null = null) =>
+    call<Listed<EventRow>>("list_events", { connectionId, namespace, object }),
+  getNetwork: (connectionId: string, namespace: string) => call<NetworkView>("get_network", { connectionId, namespace }),
+  getConfig: (connectionId: string, namespace: string) => call<ConfigView>("get_config", { connectionId, namespace }),
+  getConfigMapValues: (connectionId: string, namespace: string, name: string) =>
+    call<Record<string, ConfigValue>>("get_config_map_values", { connectionId, namespace, name }),
+  listPvcs: (connectionId: string, namespace: string) => call<Listed<PvcRow>>("list_pvcs", { connectionId, namespace }),
+  getQuotas: (connectionId: string, namespace: string) => call<QuotasView>("get_quotas", { connectionId, namespace }),
+  getYaml: (connectionId: string, namespace: string, kind: YamlKind, name: string) =>
+    call<string>("get_yaml", { connectionId, namespace, kind, name }),
+
+  /** Watch списка проекта; события приходят в `onEvent`. Возвращает id сессии для `stopSession`. */
+  startWatch: (params: WatchParams, onEvent: (e: WatchEvent) => void) => {
+    const channel = new Channel<WatchEvent>();
+    channel.onmessage = onEvent;
+    return call<string>("start_watch", { params, onEvent: channel });
+  },
+  /** Логи контейнера; события приходят в `onEvent`. Возвращает id сессии для `stopSession`. */
+  startLogs: (params: LogParams, onEvent: (e: LogEvent) => void) => {
+    const channel = new Channel<LogEvent>();
+    channel.onmessage = onEvent;
+    return call<string>("start_logs", { params, onEvent: channel });
+  },
+  /** Сохраняет лог (без follow) в файл; возвращает число строк. */
+  saveLogs: (params: LogParams, path: string, timestamps: boolean) => call<number>("save_logs", { params, path, timestamps }),
+  stopSession: (sessionId: string) => call<boolean>("stop_session", { sessionId }),
 };

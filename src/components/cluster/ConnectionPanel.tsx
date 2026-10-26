@@ -2,13 +2,11 @@ import { useIsMutating, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../api/client";
 import type { ApiGroups, AppError, Capabilities, ConnectionInfo, ConnectionProfile } from "../../api/types";
+import { needsSignIn } from "../../lib/signIn";
 import { useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Hint } from "../common/Hint";
 import { LoginWait, reconnect, SessionActions, sessionMutationKey } from "./SessionActions";
-
-/** Ошибки, которые лечатся входом заново или новым токеном. */
-const SIGN_IN_KEYS = new Set(["errors.connections.tokenMissing", "errors.connections.loginRequired", "errors.connections.clientKeyMissing"]);
 
 const CAPABILITIES: (keyof Capabilities)[] = ["listProjects", "listNodes", "listAllPods", "readClusterOperators", "readClusterVersion"];
 /** Права, которые бывают только у OpenShift. */
@@ -21,12 +19,6 @@ const API_GROUPS: [keyof ApiGroups, string][] = [
   ["deploymentConfigs", "DeploymentConfig"],
   ["gatewayApi", "Gateway API"],
 ];
-
-/** Помогает ли войти заново: истёкшая сессия, нет токена или ключа, ошибка exec-плагина. */
-function needsSignIn(e: AppError, profile: ConnectionProfile): boolean {
-  if (e.code === "SESSION_EXPIRED" || SIGN_IN_KEYS.has(e.key ?? "")) return true;
-  return profile.auth.method === "exec" && (e.key?.startsWith("errors.exec.") || e.key === "errors.oauth.cancelled");
-}
 
 /** Вкладка подключения: подключается при открытии и показывает, кто вошёл, что за кластер и какие есть права. */
 export function ConnectionPanel({ connectionId }: { connectionId: string }) {

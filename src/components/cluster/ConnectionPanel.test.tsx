@@ -34,6 +34,7 @@ const INFO: ConnectionInfo = {
   platform: { kind: "openshift", distribution: null, version: "4.18", label: "OpenShift 4.18" },
   apiGroups: { routes: true, projects: true, deploymentConfigs: true, gatewayApi: false },
   capabilities: { listProjects: true, listNodes: false, listAllPods: false, readClusterOperators: true, readClusterVersion: false },
+  tokenExpiresAt: null,
 };
 
 const profile = (auth: ConnectionProfile["auth"]): ConnectionProfile => ({

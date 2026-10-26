@@ -181,6 +181,8 @@ export interface ConnectionInfo {
   platform: PlatformInfo;
   apiGroups: ApiGroups;
   capabilities: Capabilities;
+  /** Когда истекает токен входа (секунды Unix), если платформа это сообщает (OpenShift). */
+  tokenExpiresAt: number | null;
 }
 
 export type ImportAuth = "token" | "clientCert" | "browser" | "exec";
@@ -252,3 +254,578 @@ export interface LanguageSettings {
   reason: LanguageReason;
   languages: string[];
 }
+
+// --- Чтение кластера (этап O1b). Время — секунды Unix.
+
+/** Часть экрана: данные или причина, почему их нет (права, ошибка чтения). */
+export interface Part<T> {
+  data?: T;
+  error?: AppError;
+}
+
+/** Список; `truncated` — прочитано не всё (больше 10 000 объектов). */
+export interface Listed<T> {
+  items: T[];
+  truncated: boolean;
+}
+
+export interface ConditionView {
+  type: string;
+  status: string;
+  reason?: string;
+  message?: string;
+  lastTransition?: number;
+}
+
+export interface Readyz {
+  ok: boolean;
+  failed: string[];
+  error?: AppError;
+}
+
+export interface RoleCount {
+  role: string;
+  total: number;
+  ready: number;
+}
+
+export interface NodeSummary {
+  total: number;
+  ready: number;
+  roles: RoleCount[];
+}
+
+export interface IngressClassRow {
+  name: string;
+  controller: string | null;
+  default: boolean;
+}
+
+export interface GatewayClassRow {
+  name: string;
+  controller: string | null;
+  accepted: boolean | null;
+}
+
+export interface ProjectCount {
+  count: number;
+  more: boolean;
+}
+
+export interface ClusterVersionInfo {
+  version: string | null;
+  channel: string | null;
+  availableUpdates: number;
+  failing: ConditionView | null;
+  progressing: ConditionView | null;
+}
+
+export interface OperatorRow {
+  name: string;
+  version: string | null;
+  available: boolean | null;
+  progressing: boolean | null;
+  degraded: boolean | null;
+  message: string | null;
+}
+
+export interface MachineConfigPoolRow {
+  name: string;
+  degraded: boolean;
+  updating: boolean;
+  machines: number;
+  ready: number;
+  updated: number;
+  degradedMachines: number;
+}
+
+/** Часть обзора OpenShift. */
+export interface OpenShiftOverview {
+  kind: "openshift";
+  clusterVersion: Part<ClusterVersionInfo>;
+  infrastructure: string | null;
+  consoleUrl: string | null;
+  operators: Part<{ total: number; problems: OperatorRow[] }>;
+  machineConfigPools: Part<MachineConfigPoolRow[]>;
+}
+
+export interface ClusterOverview {
+  platform: PlatformInfo;
+  serverVersion: string;
+  readyz: Readyz;
+  nodes: Part<NodeSummary>;
+  ingressClasses: Part<IngressClassRow[]>;
+  /** null — в кластере нет Gateway API. */
+  gatewayClasses: Part<GatewayClassRow[]> | null;
+  projects: Part<ProjectCount>;
+  platformDetails: OpenShiftOverview | null;
+}
+
+export interface NodeRow {
+  name: string;
+  roles: string[];
+  ready: boolean;
+  problems: string[];
+  unschedulable: boolean;
+  kubeletVersion: string | null;
+  internalIp: string | null;
+  cpu: string | null;
+  memory: string | null;
+  pods: string | null;
+  created: number | null;
+  taints: number;
+}
+
+export interface NodeDetails {
+  node: NodeRow;
+  conditions: ConditionView[];
+  taints: string[];
+  labels: Record<string, string>;
+  capacity: Record<string, string>;
+  allocatable: Record<string, string>;
+  addresses: string[];
+  osImage: string | null;
+  kernelVersion: string | null;
+  containerRuntime: string | null;
+  architecture: string | null;
+}
+
+export interface ProjectRow {
+  name: string;
+  displayName: string | null;
+  phase: string | null;
+  favorite: boolean;
+  /** Проект из профиля (ручной список или избранное), а не из списка кластера. */
+  fromProfile: boolean;
+}
+
+export interface ProjectList {
+  items: ProjectRow[];
+  truncated: boolean;
+  /** Почему кластер не дал список (нет прав): тогда в списке только проекты из профиля. */
+  error?: AppError;
+}
+
+export interface Verbs {
+  get: boolean;
+  list: boolean;
+  watch: boolean;
+}
+
+/** Права в проекте: `ресурс.группа` (`pods`, `deployments.apps`, `pods/log`) → права. */
+export interface NamespaceAccess {
+  resources: Record<string, Verbs>;
+  /** Сервер перечислил не все права — интерфейс ничего не скрывает. */
+  incomplete: boolean;
+}
+
+export type WorkloadKind = "Deployment" | "StatefulSet" | "DaemonSet" | "DeploymentConfig" | "Job" | "CronJob";
+export type WorkloadProblem = "unavailable" | "rolloutStuck" | "failed";
+
+export interface WorkloadRow {
+  kind: WorkloadKind;
+  name: string;
+  desired: number | null;
+  ready: number | null;
+  available: number | null;
+  updated: number | null;
+  images: string[];
+  created: number | null;
+  problem: WorkloadProblem | null;
+  schedule?: string | null;
+  suspended?: boolean | null;
+  lastSchedule?: number | null;
+}
+
+export interface KindError {
+  kind: WorkloadKind;
+  error: AppError;
+}
+
+export interface WorkloadList {
+  items: WorkloadRow[];
+  errors: KindError[];
+  truncated: boolean;
+}
+
+export type EnvSource = "literal" | "configMapKeyRef" | "secretKeyRef" | "fieldRef" | "resourceFieldRef" | "configMapRef" | "secretRef";
+
+/** Переменная окружения: имя и источник; значения нет. */
+export interface EnvView {
+  name: string;
+  source: EnvSource;
+  reference: string | null;
+}
+
+export interface ContainerSpecView {
+  name: string;
+  image: string;
+  init: boolean;
+  requests: Record<string, string>;
+  limits: Record<string, string>;
+  ports: string[];
+  liveness: string | null;
+  readiness: string | null;
+  startup: string | null;
+  env: EnvView[];
+}
+
+export interface HpaView {
+  name: string;
+  minReplicas: number | null;
+  maxReplicas: number;
+  currentReplicas: number | null;
+  desiredReplicas: number;
+  metrics: string[];
+  conditions: ConditionView[];
+}
+
+export interface PdbView {
+  name: string;
+  minAvailable: string | null;
+  maxUnavailable: string | null;
+  allowedDisruptions: number;
+  currentHealthy: number;
+  desiredHealthy: number;
+  expectedPods: number;
+}
+
+export interface Revision {
+  revision: number;
+  name: string;
+  images: string[];
+  created: number | null;
+  replicas: number | null;
+  current: boolean;
+}
+
+export interface WorkloadDetails {
+  workload: WorkloadRow;
+  conditions: ConditionView[];
+  selector: string | null;
+  strategy: string | null;
+  containers: ContainerSpecView[];
+  labels: Record<string, string>;
+  annotations: Record<string, string>;
+  activeJobs: string[];
+  hpa: Part<HpaView | null>;
+  pdb: Part<PdbView | null>;
+  /** null — у Job и CronJob истории нет. */
+  history: Part<Revision[]> | null;
+}
+
+export type PodProblem = "imagePull" | "oomKilled" | "crashLoop" | "pending" | "failed";
+
+export interface OwnerRef {
+  kind: string;
+  name: string;
+}
+
+export interface PodRow {
+  name: string;
+  phase: string;
+  /** Статус, как в `kubectl get pods`. */
+  status: string;
+  problem: PodProblem | null;
+  ready: number;
+  containers: number;
+  restarts: number;
+  lastRestart: number | null;
+  node: string | null;
+  created: number | null;
+  qos: string | null;
+  owner: OwnerRef | null;
+}
+
+export interface StateView {
+  state: "running" | "waiting" | "terminated";
+  reason: string | null;
+  message: string | null;
+  exitCode: number | null;
+  started: number | null;
+  finished: number | null;
+}
+
+export interface ContainerStatusView extends ContainerSpecView {
+  imageId: string | null;
+  state: StateView | null;
+  lastState: StateView | null;
+  ready: boolean;
+  restarts: number;
+}
+
+export interface VolumeView {
+  name: string;
+  kind: string;
+  source: string | null;
+}
+
+export interface PodDetails {
+  pod: PodRow;
+  conditions: ConditionView[];
+  podIp: string | null;
+  hostIp: string | null;
+  serviceAccount: string | null;
+  started: number | null;
+  containers: ContainerStatusView[];
+  labels: Record<string, string>;
+  annotations: Record<string, string>;
+  volumes: VolumeView[];
+}
+
+export interface WorkloadRef {
+  kind: WorkloadKind;
+  name: string;
+}
+
+export interface EventRow {
+  key: string;
+  /** `Normal` или `Warning`. */
+  type: string;
+  reason: string;
+  object: OwnerRef;
+  message: string;
+  count: number;
+  firstSeen: number | null;
+  lastSeen: number | null;
+  source: string | null;
+}
+
+/** Чьи события: объекта или workload'а вместе с его подами. */
+export interface EventObject {
+  kind: string;
+  name: string;
+}
+
+export interface EndpointCount {
+  ready: number;
+  total: number;
+}
+
+export interface ServiceRow {
+  name: string;
+  type: string;
+  clusterIp: string | null;
+  external: string[];
+  ports: string[];
+  selector: string | null;
+  endpoints: EndpointCount | null;
+  created: number | null;
+}
+
+export interface RouteRow {
+  name: string;
+  host: string | null;
+  path: string | null;
+  service: string | null;
+  port: string | null;
+  tls: string | null;
+  insecurePolicy: string | null;
+  admitted: boolean | null;
+  admittedMessage: string | null;
+  certExpires: number | null;
+  ingress: string | null;
+  created: number | null;
+}
+
+export interface IngressPath {
+  host: string | null;
+  path: string | null;
+  service: string | null;
+  port: string | null;
+}
+
+export interface IngressTls {
+  hosts: string[];
+  secret: string | null;
+}
+
+export interface IngressRow {
+  name: string;
+  class: string | null;
+  rules: IngressPath[];
+  defaultBackend: string | null;
+  tls: IngressTls[];
+  addresses: string[];
+  routes: string[];
+  created: number | null;
+}
+
+export interface ListenerView {
+  name: string;
+  port: number | null;
+  protocol: string | null;
+  hostname: string | null;
+}
+
+export interface GatewayRow {
+  name: string;
+  class: string | null;
+  listeners: ListenerView[];
+  addresses: string[];
+  accepted: boolean | null;
+  programmed: boolean | null;
+  created: number | null;
+}
+
+export interface ParentView {
+  name: string;
+  namespace: string | null;
+  section: string | null;
+  accepted: ConditionView | null;
+  resolvedRefs: ConditionView | null;
+}
+
+export interface GatewayRouteRow {
+  kind: "HTTPRoute" | "GRPCRoute";
+  name: string;
+  hostnames: string[];
+  parents: ParentView[];
+  backends: string[];
+  created: number | null;
+}
+
+/** Сеть проекта; null — вида нет в кластере (нет группы API). */
+export interface NetworkView {
+  services: Part<ServiceRow[]>;
+  endpointsError: AppError | null;
+  routes: Part<RouteRow[]> | null;
+  ingresses: Part<IngressRow[]>;
+  gateways: Part<GatewayRow[]> | null;
+  httpRoutes: Part<GatewayRouteRow[]> | null;
+  grpcRoutes: Part<GatewayRouteRow[]> | null;
+}
+
+export interface ConfigMapRow {
+  name: string;
+  keys: string[];
+  binaryKeys: string[];
+  created: number | null;
+}
+
+/** Secret: имя, тип и ключи — значения в интерфейс не приходят. */
+export interface SecretRow {
+  name: string;
+  type: string;
+  keys: string[];
+  created: number | null;
+}
+
+export interface ConfigView {
+  configMaps: Part<ConfigMapRow[]>;
+  secrets: Part<SecretRow[]>;
+}
+
+export interface ConfigValue {
+  text: string | null;
+  binarySize: number | null;
+}
+
+export interface PvcRow {
+  name: string;
+  phase: string | null;
+  class: string | null;
+  capacity: string | null;
+  requested: string | null;
+  accessModes: string[];
+  volumeMode: string | null;
+  volume: string | null;
+  /** null — поды не читаются, неизвестно. */
+  mountedBy: string[] | null;
+  created: number | null;
+}
+
+export interface QuotaEntry {
+  resource: string;
+  used: string | null;
+  hard: string;
+  ratio: number | null;
+}
+
+export interface QuotaView {
+  name: string;
+  scopes: string[];
+  entries: QuotaEntry[];
+}
+
+export interface LimitView {
+  type: string;
+  resource: string;
+  min: string | null;
+  max: string | null;
+  default: string | null;
+  defaultRequest: string | null;
+  maxLimitRequestRatio: string | null;
+}
+
+export interface LimitRangeView {
+  name: string;
+  limits: LimitView[];
+}
+
+export interface QuotasView {
+  quotas: Part<QuotaView[]>;
+  limitRanges: Part<LimitRangeView[]>;
+}
+
+/** Виды объектов с вкладкой YAML. */
+export type YamlKind =
+  | WorkloadKind
+  | "Pod"
+  | "Service"
+  | "Route"
+  | "Ingress"
+  | "ConfigMap"
+  | "PersistentVolumeClaim"
+  | "Gateway"
+  | "HTTPRoute"
+  | "GRPCRoute";
+
+export type WatchKind = "pods" | "workloads" | "events";
+
+export interface WatchParams {
+  connectionId: string;
+  namespace: string;
+  kind: WatchKind;
+  workload?: WorkloadRef | null;
+}
+
+export type WatchRow = PodRow | WorkloadRow | EventRow;
+export type RowChange = { op: "upsert"; row: WatchRow } | { op: "delete"; key: string };
+
+export type WatchEvent =
+  | { type: "reset"; items: WatchRow[]; errors: KindError[] }
+  | { type: "changes"; changes: RowChange[] }
+  | { type: "polling" }
+  | { type: "error"; error: AppError; fatal: boolean };
+
+export interface LogFilter {
+  text: string;
+  regex: boolean;
+  caseSensitive: boolean;
+}
+
+export interface LogParams {
+  connectionId: string;
+  namespace: string;
+  pod: string;
+  container?: string | null;
+  previous?: boolean;
+  tailLines?: number | null;
+  sinceSeconds?: number | null;
+  sinceTime?: string | null;
+  follow?: boolean;
+  filter?: LogFilter | null;
+}
+
+export interface LogLine {
+  ts: string | null;
+  text: string;
+  truncated: boolean;
+}
+
+export type LogEvent =
+  | { type: "lines"; lines: LogLine[]; scanned: number; shown: number }
+  | { type: "reconnecting"; since: string | null }
+  | { type: "end"; scanned: number; shown: number }
+  | { type: "error"; error: AppError };
