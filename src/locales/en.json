@@ -406,7 +406,12 @@
       "export": "Export folder…",
       "importHere": "Import here…",
       "importKubeconfigHere": "Import from kubeconfig here…"
-    }
+    },
+    "projects": "Projects",
+    "nodes": "Nodes",
+    "projectsFilter": "Filter projects",
+    "projectsFromProfile": "The cluster does not list projects for you — the projects of the profile are shown",
+    "noProjects": "No projects"
   },
   "settings": {
     "title": "Settings",
@@ -600,6 +605,32 @@
       "literal": "value in the spec",
       "env_one": "{{count}} environment variable (names and sources)",
       "env_other": "{{count}} environment variables (names and sources)"
+    }
+  },
+  "project": {
+    "tabs": {
+      "workloads": "Workloads"
+    },
+    "workloads": {
+      "title": "Workloads",
+      "kind": "Kind",
+      "name": "Name",
+      "ready": "Ready",
+      "images": "Images",
+      "age": "Age"
+    },
+    "overview": {
+      "pods": "Pods",
+      "noProblemPods": "No problem pods.",
+      "restarts_one": "{{count}} restart",
+      "restarts_other": "{{count}} restarts",
+      "workloads": "Workloads that are not fine",
+      "noProblemWorkloads": "All workloads are fine.",
+      "quotas": "Quotas",
+      "noQuotas": "The project has no quotas.",
+      "quotasOk": "Every quota is used by less than 80 %.",
+      "warnings": "Warning events in the last hour",
+      "noWarnings": "No warnings in the last hour."
     }
   }
 }

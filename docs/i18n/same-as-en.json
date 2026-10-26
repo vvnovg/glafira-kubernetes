@@ -3,6 +3,8 @@
     "connections.form.step.tcp",
     "connections.form.step.tls",
     "cluster.nodes.taints",
-    "cluster.nodes.version"
+    "cluster.nodes.version",
+    "project.tabs.workloads",
+    "project.workloads.title"
   ]
 }

@@ -36,6 +36,7 @@ describe("workspace", () => {
     expect(tabId({ kind: "cluster", connectionId: "c" })).toBe("cluster:c");
     expect(tabId({ kind: "help", chapter: "connections" })).toBe("help");
     expect(tabId({ kind: "nodes", connectionId: "c" })).toBe("nodes:c");
+    expect(tabId({ kind: "project", connectionId: "c", namespace: "team-a" })).toBe("project:c:team-a");
     expect(tabId({ kind: "workload", connectionId: "c", namespace: "team-a", workloadKind: "Deployment", name: "web" })).toBe("workload:c:team-a:Deployment:web");
     expect(tabId({ kind: "pod", connectionId: "c", namespace: "team-a", name: "web-1" })).toBe("pod:c:team-a:web-1");
   });

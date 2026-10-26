@@ -26,6 +26,8 @@ function tabTitle(tab: Tab, byId: Map<string, ConnectionProfile>): string {
       return i18n.t("tabs.cluster", { conn });
     case "nodes":
       return i18n.t("tabs.nodes", { conn });
+    case "project":
+      return `${tab.namespace} · ${conn}`;
     // Имена объектов не переводятся; подключение видно по бейджу окружения.
     case "workload":
     case "pod":

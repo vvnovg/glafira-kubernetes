@@ -410,7 +410,12 @@
       "export": "Экспортировать папку…",
       "importHere": "Импортировать сюда…",
       "importKubeconfigHere": "Импорт из kubeconfig сюда…"
-    }
+    },
+    "projects": "Проекты",
+    "nodes": "Ноды",
+    "projectsFilter": "Фильтр проектов",
+    "projectsFromProfile": "Кластер не даёт список проектов — показаны проекты из профиля",
+    "noProjects": "Проектов нет"
   },
   "settings": {
     "title": "Настройки",
@@ -614,6 +619,34 @@
       "env_few": "{{count}} переменные окружения (имена и источники)",
       "env_many": "{{count}} переменных окружения (имена и источники)",
       "env_other": "{{count}} переменной окружения (имена и источники)"
+    }
+  },
+  "project": {
+    "tabs": {
+      "workloads": "Workloads"
+    },
+    "workloads": {
+      "title": "Workloads",
+      "kind": "Вид",
+      "name": "Имя",
+      "ready": "Готово",
+      "images": "Образы",
+      "age": "Возраст"
+    },
+    "overview": {
+      "pods": "Поды",
+      "noProblemPods": "Проблемных подов нет.",
+      "restarts_one": "{{count}} рестарт",
+      "restarts_few": "{{count}} рестарта",
+      "restarts_many": "{{count}} рестартов",
+      "restarts_other": "{{count}} рестарта",
+      "workloads": "Workloads не в норме",
+      "noProblemWorkloads": "Все workloads в норме.",
+      "quotas": "Квоты",
+      "noQuotas": "Квот у проекта нет.",
+      "quotasOk": "Каждая квота занята меньше чем на 80 %.",
+      "warnings": "События Warning за последний час",
+      "noWarnings": "Предупреждений за последний час нет."
     }
   }
 }

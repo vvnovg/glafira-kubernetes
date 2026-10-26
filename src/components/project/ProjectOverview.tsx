@@ -1,0 +1,121 @@
+import { useQuery } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
+import { api } from "../../api/client";
+import type { PodRow } from "../../api/types";
+import { formatAge } from "../../lib/age";
+import { useWorkspace } from "../../state/workspace";
+import { PartView } from "../common/PartView";
+import { ReadError } from "../common/ReadError";
+import { RefreshControls, useRefreshInterval } from "../common/RefreshControls";
+
+/** Последние события Warning — за этот срок (спец. §6.3). */
+const WARNINGS_FOR_SEC = 3600;
+/** Квота показывается, когда занята на столько. */
+const QUOTA_WARN = 0.8;
+/** Больше стольких строк в каждом списке обзора не показывается. */
+const MAX_ITEMS = 20;
+
+const PHASES = ["Running", "Pending", "Succeeded", "Failed", "Unknown"];
+
+/** Обзор проекта: поды по фазам и проблемам, workloads не в норме, квоты у предела, Warning за час. */
+export function ProjectOverview({ connectionId, namespace }: { connectionId: string; namespace: string }) {
+  const { t } = useTranslation();
+  const open = useWorkspace((s) => s.open);
+  const [interval, setInterval] = useRefreshInterval();
+  const refetchInterval = interval || false;
+  const pods = useQuery({ queryKey: ["pods", connectionId, namespace, null], queryFn: () => api.listPods(connectionId, namespace), refetchInterval });
+  const workloads = useQuery({ queryKey: ["workloads", connectionId, namespace], queryFn: () => api.listWorkloads(connectionId, namespace), refetchInterval });
+  const quotas = useQuery({ queryKey: ["quotas", connectionId, namespace], queryFn: () => api.getQuotas(connectionId, namespace), refetchInterval });
+  const events = useQuery({ queryKey: ["events", connectionId, namespace, null], queryFn: () => api.listEvents(connectionId, namespace), refetchInterval });
+  const busy = pods.isFetching || workloads.isFetching || quotas.isFetching || events.isFetching;
+  const refresh = () => Promise.all([pods.refetch(), workloads.refetch(), quotas.refetch(), events.refetch()]);
+  const openPod = (p: PodRow) => open({ kind: "pod", connectionId, namespace, name: p.name });
+  const since = Date.now() / 1000 - WARNINGS_FOR_SEC;
+  const warnings = (events.data?.items ?? []).filter((e) => e.type === "Warning" && (e.lastSeen ?? 0) >= since).slice(0, MAX_ITEMS);
+  const problemPods = (pods.data?.items ?? []).filter((p) => p.problem);
+  const problemWorkloads = (workloads.data?.items ?? []).filter((w) => w.problem);
+  return (
+    <div className="section">
+      <RefreshControls interval={interval} onInterval={setInterval} onRefresh={() => void refresh()} busy={busy} />
+      <h3>{t("project.overview.pods")}</h3>
+      {pods.error && <ReadError error={pods.error} connectionId={connectionId} onRetry={() => void pods.refetch()} />}
+      {pods.data && (
+        <>
+          <dl className="stats">
+            {PHASES.map((phase) => (
+              <div key={phase}>
+                <dt>{phase}</dt>
+                <dd>{pods.data.items.filter((p) => p.phase === phase).length}</dd>
+              </div>
+            ))}
+          </dl>
+          {problemPods.length === 0 ? (
+            <p className="muted">{t("project.overview.noProblemPods")}</p>
+          ) : (
+            <ul>
+              {problemPods.slice(0, MAX_ITEMS).map((p) => (
+                <li key={p.name}>
+                  <button type="button" className="link" onClick={() => openPod(p)}>
+                    {p.name}
+                  </button>{" "}
+                  <span className="problem">{p.status}</span> <span className="muted">{t("project.overview.restarts", { count: p.restarts })}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+      <h3>{t("project.overview.workloads")}</h3>
+      {workloads.error && <ReadError error={workloads.error} connectionId={connectionId} onRetry={() => void workloads.refetch()} />}
+      {workloads.data &&
+        (problemWorkloads.length === 0 ? (
+          <p className="muted">{t("project.overview.noProblemWorkloads")}</p>
+        ) : (
+          <ul>
+            {problemWorkloads.slice(0, MAX_ITEMS).map((w) => (
+              <li key={`${w.kind}/${w.name}`}>
+                <button type="button" className="link" onClick={() => open({ kind: "workload", connectionId, namespace, workloadKind: w.kind, name: w.name })}>
+                  {w.kind}/{w.name}
+                </button>{" "}
+                <span className="problem">{t(`objects.workload.problem.${w.problem}`)}</span>
+              </li>
+            ))}
+          </ul>
+        ))}
+      <h3>{t("project.overview.quotas")}</h3>
+      {quotas.error && <ReadError error={quotas.error} connectionId={connectionId} onRetry={() => void quotas.refetch()} />}
+      {quotas.data && (
+        <PartView part={quotas.data.quotas}>
+          {(list) => {
+            const near = list.flatMap((q) => q.entries.filter((e) => (e.ratio ?? 0) >= QUOTA_WARN).map((e) => ({ quota: q.name, ...e })));
+            if (list.length === 0) return <p className="muted">{t("project.overview.noQuotas")}</p>;
+            if (near.length === 0) return <p className="muted">{t("project.overview.quotasOk")}</p>;
+            return (
+              <ul>
+                {near.map((e) => (
+                  <li key={`${e.quota}/${e.resource}`} className="warn">
+                    {e.quota}: <code>{e.resource}</code> {e.used} / {e.hard} ({Math.round((e.ratio ?? 0) * 100)} %)
+                  </li>
+                ))}
+              </ul>
+            );
+          }}
+        </PartView>
+      )}
+      <h3>{t("project.overview.warnings")}</h3>
+      {events.error && <ReadError error={events.error} connectionId={connectionId} onRetry={() => void events.refetch()} />}
+      {events.data &&
+        (warnings.length === 0 ? (
+          <p className="muted">{t("project.overview.noWarnings")}</p>
+        ) : (
+          <ul>
+            {warnings.map((e) => (
+              <li key={e.key}>
+                <span className="muted">{formatAge(e.lastSeen)}</span> <strong>{e.reason}</strong> {e.object.kind}/{e.object.name}: {e.message}
+              </li>
+            ))}
+          </ul>
+        ))}
+    </div>
+  );
+}
