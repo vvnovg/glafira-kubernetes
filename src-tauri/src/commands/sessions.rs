@@ -2,7 +2,7 @@ use tauri::State;
 use tauri::ipc::Channel;
 
 use crate::error::{AppResult, ErrorCode};
-use crate::logs::{KubeLogs, LogEvent, LogParams, Matcher};
+use crate::logs::{KubeLogs, LogEvent, LogParams, Matcher, Reported};
 use crate::sessions::{SessionGuard, Sink};
 use crate::state::AppState;
 use crate::watch::{WatchEvent, WatchKind, WatchParams};
@@ -83,26 +83,30 @@ pub async fn start_watch_impl(
         params.workload.clone(),
         groups,
     );
-    // Как у `AppState::read_in`: 403 — права проекта перечитаются, ошибка учётных данных или
-    // TLS сбрасывает клиент сессии, если он ещё в пуле.
-    let report: crate::watch::Report = {
-        let (st, cid, ns) = (
-            st.clone(),
-            params.connection_id.clone(),
-            params.namespace.clone(),
-        );
-        Box::new(move |e| {
-            if e.code == ErrorCode::Forbidden {
-                st.access.forget(&cid, &ns);
-            }
-            st.evict_if_broken_client(&cid, &used, e);
-        })
-    };
+    let report = session_report(st, &params.connection_id, &params.namespace, used);
     tokio::spawn(async move {
         let _guard = guard;
         crate::watch::run_reporting(sources, poll, sink, cancel, report).await;
     });
     Ok(id)
+}
+
+/// Что делать с ошибками запросов сессии, которая читает клиентом `used`. Как у
+/// `AppState::read_in`: 403 — права проекта перечитаются, ошибка учётных данных или TLS
+/// сбрасывает этот клиент, если он ещё в пуле.
+fn session_report(
+    st: &AppState,
+    connection_id: &str,
+    namespace: &str,
+    used: std::sync::Arc<crate::k8s::pool::Connected>,
+) -> crate::watch::Report {
+    let (st, id, ns) = (st.clone(), connection_id.to_string(), namespace.to_string());
+    Box::new(move |e| {
+        if e.code == ErrorCode::Forbidden {
+            st.access.forget(&id, &ns);
+        }
+        st.evict_if_broken_client(&id, &used, e);
+    })
 }
 
 /// Логи контейнера (спец. §6.6); возвращает id сессии. Неверный regex — ошибка сразу.
@@ -121,20 +125,32 @@ pub async fn start_logs_impl(
     sink: impl Sink<LogEvent>,
 ) -> AppResult<String> {
     let matcher = Matcher::new(params.filter.as_ref())?;
-    let reader = st
-        .read_in(&params.connection_id, &params.namespace, |c| async move {
-            Ok(c.reader())
-        })
-        .await?;
-    let follow = params.follow;
+    // Как у watch: сессия на учёте ещё до подключения, и отключение, пока идёт вход
+    // (exec-плагин), её остановит (`stop_for`). При ошибке её снимает с учёта `guard`.
     let (id, cancel) = st.sessions.register(&params.connection_id);
     let guard = SessionGuard {
         sessions: st.sessions.clone(),
         id: id.clone(),
     };
+    let (used, reader) = st
+        .read_in(&params.connection_id, &params.namespace, |c| async move {
+            let r = c.reader();
+            Ok((c, r))
+        })
+        .await?;
+    if cancel.is_cancelled() {
+        // Подключение отключили, пока сессия подключалась: её уже сняли с учёта.
+        return Ok(id);
+    }
+    let follow = params.follow;
+    let report = session_report(st, &params.connection_id, &params.namespace, used);
     tokio::spawn(async move {
         let _guard = guard;
-        crate::logs::run(KubeLogs { reader, params }, follow, matcher, sink, cancel).await;
+        let source = Reported {
+            source: KubeLogs { reader, params },
+            report,
+        };
+        crate::logs::run(source, follow, matcher, sink, cancel).await;
     });
     Ok(id)
 }
@@ -352,5 +368,96 @@ mod tests {
             "{events:?}"
         );
         assert_eq!(pods.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    fn log_params() -> LogParams {
+        LogParams {
+            connection_id: "a".into(),
+            namespace: "team-a".into(),
+            pod: "web-1".into(),
+            container: None,
+            previous: false,
+            tail_lines: None,
+            since_seconds: None,
+            since_time: None,
+            follow: true,
+            filter: None,
+        }
+    }
+
+    /// Отключение, пока сессия логов подключается (очередь подключения занята): сессия уже на
+    /// учёте, останавливается и лог не открывает.
+    #[tokio::test]
+    async fn a_log_session_stopped_while_connecting_does_not_start() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let st =
+            AppState::new(dir.path(), Arc::new(crate::secrets::MemoryStore::default())).unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let connected = {
+            let requests = requests.clone();
+            crate::k8s::pool::test_connected(move |_| {
+                requests.fetch_add(1, Ordering::SeqCst);
+                (200, serde_json::json!({}))
+            })
+        };
+        assert!(
+            st.pool
+                .insert_if_current("a", st.pool.generation("a"), connected)
+        );
+        let turn = st.pool.connect_lock("a").await;
+        let sink: Collect<LogEvent> = Collect::default();
+        let task = {
+            let (st, sink) = (st.clone(), sink.clone());
+            tokio::spawn(async move { start_logs_impl(&st, log_params(), sink).await })
+        };
+        let registered = async {
+            while st.sessions.is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), registered)
+            .await
+            .expect("сессия на учёте до подключения");
+        assert_eq!(st.sessions.stop_for("a"), 1);
+        drop(turn);
+        task.await.unwrap().unwrap();
+        assert!(st.sessions.is_empty());
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(requests.load(Ordering::SeqCst), 0, "лог не открыт");
+        assert!(sink.items().is_empty());
+    }
+
+    /// Кластер отклонил токен при открытии лога: ошибка в сессии, клиент подключения сброшен.
+    #[tokio::test]
+    async fn a_rejected_log_open_evicts_the_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let st =
+            AppState::new(dir.path(), Arc::new(crate::secrets::MemoryStore::default())).unwrap();
+        let connected = crate::k8s::pool::test_connected(|_| {
+            crate::k8s::testing::status(401, "Unauthorized", "Unauthorized")
+        });
+        assert!(
+            st.pool
+                .insert_if_current("a", st.pool.generation("a"), connected)
+        );
+        let sink: Collect<LogEvent> = Collect::default();
+        start_logs_impl(&st, log_params(), sink.clone())
+            .await
+            .unwrap();
+        let ended = async {
+            while !st.sessions.is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), ended)
+            .await
+            .unwrap();
+        let events = sink.items();
+        assert!(
+            matches!(&events[..], [LogEvent::Error { error }] if error.key == "errors.k8s.unauthorized"),
+            "{events:?}"
+        );
+        assert!(st.pool.get("a").is_none(), "клиент сброшен");
     }
 }

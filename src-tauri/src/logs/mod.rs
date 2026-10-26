@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{AppError, AppResult, ErrorCode};
+use crate::k8s::errors::breaks_client;
 use crate::k8s::read::ReadClient;
 use crate::sessions::{BATCH_WINDOW, Batch, Sink};
 
@@ -248,6 +249,39 @@ impl LogSource for KubeLogs {
     }
 }
 
+/// Источник, об ошибках открытия лога и проверки контейнера которого узнаёт `report`: что с
+/// ними делать (сбросить клиент подключения после `breaks_client`, забыть права проекта после
+/// 403), решает тот, кто начал сессию, — как у watch (`watch::Report`).
+pub struct Reported<S, F> {
+    pub source: S,
+    pub report: F,
+}
+
+impl<S: LogSource, F: Fn(&AppError) + Send + Sync> LogSource for Reported<S, F> {
+    fn open(
+        &self,
+        since: Option<Timestamp>,
+    ) -> BoxFuture<'_, AppResult<BoxStream<'static, std::io::Result<String>>>> {
+        Box::pin(async move {
+            let r = self.source.open(since).await;
+            if let Err(e) = &r {
+                (self.report)(e);
+            }
+            r
+        })
+    }
+
+    fn running(&self) -> BoxFuture<'_, AppResult<bool>> {
+        Box::pin(async move {
+            let r = self.source.running().await;
+            if let Err(e) = &r {
+                (self.report)(e);
+            }
+            r
+        })
+    }
+}
+
 fn lost() -> AppError {
     app_err!(
         ErrorCode::ConnectionFailed,
@@ -281,7 +315,9 @@ pub async fn run(
         };
         let mut stream = match opened {
             Ok(s) => s,
-            Err(error) if lost_at.is_none() => {
+            // Учётные данные и TLS повтор не починит: их ошибка сразу, а не `errors.logs.lost`
+            // через минуту.
+            Err(error) if lost_at.is_none() || breaks_client(error.code) => {
                 sink.send(LogEvent::Error { error });
                 return;
             }
@@ -651,6 +687,65 @@ mod tests {
             ["<error errors.k8s.connect>"],
             "первое открытие не повторяется"
         );
+    }
+
+    /// Первый поток кончается, а при переподключении кластер отвечает 401.
+    struct Expired {
+        opens: std::sync::atomic::AtomicUsize,
+    }
+
+    impl LogSource for Expired {
+        fn open(
+            &self,
+            _since: Option<Timestamp>,
+        ) -> BoxFuture<'_, AppResult<BoxStream<'static, std::io::Result<String>>>> {
+            let n = self.opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                match n {
+                    0 => Ok(futures::stream::iter(vec![Ok(format!("{T1} one"))]).boxed()),
+                    _ => Err(crate::k8s::errors::from_status(
+                        &kube::core::Status::failure("expired", "Unauthorized").with_code(401),
+                    )),
+                }
+            })
+        }
+
+        fn running(&self) -> BoxFuture<'_, AppResult<bool>> {
+            Box::pin(async { Ok(true) })
+        }
+    }
+
+    /// Учётные данные при переподключении не повторяются минуту: ошибка сразу, и о ней узнаёт
+    /// `report` (сброс клиента).
+    #[tokio::test(start_paused = true)]
+    async fn a_credential_error_while_reconnecting_ends_the_session() {
+        let reported = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let source = Reported {
+            source: Expired {
+                opens: Default::default(),
+            },
+            report: {
+                let reported = reported.clone();
+                move |e: &AppError| reported.lock().unwrap().push(e.key.clone())
+            },
+        };
+        let sink = Collect::default();
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(run(
+            source,
+            true,
+            Matcher::All,
+            sink.clone(),
+            cancel.clone(),
+        ));
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        cancel.cancel();
+        task.await.unwrap();
+        assert_eq!(
+            texts(&sink.items()),
+            ["one", "<reconnecting>", "<error errors.k8s.unauthorized>"]
+        );
+        assert_eq!(*reported.lock().unwrap(), ["errors.k8s.unauthorized"]);
     }
 
     #[tokio::test]
