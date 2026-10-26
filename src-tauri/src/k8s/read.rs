@@ -109,6 +109,44 @@ pub fn check_namespace(namespace: &str) -> AppResult<()> {
     ))
 }
 
+/// Проект, проверенный `check_namespace`: потоки watch открываются только с ним — вернуть ошибку
+/// до первого запроса поток не может, поэтому проверка — при создании `Namespace`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Namespace(String);
+
+impl Namespace {
+    pub fn new(name: &str) -> AppResult<Self> {
+        check_namespace(name)?;
+        Ok(Self(name.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Путь API-сервера для `get_text`: абсолютный, печатаемый ASCII без `..`, `//`, `\`, `%` и `#`
+/// (запрос после `?` разрешён). Пути задаёт код (`/readyz?verbose`), а не пользователь: проверка
+/// страхует, что путь не уведёт запрос к другому ресурсу.
+pub fn check_path(path_and_query: &str) -> AppResult<()> {
+    let path = path_and_query
+        .split_once('?')
+        .map_or(path_and_query, |(p, _)| p);
+    let ok = path.starts_with('/')
+        && !path.contains("..")
+        && !path.contains("//")
+        && path_and_query
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && !b"\\%#".contains(&b));
+    if ok {
+        return Ok(());
+    }
+    Err(AppError::internal_with(format!(
+        "refused API path {}",
+        path_and_query.escape_debug()
+    )))
+}
+
 /// Имя объекта запроса: не пустое и не `.`, печатаемый ASCII без `/`, `\`, `%`, `?`, `#`, `;`
 /// и без `..`. `ReadClient` вида не знает, поэтому правило — самое мягкое из правил имён
 /// Kubernetes (`path.IsValidPathSegmentName`: не `.` и `..`, без `/` и `%`; под него подходит и
@@ -313,8 +351,9 @@ impl ReadClient {
     }
 
     /// Тело ответа на GET к пути API-сервера, например `/readyz?verbose`. Ответ с ошибкой
-    /// приходит ошибкой, текст тела — в её сообщении.
+    /// приходит ошибкой, текст тела — в её сообщении. Путь проверяется до запроса (`check_path`).
     pub async fn get_text(&self, path_and_query: &str) -> AppResult<String> {
+        check_path(path_and_query)?;
         let request = http::Request::get(path_and_query)
             .body(Vec::new())
             .map_err(|e| crate::error::AppError::internal_with(e.to_string()))?;
@@ -323,10 +362,10 @@ impl ReadClient {
 
     /// Изменения объектов namespace (`kube::runtime::watcher`): список, затем watch; после
     /// разрыва watcher сам читает список заново. Таймаут к потоку не применяется. Ошибку
-    /// поток вернуть не может: namespace сессии проверяет `AppState::read_in` (`check_namespace`).
+    /// поток вернуть не может: namespace проверен заранее (`Namespace`).
     pub fn watch<K>(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         config: watcher::Config,
     ) -> impl Stream<Item = watcher::Result<watcher::Event<K>>> + Send + use<K>
     where
@@ -337,17 +376,20 @@ impl ReadClient {
             + Send
             + 'static,
     {
-        watcher(Api::namespaced(self.client.clone(), namespace), config)
+        watcher(
+            Api::namespaced(self.client.clone(), namespace.as_str()),
+            config,
+        )
     }
 
     /// То же для вида без типа в `k8s-openapi`.
     pub fn watch_dynamic(
         &self,
         ar: &ApiResource,
-        namespace: &str,
+        namespace: &Namespace,
         config: watcher::Config,
     ) -> impl Stream<Item = watcher::Result<watcher::Event<DynamicObject>>> + Send + use<> {
-        watcher(self.dynamic(ar, Some(namespace)), config)
+        watcher(self.dynamic(ar, Some(namespace.as_str())), config)
     }
 
     /// Права пользователя в namespace (`SelfSubjectRulesReview`). Проверка создаётся запросом
@@ -704,12 +746,23 @@ mod tests {
                 .await
                 .err(),
             r.rules_review("a/b").await.err(),
+            r.get_text("/api/v1/namespaces/a/../../secrets").await.err(),
+            r.get_text("readyz").await.err(),
+            r.get_text("/readyz?x#y").await.err(),
         ]
         .map(|e| e.map(|e| e.code));
         assert!(
-            codes.iter().all(|c| *c == Some(ErrorCode::InvalidInput)),
+            codes[..10]
+                .iter()
+                .all(|c| *c == Some(ErrorCode::InvalidInput)),
             "{codes:?}"
         );
+        assert!(
+            codes[10..].iter().all(|c| *c == Some(ErrorCode::Internal)),
+            "пути задаёт код: отказ — внутренняя ошибка, {codes:?}"
+        );
+        assert!(Namespace::new("team-a/../kube-system").is_err());
+        assert_eq!(Namespace::new("team-a").unwrap().as_str(), "team-a");
         let ok: ConfigMap = r.get("team-a", "web").await.unwrap();
         assert_eq!(ok.metadata.name.as_deref(), Some("web"));
         drop(r);

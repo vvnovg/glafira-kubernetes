@@ -355,7 +355,7 @@ struct DcStatus {
 /// в шаблоне) — ошибка, а не строка из пустого объекта с ложной проблемой.
 fn parse_deployment_config(o: &DynamicObject) -> AppResult<Parsed> {
     let dc = DeploymentConfigData::deserialize(&o.data)
-        .map_err(|e| malformed("DeploymentConfig", &name(&o.metadata), e))?;
+        .map_err(|_| malformed("DeploymentConfig", &name(&o.metadata)))?;
     let mut r = row(
         WorkloadKind::DeploymentConfig,
         &o.metadata,
@@ -1376,7 +1376,10 @@ mod tests {
             ("DeploymentConfig", "broken"),
             "ошибка первого из пропущенных"
         );
-        assert!(e.error.details.as_deref().unwrap().contains("null"));
+        assert_eq!(
+            e.error.details, None,
+            "текст serde (он цитирует значения полей) в ошибку не попадает"
+        );
 
         let e = get_workload(&r, "team-a", WorkloadKind::DeploymentConfig, "broken")
             .await

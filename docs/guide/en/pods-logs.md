@@ -8,8 +8,8 @@ the age, the QoS class and the owner. A native sidecar (an init container with `
 containers once it has started and does not hold the pod in `Init`. Known differences from `kubectl`: a pod waiting
 for its scheduling gates shows `Pending`, not `SchedulingGated`; ephemeral containers are not shown; while a pod
 initializes, its restarts do not include those of regular init containers. A problem pod — the image cannot be pulled, a container was
-killed for memory (`OOMKilled`), restarts in a loop, the pod waits to be scheduled (`Pending`) or has failed — is
-highlighted; the problems-only filter leaves just them.
+killed for memory (`OOMKilled`), restarts in a loop (`CrashLoopBackOff` or, between restarts, exited with an error), the
+pod waits to be scheduled (`Pending`) or has failed — is highlighted; the problems-only filter leaves just them.
 
 ## Pod tab {#pod}
 

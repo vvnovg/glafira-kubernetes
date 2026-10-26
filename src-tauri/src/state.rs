@@ -408,12 +408,7 @@ mod tests {
             crate::k8s::testing::mock_client(crate::k8s::cluster::fixtures::openshift);
         let timeout = std::time::Duration::from_secs(1);
         let info = crate::k8s::cluster::probe(&client, timeout).await.unwrap();
-        Arc::new(Connected {
-            client,
-            info,
-            timeout,
-            expires_at: None,
-        })
+        Arc::new(Connected::new(client, info, timeout, None))
     }
 
     /// Ошибка учётных данных или TLS от клиента из пула сбрасывает его вместе с кэшем прав

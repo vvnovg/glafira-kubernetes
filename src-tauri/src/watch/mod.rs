@@ -21,7 +21,7 @@ use crate::error::{AppError, AppResult, ErrorCode};
 use crate::k8s::errors::{breaks_client, from_kube, from_status, timeout};
 use crate::k8s::events::{EventRow, event_row, list_events};
 use crate::k8s::pods::{PodRow, WorkloadRef, list_pods, pod_row};
-use crate::k8s::read::{MAX_ITEMS, ReadClient};
+use crate::k8s::read::{MAX_ITEMS, Namespace, ReadClient};
 use crate::k8s::workloads::{
     KindError, WorkloadKind, WorkloadRow, cron_job_row, daemon_set_row, deployment_config_row,
     deployment_configs, deployment_row, job_row, list_workloads, stateful_set_row,
@@ -665,7 +665,7 @@ fn watch_config(selector: Option<&str>) -> watcher::Config {
 /// у `list_pods`. У каждого потока свой клиент от `client` (`StreamClient::fork`).
 pub fn sources(
     client: &StreamClient,
-    namespace: &str,
+    namespace: &Namespace,
     kind: WatchKind,
     selector: Option<&str>,
     groups: &ApiGroups,
@@ -676,7 +676,7 @@ pub fn sources(
     let config = || watch_config(selector);
     macro_rules! typed {
         ($kind:expr, $t:ty, $f:expr) => {{
-            let (ns, config) = (namespace.to_string(), config());
+            let (ns, config) = (namespace.clone(), config());
             restarting($kind, client, move |r| {
                 r.watch::<$t>(&ns, config.clone())
                     .default_backoff()
@@ -705,7 +705,7 @@ pub fn sources(
                 }),
             ];
             if WorkloadKind::DeploymentConfig.available(groups) {
-                let (ns, config, ar) = (namespace.to_string(), config(), deployment_configs());
+                let (ns, config, ar) = (namespace.clone(), config(), deployment_configs());
                 out.push(restarting(
                     Some(WorkloadKind::DeploymentConfig),
                     client,
@@ -1568,7 +1568,7 @@ mod tests {
         assert!(
             sources(
                 &StreamClient::fixed(r),
-                "team-a",
+                &Namespace::new("team-a").unwrap(),
                 WatchKind::Pods,
                 Some(""),
                 &groups
@@ -1636,7 +1636,7 @@ mod tests {
         let task = tokio::spawn(run(
             sources(
                 &StreamClient::fixed(r.clone()),
-                "team-a",
+                &Namespace::new("team-a").unwrap(),
                 WatchKind::Pods,
                 None,
                 &groups,

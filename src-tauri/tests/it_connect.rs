@@ -89,8 +89,16 @@ async fn service_account_sees_only_its_project() {
     assert!(!c.info.capabilities.list_projects);
     // Роль edit есть только в team-a: права проверяются и в обе стороны.
     let limit = std::time::Duration::from_secs(10);
-    let create =
-        |ns: &'static str| can_i(&c.client, limit, "create", "apps", "deployments", Some(ns));
+    let create = |ns: &'static str| {
+        can_i(
+            c.kube_client(),
+            limit,
+            "create",
+            "apps",
+            "deployments",
+            Some(ns),
+        )
+    };
     assert!(create("team-a").await, "роль edit в team-a");
     assert!(!create("default").await, "в default прав нет");
 }
