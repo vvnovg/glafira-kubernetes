@@ -1,0 +1,215 @@
+# Объекты проекта team-a для интеграционных тестов чтения (tests/it_read.rs). Образ __HELPER_IMAGE__ —
+# помощник local-path-provisioner, который уже есть на ноде kind: стенд не скачивает образы. В нём только
+# bash, mkdir и rm, поэтому ожидание — `read -t` на пустом канале вместо sleep.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: team-a
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: web }
+  template:
+    metadata:
+      labels: { app: web }
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: web
+          image: __HELPER_IMAGE__
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c", "exec 3<> <(:); read -u 3"]
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+          env:
+            - name: LOG_LEVEL
+              valueFrom: { configMapKeyRef: { name: web-config, key: LOG_LEVEL } }
+            - name: DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: db, key: password } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crash
+  namespace: team-a
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: crash }
+  template:
+    metadata:
+      labels: { app: crash }
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: crash
+          image: __HELPER_IMAGE__
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c", "echo starting; echo boom >&2; exit 1"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pull
+  namespace: team-a
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: pull }
+  template:
+    metadata:
+      labels: { app: pull }
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: pull
+          image: registry.invalid/glafira/none:1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pending
+  namespace: team-a
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: pending }
+  template:
+    metadata:
+      labels: { app: pending }
+    spec:
+      terminationGracePeriodSeconds: 1
+      nodeSelector: { glafira/none: "true" }
+      containers:
+        - name: pending
+          image: __HELPER_IMAGE__
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c", "exec 3<> <(:); read -u 3"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logger
+  namespace: team-a
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: logger }
+  template:
+    metadata:
+      labels: { app: logger }
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: logger
+          image: __HELPER_IMAGE__
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c", "exec 3<> <(:); i=0; while true; do echo \"line $i\"; i=$((i+1)); read -t 1 -u 3 || :; done"]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migrate
+  namespace: team-a
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: __HELPER_IMAGE__
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c", "echo migrated"]
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: report
+  namespace: team-a
+spec:
+  schedule: "0 3 * * *"
+  suspend: true
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: report
+              image: __HELPER_IMAGE__
+              imagePullPolicy: IfNotPresent
+              command: ["bash", "-c", "echo report"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: team-a
+spec:
+  selector: { app: web }
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web
+  namespace: team-a
+spec:
+  rules:
+    - host: web.example.test
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: web, port: { number: 80 } }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-config
+  namespace: team-a
+data:
+  LOG_LEVEL: debug
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: db
+  namespace: team-a
+stringData:
+  password: s3cr3t-value
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data
+  namespace: team-a
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests: { storage: 1Gi }
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: compute
+  namespace: team-a
+spec:
+  hard:
+    pods: "20"
+    requests.cpu: "4"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: defaults
+  namespace: team-a
+spec:
+  limits:
+    - type: Container
+      defaultRequest: { cpu: 10m, memory: 16Mi }
+      default: { cpu: 100m, memory: 64Mi }

@@ -52,7 +52,7 @@ jobs:
         with:
           version: v0.33.0
           cluster_name: glafira
-      - name: Учётные записи стенда
+      - name: Стенд — учётные записи и объекты проекта team-a
         run: dev/kind/setup.sh
       - name: Тесты Rust (unit + интеграционные)
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib --tests
