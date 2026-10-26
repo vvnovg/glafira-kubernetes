@@ -1,18 +1,18 @@
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
+import { useRefetchInterval } from "../../lib/tabActive";
 import { PartView } from "../common/PartView";
 import { ReadError } from "../common/ReadError";
 import { RefreshControls, useRefreshInterval } from "../common/RefreshControls";
+import { isNearLimit } from "./quota";
 
-/** Квота занята на столько и больше — выделяется (как правило `quota.nearLimit`). */
-const NEAR_LIMIT = 0.9;
-
-/** Квоты проекта (спец. §6.3): ResourceQuota — использовано и лимит, LimitRange — границы и значения по умолчанию. */
+/** Квоты проекта (спец. §6.3): ResourceQuota — использовано и лимит (строки от порога `quota.nearLimit` выделены), LimitRange — границы и значения по умолчанию. */
 export function QuotasView({ connectionId, namespace }: { connectionId: string; namespace: string }) {
   const { t } = useTranslation();
   const [interval, setInterval] = useRefreshInterval();
-  const q = useQuery({ queryKey: ["quotas", connectionId, namespace], queryFn: () => api.getQuotas(connectionId, namespace), refetchInterval: interval || false });
+  const refetchInterval = useRefetchInterval(interval);
+  const q = useQuery({ queryKey: ["quotas", connectionId, namespace], queryFn: () => api.getQuotas(connectionId, namespace), refetchInterval });
   return (
     <div className="section">
       <RefreshControls interval={interval} onInterval={setInterval} onRefresh={() => void q.refetch()} busy={q.isFetching} />
@@ -43,7 +43,7 @@ export function QuotasView({ connectionId, namespace }: { connectionId: string; 
                       </thead>
                       <tbody>
                         {quota.entries.map((e) => (
-                          <tr key={e.resource} className={(e.ratio ?? 0) >= NEAR_LIMIT ? "warn" : undefined}>
+                          <tr key={e.resource} className={isNearLimit(e.ratio) ? "warn" : undefined}>
                             <td>
                               <code>{e.resource}</code>
                             </td>

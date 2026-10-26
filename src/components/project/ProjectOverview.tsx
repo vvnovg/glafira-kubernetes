@@ -3,17 +3,18 @@ import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../api/client";
 import type { PodRow } from "../../api/types";
 import { formatAge } from "../../lib/age";
+import { useRefetchInterval } from "../../lib/tabActive";
 import { useWorkspace } from "../../state/workspace";
 import { PartView } from "../common/PartView";
 import { ReadError } from "../common/ReadError";
 import { RefreshControls, useRefreshInterval } from "../common/RefreshControls";
+import { TruncatedNote } from "../common/TruncatedNote";
 import { KindErrors } from "./KindErrors";
+import { QUOTA_NEAR_LIMIT_PERCENT, isNearLimit } from "./quota";
 import { refreshNamespaceAccess, useNamespaceAccess } from "./useNamespaceAccess";
 
 /** Последние события Warning — за этот срок (спец. §6.3). */
 const WARNINGS_FOR_SEC = 3600;
-/** Квота показывается, когда занята на столько. */
-const QUOTA_WARN = 0.8;
 /** Больше стольких строк в каждом списке обзора не показывается. */
 const MAX_ITEMS = 20;
 
@@ -32,7 +33,7 @@ export function ProjectOverview({ connectionId, namespace }: { connectionId: str
   const queryClient = useQueryClient();
   const access = useNamespaceAccess(connectionId, namespace);
   const [interval, setRefreshInterval] = useRefreshInterval();
-  const refetchInterval = interval || false;
+  const refetchInterval = useRefetchInterval(interval);
   const pods = useQuery({ queryKey: ["pods", connectionId, namespace, null], queryFn: () => api.listPods(connectionId, namespace), refetchInterval });
   const workloads = useQuery({ queryKey: ["workloads", connectionId, namespace], queryFn: () => api.listWorkloads(connectionId, namespace), refetchInterval });
   const quotas = useQuery({ queryKey: ["quotas", connectionId, namespace], queryFn: () => api.getQuotas(connectionId, namespace), refetchInterval });
@@ -68,6 +69,8 @@ export function ProjectOverview({ connectionId, namespace }: { connectionId: str
               </div>
             ))}
           </dl>
+          {/* Числа и проблемные поды посчитаны по прочитанному списку: из-за предела в 10 000 объектов они неполные. */}
+          <TruncatedNote truncated={pods.data.truncated} />
           {problemPods.length === 0 ? (
             <p className="muted">{t("project.overview.noProblemPods")}</p>
           ) : (
@@ -90,6 +93,7 @@ export function ProjectOverview({ connectionId, namespace }: { connectionId: str
         <>
           {/* Виды, которые не прочитались, нельзя выдавать за «в норме»: «Все workloads в норме» — только если прочитаны все виды. */}
           <KindErrors errors={workloads.data.errors} />
+          <TruncatedNote truncated={workloads.data.truncated} />
           {problemWorkloads.length === 0 ? (
             workloads.data.errors.length === 0 && <p className="muted">{t("project.overview.noProblemWorkloads")}</p>
           ) : (
@@ -111,9 +115,9 @@ export function ProjectOverview({ connectionId, namespace }: { connectionId: str
       {quotas.data && (
         <PartView part={quotas.data.quotas}>
           {(list) => {
-            const near = list.flatMap((q) => q.entries.filter((e) => (e.ratio ?? 0) >= QUOTA_WARN).map((e) => ({ quota: q.name, ...e })));
+            const near = list.flatMap((q) => q.entries.filter((e) => isNearLimit(e.ratio)).map((e) => ({ quota: q.name, ...e })));
             if (list.length === 0) return <p className="muted">{t("project.overview.noQuotas")}</p>;
-            if (near.length === 0) return <p className="muted">{t("project.overview.quotasOk")}</p>;
+            if (near.length === 0) return <p className="muted">{t("project.overview.quotasOk", { percent: QUOTA_NEAR_LIMIT_PERCENT })}</p>;
             return (
               <ul>
                 {near.map((e) => (
@@ -128,18 +132,22 @@ export function ProjectOverview({ connectionId, namespace }: { connectionId: str
       )}
       <h3>{t("project.overview.warnings")}</h3>
       {events.error && sectionError(events.error)}
-      {events.data &&
-        (warnings.length === 0 ? (
-          <p className="muted">{t("project.overview.noWarnings")}</p>
-        ) : (
-          <ul>
-            {warnings.map((e) => (
-              <li key={e.key}>
-                <span className="muted">{formatAge(e.lastSeen)}</span> <strong>{e.reason}</strong> {e.object.kind}/{e.object.name}: {e.message}
-              </li>
-            ))}
-          </ul>
-        ))}
+      {events.data && (
+        <>
+          <TruncatedNote truncated={events.data.truncated} />
+          {warnings.length === 0 ? (
+            <p className="muted">{t("project.overview.noWarnings")}</p>
+          ) : (
+            <ul>
+              {warnings.map((e) => (
+                <li key={e.key}>
+                  <span className="muted">{formatAge(e.lastSeen)}</span> <strong>{e.reason}</strong> {e.object.kind}/{e.object.name}: {e.message}
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
     </div>
   );
 }

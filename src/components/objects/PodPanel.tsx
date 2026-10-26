@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
 import type { PodDetails, WorkloadKind } from "../../api/types";
 import { formatDateTime } from "../../lib/age";
+import { useRefetchInterval } from "../../lib/tabActive";
 import { useWorkspace } from "../../state/workspace";
 import { Conditions } from "../common/Conditions";
 import { KeyValues } from "../common/KeyValues";
@@ -51,10 +52,11 @@ export function PodPanel({ connectionId, namespace, name }: { connectionId: stri
 function PodOverview({ connectionId, namespace, name }: { connectionId: string; namespace: string; name: string }) {
   const { t } = useTranslation();
   const [interval, setInterval] = useRefreshInterval();
+  const refetchInterval = useRefetchInterval(interval);
   const q = useQuery({
     queryKey: ["pod", connectionId, namespace, name],
     queryFn: () => api.getPod(connectionId, namespace, name),
-    refetchInterval: interval || false,
+    refetchInterval,
   });
   return (
     <div className="section">

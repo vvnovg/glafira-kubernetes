@@ -104,6 +104,14 @@ describe("ConnectionNode", () => {
     expect(screen.queryByText(/показаны проекты из профиля/)).not.toBeInTheDocument();
   });
 
+  it("список проектов обрезан — заметка про первые 10 000, у полного списка её нет", async () => {
+    vi.mocked(api.listProjects).mockResolvedValue({ items: [project("alpha")], truncated: true });
+    const user = renderNode();
+    await user.click(screen.getByRole("button", { name: /Проекты/ }));
+    expect(await screen.findByText("Список неполный: показаны первые 10 000 объектов")).toHaveClass("tree-notice");
+    expect(screen.getByRole("button", { name: "alpha" })).toBeInTheDocument();
+  });
+
   it("список проектов пуст без ошибки — «Проектов нет»", async () => {
     vi.mocked(api.listProjects).mockResolvedValue({ items: [], truncated: false });
     const user = renderNode();

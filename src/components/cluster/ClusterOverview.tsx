@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../api/client";
 import type { ClusterOverview, OpenShiftOverview, OperatorRow, Part } from "../../api/types";
 import { needsSignIn } from "../../lib/signIn";
+import { useRefetchInterval } from "../../lib/tabActive";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Hint } from "../common/Hint";
 import { PartView, Unavailable } from "../common/PartView";
@@ -48,10 +49,11 @@ const flag = (v: boolean | null) => (v === true ? "✅" : v === false ? "⚠" : 
 export function ClusterOverviewView({ connectionId }: { connectionId: string }) {
   const { t } = useTranslation();
   const [interval, setRefreshInterval] = useRefreshInterval();
+  const refetchInterval = useRefetchInterval(interval);
   const q = useQuery({
     queryKey: ["overview", connectionId],
     queryFn: () => api.getClusterOverview(connectionId),
-    refetchInterval: interval || false,
+    refetchInterval,
   });
   const o = q.data;
   return (

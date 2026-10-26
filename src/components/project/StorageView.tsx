@@ -2,8 +2,10 @@ import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
 import { formatAge } from "../../lib/age";
+import { useRefetchInterval } from "../../lib/tabActive";
 import { ReadError } from "../common/ReadError";
 import { RefreshControls, useRefreshInterval } from "../common/RefreshControls";
+import { TruncatedNote } from "../common/TruncatedNote";
 
 /**
  * Выделение фазы PVC: ошибка — только `Lost`. `Pending` у класса с `WaitForFirstConsumer` — норма до запуска пода, поэтому
@@ -15,12 +17,14 @@ const phaseClass = (phase: string | null) => (phase === "Lost" ? "problem" : pha
 export function StorageView({ connectionId, namespace }: { connectionId: string; namespace: string }) {
   const { t } = useTranslation();
   const [interval, setInterval] = useRefreshInterval();
-  const q = useQuery({ queryKey: ["pvcs", connectionId, namespace], queryFn: () => api.listPvcs(connectionId, namespace), refetchInterval: interval || false });
+  const refetchInterval = useRefetchInterval(interval);
+  const q = useQuery({ queryKey: ["pvcs", connectionId, namespace], queryFn: () => api.listPvcs(connectionId, namespace), refetchInterval });
   return (
     <div className="section">
       <RefreshControls interval={interval} onInterval={setInterval} onRefresh={() => void q.refetch()} busy={q.isFetching} />
       {q.isPending && <p className="muted">{t("common.loading")}</p>}
       {q.error && <ReadError error={q.error} connectionId={connectionId} onRetry={() => void q.refetch()} />}
+      <TruncatedNote truncated={q.data?.truncated} />
       {q.data && q.data.items.length === 0 && <p className="muted">—</p>}
       {q.data && q.data.items.length > 0 && (
         <table>

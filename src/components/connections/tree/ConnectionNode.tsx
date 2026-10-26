@@ -6,6 +6,7 @@ import type { ConnectionProfile } from "../../../api/types";
 import { tr } from "../../../i18n/text";
 import { useWorkspace } from "../../../state/workspace";
 import { EnvBadge } from "../../common/EnvBadge";
+import { TruncatedNote } from "../../common/TruncatedNote";
 
 /** С какого числа проектов показывается фильтр. */
 const FILTER_FROM = 8;
@@ -90,6 +91,7 @@ function ProjectsNode({ connectionId }: { connectionId: string }) {
       {all && all.length >= FILTER_FROM && (
         <input className="tree-filter" aria-label={t("sidebar.projectsFilter")} placeholder={t("sidebar.projectsFilter")} value={filter} onChange={(e) => setFilter(e.target.value)} />
       )}
+      <TruncatedNote truncated={q.data?.truncated} className="tree-notice" />
       {all && all.length === 0 && !q.data?.error && <p className="tree-notice">{t("sidebar.noProjects")}</p>}
       {all && all.length > 0 && items.length === 0 && <p className="tree-notice">{t("sidebar.noMatches")}</p>}
       <ul>

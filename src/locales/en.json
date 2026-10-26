@@ -636,7 +636,7 @@
       "noProblemWorkloads": "All workloads are fine.",
       "quotas": "Quotas",
       "noQuotas": "The project has no quotas.",
-      "quotasOk": "Every quota is used by less than 80 %.",
+      "quotasOk": "Every quota is used by less than {{percent}} %.",
       "warnings": "Warning events in the last hour",
       "noWarnings": "No warnings in the last hour."
     },

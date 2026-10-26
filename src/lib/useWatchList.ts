@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, toAppError } from "../api/client";
 import type { AppError, EventRow, KindError, PodRow, WatchParams, WatchRow, WorkloadRow } from "../api/types";
 import { useEpoch } from "../state/connectionEpoch";
+import { useTabActive } from "./tabActive";
 
 /** Ключи строк — те же, что у Rust (`Row::key`). */
 export const podKey = (p: PodRow) => p.name;
@@ -27,9 +28,14 @@ const INITIAL = { rows: [], status: "connecting" as const, error: null, kindErro
  * Список проекта, который обновляется сам (спец. §6.7): сессия watch в Rust, а без прав на watch —
  * опрос раз в 10 с. Сессия перезапускается при смене параметров и после входа заново и
  * останавливается при размонтировании. `params` null — сессии нет. `keyOf` — функция модуля.
+ *
+ * Пока вкладка скрыта (`useTabActive`), сессии нет: она останавливается, а когда вкладка снова показана, начинается
+ * новая и присылает свежий `Reset`. Строки скрытой вкладки не сбрасываются: на экране остаются прежние (со статусом
+ * «загрузка»), пока не придёт `Reset`, так что при возврате нет пустого кадра.
  */
 export function useWatchList<T extends WatchRow>(params: WatchParams | null, keyOf: (row: T) => string): WatchState<T> {
   const epoch = useEpoch(params?.connectionId ?? "");
+  const tabActive = useTabActive();
   const paramsKey = params ? JSON.stringify(params) : null;
   const sessionKey = paramsKey === null ? null : `${epoch}:${paramsKey}`;
   // Состояние помечено ключом сессии, которой оно принадлежит. Другой проект или вид, вход заново, `params` null:
@@ -39,7 +45,7 @@ export function useWatchList<T extends WatchRow>(params: WatchParams | null, key
   if (store.key !== sessionKey) setStore({ key: sessionKey, state: INITIAL });
 
   useEffect(() => {
-    if (!paramsKey) return;
+    if (!paramsKey || !tabActive) return;
     const p = JSON.parse(paramsKey) as WatchParams;
     let active = true;
     let sessionId: string | null = null;
@@ -49,6 +55,9 @@ export function useWatchList<T extends WatchRow>(params: WatchParams | null, key
     // только если состояние всё ещё принадлежит этой сессии.
     const update = (fn: (s: WatchState<T>) => WatchState<T>) =>
       setStore((s) => (s.key === sessionKey ? { key: s.key, state: fn(s.state) } : s));
+    // Вкладка снова показана: прежние строки видны, но это уже не «живой» список, пока новая сессия не пришлёт `Reset`.
+    // Для первой сессии состояние и так начальное — ничего не меняется.
+    update((s) => (s.status === "connecting" ? s : { ...s, status: "connecting", error: null }));
     api
       .startWatch(p, (e) => {
         if (!active) return;
@@ -91,8 +100,8 @@ export function useWatchList<T extends WatchRow>(params: WatchParams | null, key
       active = false;
       if (sessionId) api.stopSession(sessionId).catch(() => undefined);
     };
-    // keyOf — функция модуля; сессия зависит только от параметров и входа.
-  }, [paramsKey, epoch]);
+    // keyOf — функция модуля; сессия зависит только от параметров, входа и того, показана ли вкладка.
+  }, [paramsKey, epoch, tabActive]);
 
   // В отбрасываемом проходе рендера (сброс выше) тоже отдаётся начальное состояние.
   return store.key === sessionKey ? store.state : INITIAL;

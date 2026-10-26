@@ -5,6 +5,7 @@ import type { ConditionView, GatewayRouteRow, Part } from "../../api/types";
 import { tr } from "../../i18n/text";
 import { formatDateTime } from "../../lib/age";
 import { useNow } from "../../lib/useNow";
+import { useRefetchInterval } from "../../lib/tabActive";
 import { PartView } from "../common/PartView";
 import { ReadError } from "../common/ReadError";
 import { RefreshControls, useRefreshInterval } from "../common/RefreshControls";
@@ -93,7 +94,8 @@ function GatewayRoutes({ title, part }: { title: string; part: Part<GatewayRoute
 export function NetworkView({ connectionId, namespace }: { connectionId: string; namespace: string }) {
   const { t } = useTranslation();
   const [interval, setInterval] = useRefreshInterval();
-  const q = useQuery({ queryKey: ["network", connectionId, namespace], queryFn: () => api.getNetwork(connectionId, namespace), refetchInterval: interval || false });
+  const refetchInterval = useRefetchInterval(interval);
+  const q = useQuery({ queryKey: ["network", connectionId, namespace], queryFn: () => api.getNetwork(connectionId, namespace), refetchInterval });
   const n = q.data;
   // Срок сертификата считается от часов, которые идут, пока вкладка открыта: выделение не должно застыть на моменте перерисовки.
   const now = useNow(60_000) / 1000;

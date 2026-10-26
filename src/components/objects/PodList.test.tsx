@@ -1,6 +1,8 @@
-import { act, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { TabActiveContext } from "../../lib/tabActive";
 import { renderWithClient } from "../../test/render";
 
 vi.mock("@tanstack/react-virtual", () => ({
@@ -67,6 +69,79 @@ describe("PodList", () => {
     expect(await screen.findByText("report-1-x")).toBeInTheDocument();
     expect(api.listPods).toHaveBeenCalledWith("c1", "team-a", { kind: "CronJob", name: "report" });
     expect(api.startWatch).not.toHaveBeenCalled();
+  });
+});
+
+const TRUNCATED = "Список неполный: показаны первые 10 000 объектов";
+
+describe("PodList: список обрезан", () => {
+  it("watch: заметка про первые 10 000 стоит, пока сессия держит предел", async () => {
+    renderWithClient(<PodList connectionId="c1" namespace="team-a" />);
+    await waitFor(() => expect(api.startWatch).toHaveBeenCalledTimes(1));
+    act(() => emit({ type: "reset", items: [podRow("web-a")], errors: [], truncated: false }));
+    expect(screen.queryByText(TRUNCATED)).not.toBeInTheDocument();
+    act(() => emit({ type: "reset", items: [podRow("web-a")], errors: [], truncated: true }));
+    expect(screen.getByText(TRUNCATED)).toBeInTheDocument();
+    act(() => emit({ type: "reset", items: [podRow("web-a")], errors: [], truncated: false }));
+    expect(screen.queryByText(TRUNCATED)).not.toBeInTheDocument();
+  });
+
+  it("поды CronJob (список): заметка, когда прочитано не всё", async () => {
+    vi.mocked(api.listPods).mockResolvedValue({ items: [podRow("report-1-x")], truncated: true });
+    renderWithClient(<PodList connectionId="c1" namespace="team-a" workload={{ kind: "CronJob", name: "report" }} />);
+    expect(await screen.findByText("report-1-x")).toBeInTheDocument();
+    expect(screen.getByText(TRUNCATED)).toBeInTheDocument();
+  });
+});
+
+describe("PodList: вкладка скрыта", () => {
+  afterEach(() => vi.useRealTimers());
+
+  const inTab = (client: QueryClient, active: boolean, workload?: { kind: "CronJob" | "Deployment"; name: string }) => (
+    <QueryClientProvider client={client}>
+      <TabActiveContext.Provider value={active}>
+        <PodList connectionId="c1" namespace="team-a" workload={workload} />
+      </TabActiveContext.Provider>
+    </QueryClientProvider>
+  );
+
+  it("watch не начинается в скрытой вкладке и останавливается, когда вкладку скрыли", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const view = render(inTab(client, false));
+    await act(async () => undefined);
+    expect(api.startWatch).not.toHaveBeenCalled();
+    view.rerender(inTab(client, true));
+    await waitFor(() => expect(api.startWatch).toHaveBeenCalledTimes(1));
+    act(() => emit({ type: "reset", items: [podRow("web-a")], errors: [], truncated: false }));
+    view.rerender(inTab(client, false));
+    expect(api.stopSession).toHaveBeenCalledWith("s1");
+    // Строки на месте: при возврате нет пустого списка.
+    expect(screen.getByText("web-a")).toBeInTheDocument();
+  });
+
+  it("поды CronJob опрашиваются раз в 10 с, только пока вкладка показана", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    vi.mocked(api.listPods).mockResolvedValue({ items: [podRow("report-1-x")], truncated: false });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const cron = { kind: "CronJob" as const, name: "report" };
+    const tick = () =>
+      act(async () => {
+        vi.advanceTimersByTime(10_000);
+      });
+    const view = render(inTab(client, true, cron));
+    await act(async () => undefined);
+    expect(api.listPods).toHaveBeenCalledTimes(1);
+    await tick();
+    expect(api.listPods).toHaveBeenCalledTimes(2);
+
+    view.rerender(inTab(client, false, cron));
+    await tick();
+    await tick();
+    expect(api.listPods).toHaveBeenCalledTimes(2);
+
+    view.rerender(inTab(client, true, cron));
+    await tick();
+    expect(api.listPods).toHaveBeenCalledTimes(3);
   });
 });
 

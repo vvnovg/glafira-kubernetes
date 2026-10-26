@@ -61,5 +61,14 @@ describe("PodPanel", () => {
     renderWithClient(<PodPanel connectionId="c1" namespace="team-a" name="web-7d9f-a" />);
     await user.click(screen.getByRole("tab", { name: "События" }));
     await waitFor(() => expect(api.listEvents).toHaveBeenCalledWith("c1", "team-a", { kind: "Pod", name: "web-7d9f-a" }));
+    expect(screen.queryByText("Список неполный: показаны первые 10 000 объектов")).not.toBeInTheDocument();
+  });
+
+  it("события пода: прочитано не всё — заметка про первые 10 000", async () => {
+    vi.mocked(api.listEvents).mockResolvedValue({ items: [], truncated: true });
+    const user = userEvent.setup();
+    renderWithClient(<PodPanel connectionId="c1" namespace="team-a" name="web-7d9f-a" />);
+    await user.click(screen.getByRole("tab", { name: "События" }));
+    expect(await screen.findByText("Список неполный: показаны первые 10 000 объектов")).toBeInTheDocument();
   });
 });

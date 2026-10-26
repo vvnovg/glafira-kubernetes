@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
 import { formatAge } from "../../lib/age";
+import { useRefetchInterval } from "../../lib/tabActive";
 import { PartView } from "../common/PartView";
 import { ReadError } from "../common/ReadError";
 import { RefreshControls, useRefreshInterval } from "../common/RefreshControls";
@@ -39,7 +40,8 @@ export function ConfigView({ connectionId, namespace }: { connectionId: string; 
   const { t } = useTranslation();
   const [interval, setInterval] = useRefreshInterval();
   const [shown, setShown] = useState<string | null>(null);
-  const q = useQuery({ queryKey: ["config", connectionId, namespace], queryFn: () => api.getConfig(connectionId, namespace), refetchInterval: interval || false });
+  const refetchInterval = useRefetchInterval(interval);
+  const q = useQuery({ queryKey: ["config", connectionId, namespace], queryFn: () => api.getConfig(connectionId, namespace), refetchInterval });
   return (
     <div className="section">
       <RefreshControls interval={interval} onInterval={setInterval} onRefresh={() => void q.refetch()} busy={q.isFetching} />

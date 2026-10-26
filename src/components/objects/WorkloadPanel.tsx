@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
 import type { WorkloadDetails, WorkloadKind } from "../../api/types";
 import { formatAge, formatDateTime } from "../../lib/age";
+import { useRefetchInterval } from "../../lib/tabActive";
 import { Conditions } from "../common/Conditions";
 import { KeyValues } from "../common/KeyValues";
 import { PartView } from "../common/PartView";
@@ -47,10 +48,11 @@ export function WorkloadPanel({ connectionId, namespace, kind, name }: { connect
 function WorkloadOverview({ connectionId, namespace, kind, name }: { connectionId: string; namespace: string; kind: WorkloadKind; name: string }) {
   const { t } = useTranslation();
   const [interval, setInterval] = useRefreshInterval();
+  const refetchInterval = useRefetchInterval(interval);
   const q = useQuery({
     queryKey: ["workload", connectionId, namespace, kind, name],
     queryFn: () => api.getWorkload(connectionId, namespace, kind, name),
-    refetchInterval: interval || false,
+    refetchInterval,
   });
   return (
     <div className="section">

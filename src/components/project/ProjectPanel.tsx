@@ -4,6 +4,7 @@ import type { WorkloadRow } from "../../api/types";
 import { useWatchList, workloadKey } from "../../lib/useWatchList";
 import { ReadError } from "../common/ReadError";
 import { SubTabs } from "../common/SubTabs";
+import { TruncatedNote } from "../common/TruncatedNote";
 import { ProjectEvents } from "../objects/EventList";
 import { KindErrors } from "./KindErrors";
 import { useNamespaceAccess } from "./useNamespaceAccess";
@@ -75,6 +76,7 @@ function ProjectWorkloads({ connectionId, namespace }: { connectionId: string; n
       <WatchStatusLine state={watch} />
       {watch.status === "error" && watch.error && <ReadError error={watch.error} connectionId={connectionId} />}
       <KindErrors errors={watch.kindErrors} />
+      <TruncatedNote truncated={watch.truncated} />
       <WorkloadsTable connectionId={connectionId} namespace={namespace} rows={watch.rows} />
     </div>
   );

@@ -239,6 +239,17 @@ describe("подвкладки проекта", () => {
     expect(screen.getByText("неизвестно")).toBeInTheDocument();
     await waitFor(() => expect(screen.getByText("3600m").closest("tr")).toHaveClass("warn"));
     expect(screen.getByText("500m")).toBeInTheDocument();
+    expect(screen.queryByText("Список неполный: показаны первые 10 000 объектов")).not.toBeInTheDocument();
+  });
+
+  it("хранилище: прочитано не всё — заметка про первые 10 000", async () => {
+    vi.mocked(api.listPvcs).mockResolvedValue({
+      items: [{ name: "data", phase: "Bound", class: "standard", capacity: "10Gi", requested: "10Gi", accessModes: ["ReadWriteOnce"], volumeMode: "Filesystem", volume: "pvc-1", mountedBy: ["db-0"], created: 1 }],
+      truncated: true,
+    });
+    renderWithClient(<StorageView connectionId="c1" namespace="team-a" />);
+    expect(await screen.findByText("db-0")).toBeInTheDocument();
+    expect(screen.getByText("Список неполный: показаны первые 10 000 объектов")).toBeInTheDocument();
   });
 });
 

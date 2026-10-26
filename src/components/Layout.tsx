@@ -8,6 +8,7 @@ import { EnvBadge } from "./common/EnvBadge";
 import { Sidebar } from "./Sidebar";
 import { i18n } from "../i18n";
 import { TabContent } from "./TabContent";
+import { TabActiveContext } from "../lib/tabActive";
 import { useHelpShortcut } from "../lib/useHelpShortcut";
 
 function tabTitle(tab: Tab, byId: Map<string, ConnectionProfile>): string {
@@ -78,9 +79,12 @@ export function Layout() {
         </nav>
         {tabs.length === 0 && <p className="empty">{t("layout.empty")}</p>}
         {/* Неактивные вкладки скрыты, но не размонтированы — подключения и состояние форм сохраняются. */}
+        {/* Экраны узнают о скрытии из контекста и перестают опрашивать кластер: watch, автообновление, права. */}
         {tabs.map((tab) => (
           <section key={tab.id} className="tab-content" hidden={tab.id !== activeId}>
-            <TabContent tab={tab} />
+            <TabActiveContext.Provider value={tab.id === activeId}>
+              <TabContent tab={tab} />
+            </TabActiveContext.Provider>
           </section>
         ))}
       </main>

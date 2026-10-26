@@ -1,5 +1,5 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { StrictMode, useLayoutEffect } from "react";
+import { type ReactNode, StrictMode, useLayoutEffect, useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../api/client", async (importOriginal) => {
@@ -10,6 +10,7 @@ vi.mock("../api/client", async (importOriginal) => {
 import { api } from "../api/client";
 import type { PodRow, WatchEvent, WatchParams } from "../api/types";
 import { useConnectionEpoch } from "../state/connectionEpoch";
+import { TabActiveContext } from "./tabActive";
 import { podKey, useWatchList } from "./useWatchList";
 
 const pod = (name: string, status = "Running"): PodRow => ({
@@ -286,6 +287,90 @@ describe("useWatchList", () => {
       // Возврат к тем же параметрам начинает с чистого состояния, а не со строк до `null`.
       rerender({ params: PARAMS });
       expect(result.current.rows).toEqual([]);
+      await waitFor(() => expect(api.startWatch).toHaveBeenCalledTimes(2));
+    });
+  });
+
+  describe("скрытая вкладка", () => {
+    /** Оболочка-«вкладка»: `setActive` показывает и скрывает её, как это делает `Layout`. */
+    function tab(initial = true) {
+      let set: (active: boolean) => void = () => undefined;
+      const wrapper = ({ children }: { children: ReactNode }) => {
+        const [active, setActive] = useState(initial);
+        set = setActive;
+        return <TabActiveContext.Provider value={active}>{children}</TabActiveContext.Provider>;
+      };
+      return { wrapper, setActive: (active: boolean) => act(() => set(active)) };
+    }
+
+    it("сессия останавливается, когда вкладку скрыли, и начинается заново с новым сбросом, когда её показали", async () => {
+      const { wrapper, setActive } = tab();
+      const { result } = renderHook(() => useWatchList(PARAMS, podKey), { wrapper });
+      await waitFor(() => expect(api.startWatch).toHaveBeenCalledTimes(1));
+      act(() => emits[0]({ type: "reset", items: [pod("a"), pod("b")], errors: [], truncated: true }));
+      expect(result.current.status).toBe("live");
+
+      await setActive(false);
+      expect(api.stopSession).toHaveBeenCalledTimes(1);
+      expect(api.stopSession).toHaveBeenCalledWith("s1");
+      // События остановленной сессии, пришедшие позже, ничего не меняют.
+      const hidden = result.current;
+      act(() => emits[0]({ type: "changes", changes: [{ op: "upsert", row: pod("late") }] }));
+      expect(result.current).toBe(hidden);
+      expect(api.startWatch).toHaveBeenCalledTimes(1);
+
+      await setActive(true);
+      await waitFor(() => expect(api.startWatch).toHaveBeenCalledTimes(2));
+      expect(api.startWatch).toHaveBeenLastCalledWith(PARAMS, expect.any(Function));
+      // Пустого кадра нет: прежние строки на месте, но список уже не «живой», пока не пришёл новый `Reset`.
+      expect(result.current.rows.map((r) => r.name)).toEqual(["a", "b"]);
+      expect(result.current.status).toBe("connecting");
+      expect(result.current.truncated).toBe(true);
+      act(() => emits[1]({ type: "reset", items: [pod("c")], errors: [], truncated: false }));
+      expect(result.current.rows.map((r) => r.name)).toEqual(["c"]);
+      expect(result.current.status).toBe("live");
+      expect(result.current.truncated).toBe(false);
+
+      await setActive(false);
+      expect(api.stopSession).toHaveBeenLastCalledWith("s2");
+    });
+
+    it("вкладка скрыта с самого начала: сессии нет, пока её не покажут", async () => {
+      const { wrapper, setActive } = tab(false);
+      const { result } = renderHook(() => useWatchList(PARAMS, podKey), { wrapper });
+      await act(async () => undefined);
+      expect(api.startWatch).not.toHaveBeenCalled();
+      expect(result.current.status).toBe("connecting");
+      await setActive(true);
+      await waitFor(() => expect(api.startWatch).toHaveBeenCalledTimes(1));
+      act(() => emit({ type: "reset", items: [pod("a")], errors: [], truncated: false }));
+      expect(result.current.rows.map((r) => r.name)).toEqual(["a"]);
+    });
+
+    it("id сессии пришёл, когда вкладку уже скрыли: сессия останавливается", async () => {
+      const late = deferred<string>();
+      vi.mocked(api.startWatch).mockImplementationOnce(() => late.promise);
+      const { wrapper, setActive } = tab();
+      renderHook(() => useWatchList(PARAMS, podKey), { wrapper });
+      await waitFor(() => expect(api.startWatch).toHaveBeenCalledTimes(1));
+      await setActive(false);
+      expect(api.stopSession).not.toHaveBeenCalled();
+      await act(async () => late.resolve("late"));
+      expect(api.stopSession).toHaveBeenCalledWith("late");
+    });
+
+    it("вход заново в скрытой вкладке сбрасывает строки: прежняя сессия кончилась", async () => {
+      const { wrapper, setActive } = tab();
+      const { result } = renderHook(() => useWatchList(PARAMS, podKey), { wrapper });
+      await waitFor(() => expect(api.startWatch).toHaveBeenCalledTimes(1));
+      act(() => emits[0]({ type: "reset", items: [pod("a")], errors: [], truncated: false }));
+      await setActive(false);
+      await act(async () => {
+        useConnectionEpoch.getState().bump("c1");
+      });
+      expect(result.current.rows).toEqual([]);
+      expect(api.startWatch).toHaveBeenCalledTimes(1);
+      await setActive(true);
       await waitFor(() => expect(api.startWatch).toHaveBeenCalledTimes(2));
     });
   });

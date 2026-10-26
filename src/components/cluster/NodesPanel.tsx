@@ -4,10 +4,12 @@ import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
 import type { NodeRow } from "../../api/types";
 import { formatAge } from "../../lib/age";
+import { useRefetchInterval } from "../../lib/tabActive";
 import { Conditions } from "../common/Conditions";
 import { KeyValues } from "../common/KeyValues";
 import { ReadError } from "../common/ReadError";
 import { RefreshControls, useRefreshInterval } from "../common/RefreshControls";
+import { TruncatedNote } from "../common/TruncatedNote";
 import { type Column, VirtualTable } from "../common/VirtualTable";
 
 /** Вкладка «Ноды» (спец. §6.1): список с готовностью и ролями, сведения о выбранной ноде. */
@@ -15,7 +17,8 @@ export function NodesPanel({ connectionId }: { connectionId: string }) {
   const { t } = useTranslation();
   const [interval, setRefreshInterval] = useRefreshInterval();
   const [selected, setSelected] = useState<string | null>(null);
-  const q = useQuery({ queryKey: ["nodes", connectionId], queryFn: () => api.listNodes(connectionId), refetchInterval: interval || false });
+  const refetchInterval = useRefetchInterval(interval);
+  const q = useQuery({ queryKey: ["nodes", connectionId], queryFn: () => api.listNodes(connectionId), refetchInterval });
   const columns: Column<NodeRow>[] = [
     { key: "name", title: t("cluster.nodes.name"), width: "minmax(180px, 2fr)", render: (n) => n.name },
     {
@@ -44,7 +47,7 @@ export function NodesPanel({ connectionId }: { connectionId: string }) {
       </div>
       {q.isPending && <p className="muted">{t("common.loading")}</p>}
       {q.error && <ReadError error={q.error} connectionId={connectionId} onRetry={() => void q.refetch()} />}
-      {q.data?.truncated && <p className="warn">{t("common.truncated")}</p>}
+      <TruncatedNote truncated={q.data?.truncated} />
       {q.data && (
         <div className="split">
           <VirtualTable label={t("cluster.nodes.title")} rows={q.data.items} columns={columns} rowKey={(n) => n.name} onRowClick={(n) => setSelected(n.name)} selectedKey={selected} />
@@ -58,7 +61,8 @@ export function NodesPanel({ connectionId }: { connectionId: string }) {
 /** Сведения о ноде обновляются с тем же автообновлением, что и список. */
 function NodeDetailsPane({ connectionId, name, interval }: { connectionId: string; name: string; interval: number }) {
   const { t } = useTranslation();
-  const q = useQuery({ queryKey: ["node", connectionId, name], queryFn: () => api.getNode(connectionId, name), refetchInterval: interval || false });
+  const refetchInterval = useRefetchInterval(interval);
+  const q = useQuery({ queryKey: ["node", connectionId, name], queryFn: () => api.getNode(connectionId, name), refetchInterval });
   const d = q.data;
   return (
     <div className="details-pane section" aria-label={name}>

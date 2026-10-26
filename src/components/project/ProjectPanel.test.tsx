@@ -1,6 +1,8 @@
-import { act, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { TabActiveContext } from "../../lib/tabActive";
 import { renderWithClient } from "../../test/render";
 
 vi.mock("@tanstack/react-virtual", () => ({
@@ -287,5 +289,118 @@ describe("таблица workloads: вид DeploymentConfig", () => {
     expect(kinds(select)).not.toContain("DeploymentConfig");
     act(() => emit({ type: "reset", items: [workloadRow("legacy", { kind: "DeploymentConfig" })], errors: [], truncated: false }));
     expect(kinds(screen.getByLabelText("Вид"))).toContain("DeploymentConfig");
+  });
+});
+
+describe("списки обрезаны на 10 000: заметка на экранах", () => {
+  const TRUNCATED = "Список неполный: показаны первые 10 000 объектов";
+
+  it("обзор: числа, проблемные поды и workloads, Warning — у каждого раздела своя заметка", async () => {
+    vi.mocked(api.listPods).mockResolvedValue({ items: [podRow("web-a")], truncated: true });
+    vi.mocked(api.listWorkloads).mockResolvedValue({ items: [workloadRow("api")], errors: [], truncated: true });
+    vi.mocked(api.listEvents).mockResolvedValue({ items: [], truncated: true });
+    renderWithClient(<ProjectPanel connectionId="c1" namespace="team-a" />);
+    await waitFor(() => expect(screen.getAllByText(TRUNCATED)).toHaveLength(3));
+    // Заметка рядом с числами по фазам, а не вместо них.
+    expect(screen.getByText("Running").closest("div")).toHaveTextContent("1");
+  });
+
+  it("обзор: списки прочитаны целиком — заметок нет", async () => {
+    renderWithClient(<ProjectPanel connectionId="c1" namespace="team-a" />);
+    expect(await screen.findByRole("button", { name: "web-b" })).toBeInTheDocument();
+    await screen.findByText(/image not found/);
+    expect(screen.queryByText(TRUNCATED)).not.toBeInTheDocument();
+  });
+
+  it("обзор: обрезан только список событий — заметка одна, у Warning", async () => {
+    vi.mocked(api.listEvents).mockResolvedValue({ items: [], truncated: true });
+    renderWithClient(<ProjectPanel connectionId="c1" namespace="team-a" />);
+    await screen.findByRole("button", { name: "web-b" });
+    const note = await screen.findByText(TRUNCATED);
+    expect(screen.getAllByText(TRUNCATED)).toHaveLength(1);
+    expect(note.previousElementSibling).toHaveTextContent("События Warning за последний час");
+  });
+
+  it("workloads (watch): заметка по признаку сброса", async () => {
+    const user = userEvent.setup();
+    renderWithClient(<ProjectPanel connectionId="c1" namespace="team-a" />);
+    await user.click(await screen.findByRole("tab", { name: "Workloads" }));
+    await waitFor(() => expect(api.startWatch).toHaveBeenCalled());
+    act(() => emit({ type: "reset", items: [workloadRow("web")], errors: [], truncated: true }));
+    expect(screen.getByText(TRUNCATED)).toBeInTheDocument();
+    act(() => emit({ type: "reset", items: [workloadRow("web")], errors: [], truncated: false }));
+    expect(screen.queryByText(TRUNCATED)).not.toBeInTheDocument();
+  });
+
+  it("события (watch): заметка по признаку сброса", async () => {
+    const user = userEvent.setup();
+    renderWithClient(<ProjectPanel connectionId="c1" namespace="team-a" />);
+    await user.click(await screen.findByRole("tab", { name: "События" }));
+    await waitFor(() => expect(api.startWatch).toHaveBeenCalledWith({ connectionId: "c1", namespace: "team-a", kind: "events" }, expect.any(Function)));
+    act(() => emit({ type: "reset", items: [], errors: [], truncated: true }));
+    expect(screen.getByText(TRUNCATED)).toBeInTheDocument();
+  });
+});
+
+describe("квоты: один порог 90 % (спец. §8.2, quota.nearLimit)", () => {
+  const quotas = (...ratios: number[]) => ({
+    quotas: {
+      data: [{ name: "compute", scopes: [], entries: ratios.map((ratio, i) => ({ resource: `res-${i}`, used: `${i}`, hard: "100", ratio })) }],
+    },
+    limitRanges: { data: [] },
+  });
+
+  it("обзор показывает ресурс от 90 % и не показывает 89 %", async () => {
+    vi.mocked(api.getQuotas).mockResolvedValue(quotas(0.89, 0.9, 0.95));
+    renderWithClient(<ProjectPanel connectionId="c1" namespace="team-a" />);
+    expect(await screen.findByText("res-1")).toBeInTheDocument();
+    expect(screen.getByText("res-2")).toBeInTheDocument();
+    expect(screen.queryByText("res-0")).not.toBeInTheDocument();
+    expect(screen.queryByText(/занята меньше чем на/)).not.toBeInTheDocument();
+  });
+
+  it("все ресурсы ниже порога — «меньше чем на 90 %»", async () => {
+    vi.mocked(api.getQuotas).mockResolvedValue(quotas(0.85, 0.5));
+    renderWithClient(<ProjectPanel connectionId="c1" namespace="team-a" />);
+    expect(await screen.findByText("Каждая квота занята меньше чем на 90 %.")).toBeInTheDocument();
+  });
+
+  it("вкладка «Квоты» выделяет те же строки, что и обзор", async () => {
+    vi.mocked(api.getQuotas).mockResolvedValue(quotas(0.85, 0.9));
+    const user = userEvent.setup();
+    renderWithClient(<ProjectPanel connectionId="c1" namespace="team-a" />);
+    await user.click(await screen.findByRole("tab", { name: "Квоты" }));
+    const row = async (name: string) => (await screen.findByText(name)).closest("tr");
+    expect(await row("res-1")).toHaveClass("warn");
+    expect(await row("res-0")).not.toHaveClass("warn");
+  });
+});
+
+describe("скрытая вкладка проекта", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("права не перечитываются по таймеру, пока вкладка скрыта; вернулась — таймер идёт снова", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const inTab = (active: boolean) => (
+      <QueryClientProvider client={client}>
+        <TabActiveContext.Provider value={active}>
+          <ProjectPanel connectionId="c1" namespace="team-a" />
+        </TabActiveContext.Provider>
+      </QueryClientProvider>
+    );
+    const advance = (ms: number) =>
+      act(async () => {
+        vi.advanceTimersByTime(ms);
+      });
+    const view = render(inTab(false));
+    await act(async () => undefined);
+    expect(api.getNamespaceAccess).toHaveBeenCalledTimes(1);
+    await advance(30 * 60_000);
+    expect(api.getNamespaceAccess).toHaveBeenCalledTimes(1);
+
+    view.rerender(inTab(true));
+    await advance(5 * 60_000);
+    expect(api.getNamespaceAccess).toHaveBeenCalledTimes(2);
   });
 });

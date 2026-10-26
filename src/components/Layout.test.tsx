@@ -26,7 +26,11 @@ vi.mock("../api/client", async (importOriginal) => {
   return { ...actual, api: { ...actual.api, listConnections: vi.fn().mockResolvedValue([conn]), listFolders: vi.fn().mockResolvedValue([]) } };
 });
 
-vi.mock("./TabContent", () => ({ TabContent: () => <div /> }));
+// Вместо экрана — метка, показана ли его вкладка (контекст `Layout` для опросов и watch).
+vi.mock("./TabContent", async () => {
+  const { useTabActive } = await import("../lib/tabActive");
+  return { TabContent: ({ tab }: { tab: { id: string } }) => <div data-testid={tab.id} data-tab-active={String(useTabActive())} /> };
+});
 
 describe("Layout tabs", () => {
   afterEach(() => useHelpContext.setState({ byTab: {} }));
@@ -58,6 +62,15 @@ describe("Layout tabs", () => {
     fireEvent.click(tabs[1]);
     expect(tabs[1].getAttribute("aria-selected")).toBe("true");
     expect(tabs[0].getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("tells each screen whether its tab is shown: hidden tabs stay mounted but must stop polling", () => {
+    renderWithClient(<Layout />);
+    const shown = (id: string) => screen.getByTestId(id).getAttribute("data-tab-active");
+    expect([shown("cluster:c1"), shown("connection-form:c1")]).toEqual(["true", "false"]);
+    expect(screen.getByTestId("connection-form:c1").closest("section")).toHaveAttribute("hidden");
+    fireEvent.click(within(screen.getByRole("tablist")).getAllByRole("tab")[1]);
+    expect([shown("cluster:c1"), shown("connection-form:c1")]).toEqual(["false", "true"]);
   });
 
   it("F1 opens the guide chapter of the active screen", () => {
