@@ -50,9 +50,10 @@ pub struct AppBackend {
 }
 
 /// Код ошибки — как в приложении (`FORBIDDEN`, `NOT_FOUND`, `SESSION_EXPIRED`…), текст —
-/// английский. Подробности (`details`) LLM не получает.
+/// английский. Подробности (`details`) LLM не получает, а тексты с данными профиля — адресом,
+/// командой плагина, именем пользователя — заменены фиксированной фразой (`map::llm_message`).
 fn to_backend(e: AppError) -> BackendError {
-    BackendError::new(code(&e), e.message)
+    BackendError::new(code(&e), map::llm_message(&e))
 }
 
 /// Текст для LLM при сбое файла `health/<id>.json`: путь к файлу не раскрывается.
@@ -1082,5 +1083,125 @@ mod tests {
         assert!(!b.message.contains("/secret"), "{b:?}");
         let e = crate::k8s::errors::not_allowed("get", "pods", Some("team-a"));
         assert_eq!(health_to_backend(e).code, "FORBIDDEN");
+    }
+
+    const HOST: &str = "marker-host.example";
+    const CMD: &str = "/opt/marker-cmd";
+    const USER: &str = "marker-user";
+
+    /// Ошибки подключения, у которых в тексте может оказаться адрес, команда плагина или имя
+    /// пользователя профиля.
+    fn profile_errors() -> Vec<AppError> {
+        let mut errors = vec![
+            app_err!(
+                ErrorCode::AuthFailed,
+                "errors.exec.start",
+                "Cannot start the exec plugin {{command}}: {{error}}",
+                command = CMD,
+                error = format!("{USER} at {HOST}")
+            ),
+            app_err!(
+                ErrorCode::Timeout,
+                "errors.exec.timeout",
+                "The exec plugin {{command}} did not finish in {{seconds}} s",
+                command = CMD,
+                seconds = 30
+            ),
+            app_err!(
+                ErrorCode::AuthFailed,
+                "errors.exec.failed",
+                "The exec plugin {{command}} failed (exit code {{code}})",
+                command = CMD,
+                code = 1
+            ),
+            app_err!(
+                ErrorCode::AuthFailed,
+                "errors.exec.badOutput",
+                "The exec plugin {{command}} returned no credentials",
+                command = CMD
+            ),
+            app_err!(
+                ErrorCode::AuthFailed,
+                "errors.exec.commandNotAbsolute",
+                "Specify the full path to “{{command}}” — use “Find”",
+                command = CMD
+            ),
+            app_err!(
+                ErrorCode::AuthFailed,
+                "errors.exec.argsNotAllowed",
+                "The exec plugin “{{command}}” may run only as “{{expected}} …”",
+                command = CMD,
+                expected = format!("{CMD} --user={USER}")
+            ),
+            app_err!(
+                ErrorCode::InvalidInput,
+                "errors.connections.badApiUrl",
+                "Invalid API server address “{{url}}”",
+                url = format!("https://{HOST}:6443")
+            ),
+            app_err!(
+                ErrorCode::InvalidInput,
+                "errors.connections.badProxyUrl",
+                "Invalid proxy address “{{url}}”: use http://host:port",
+                url = format!("socks5://{HOST}:1080")
+            ),
+            app_err!(
+                ErrorCode::AuthFailed,
+                "errors.k8s.credentials",
+                "The credentials of this connection cannot be used: {{message}}",
+                message = format!("auth error for {USER}@{HOST}")
+            ),
+        ];
+        // Запасные тексты сети и 403 строит сам код приложения, как и при настоящем сбое.
+        errors.push(crate::k8s::errors::from_transport_text(&format!(
+            "error sending request for {HOST}: odd failure"
+        )));
+        errors.push(crate::k8s::errors::forbidden(&format!(
+            "User \"{USER}\" may not do this at {HOST}"
+        )));
+        errors
+    }
+
+    #[test]
+    fn connection_errors_hide_the_profile() {
+        let errors = profile_errors();
+        assert_eq!(errors.len(), 11);
+        for e in errors {
+            let expected_code = code(&e);
+            let shown = [error_text(&e), {
+                let b = to_backend(e.clone());
+                assert_eq!(b.code, expected_code, "{}", e.key);
+                format!("{}: {}", b.code, b.message)
+            }];
+            for text in shown {
+                for marker in [HOST, CMD, USER] {
+                    assert!(!text.contains(marker), "{}: {text}", e.key);
+                }
+                assert!(
+                    text.starts_with(&format!("{expected_code}: ")),
+                    "{}: {text}",
+                    e.key
+                );
+                assert!(text.len() > expected_code.len() + 2, "{}: {text}", e.key);
+            }
+        }
+    }
+
+    #[test]
+    fn errors_with_names_the_model_asked_for_keep_their_text() {
+        let e = crate::k8s::errors::not_allowed("get", "pods", Some("team-a"));
+        assert_eq!(to_backend(e.clone()).message, e.message);
+        assert!(error_text(&e).contains("team-a"));
+        let e = crate::k8s::errors::from_status(
+            &kube::core::Status::failure("pods \"web-1\" not found", "NotFound").with_code(404),
+        );
+        assert_eq!(to_backend(e.clone()).message, e.message);
+        assert!(error_text(&e).contains("web-1"));
+        let e = crate::k8s::read::check_namespace("Bad_NS").unwrap_err();
+        assert!(to_backend(e).message.contains("Bad_NS"));
+        let e = crate::health::store::connection_not_found("c-9");
+        assert!(error_text(&e).contains("c-9"));
+        let e = crate::k8s::errors::from_transport_text("tls handshake eof");
+        assert_eq!(to_backend(e.clone()).message, e.message);
     }
 }

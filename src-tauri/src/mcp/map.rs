@@ -27,7 +27,43 @@ use crate::platform::{PlatformInfo, PlatformKind};
 
 /// Ошибка для LLM: код и английский текст (`FORBIDDEN: …`).
 pub fn error_text(e: &AppError) -> String {
-    format!("{}: {}", code(e), e.message)
+    format!("{}: {}", code(e), llm_message(e))
+}
+
+/// Ошибки подключения, текст которых остаётся как есть: либо постоянная фраза без данных
+/// профиля, либо только то, что модель сама назвала в запросе (проект, id подключения).
+const PLAIN_CONNECTION_KEYS: &[&str] = &[
+    "errors.exec.notApproved",
+    "errors.connections.loginRequired",
+    "errors.connections.tokenMissing",
+    "errors.connections.badNamespace",
+    "errors.connections.notFound",
+];
+
+/// Текст ошибки для LLM. Чтение открывает подключение, если оно ещё не открыто, и тексты этих
+/// ошибок несут данные профиля: команду exec-плагина и параметры её запуска (`errors.exec.*`),
+/// адрес API-сервера и прокси (`errors.connections.*`), цепочку причин kube и сети, имя
+/// пользователя из ответа 403. Модель получает вместо них фиксированную фразу без этих данных;
+/// код ошибки остаётся прежним, подробности — только у человека в интерфейсе. Остальные ошибки
+/// несут имена объектов, о которых модель сама спросила, и не меняются.
+pub fn llm_message(e: &AppError) -> String {
+    let key = e.key.as_str();
+    if PLAIN_CONNECTION_KEYS.contains(&key) {
+        return e.message.clone();
+    }
+    let hidden = if key.starts_with("errors.exec.") {
+        "The connection's credential plugin failed; check the connection in Glafira"
+    } else if key.starts_with("errors.connections.") {
+        "The connection settings are invalid; check the connection in Glafira"
+    } else {
+        match key {
+            "errors.k8s.credentials" => "The credentials were rejected; sign in again in Glafira",
+            "errors.k8s.transport" => "The cluster could not be reached",
+            "errors.k8s.forbidden" => "Access is forbidden",
+            _ => return e.message.clone(),
+        }
+    };
+    hidden.to_string()
 }
 
 pub fn code(e: &AppError) -> String {
