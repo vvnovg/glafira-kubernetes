@@ -137,6 +137,9 @@
       "badBase64": "Certificate or key data in kubeconfig is not valid base64",
       "noContext": "Context “{{name}}” not found in kubeconfig",
       "noDefault": "Cannot find the default kubeconfig — choose a file"
+    },
+    "watch": {
+      "cronJobPods": "Pods of a CronJob are read by the list, not by watch"
     }
   },
   "messages": {

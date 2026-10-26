@@ -17,6 +17,7 @@ pub mod state;
 pub mod storage;
 pub mod sync;
 pub mod tls;
+pub mod watch;
 
 use std::sync::Arc;
 
@@ -81,6 +82,7 @@ pub fn run() {
             commands::settings::set_language,
             commands::settings::get_policy_status,
             commands::sessions::stop_session,
+            commands::sessions::start_watch,
             commands::cluster::get_cluster_overview,
             commands::cluster::list_nodes,
             commands::cluster::get_node,
