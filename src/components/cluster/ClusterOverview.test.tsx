@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderWithClient } from "../../test/render";
@@ -51,8 +51,8 @@ const OPENSHIFT: ClusterOverview = {
         progressing: { type: "Progressing", status: "True", message: "Working towards 4.18.4" },
       },
     },
-    infrastructure: "AWS",
-    consoleUrl: "https://console-openshift-console.apps.c.example.com",
+    infrastructure: { data: "AWS" },
+    consoleUrl: { data: "https://console-openshift-console.apps.c.example.com" },
     operators: { data: { total: 32, problems: [op("ingress", true, "Some ingresscontrollers are degraded")] } },
     machineConfigPools: {
       data: [{ name: "worker", degraded: false, updating: true, machines: 3, ready: 2, updated: 1, degradedMachines: 0 }],
@@ -85,6 +85,61 @@ describe("ClusterOverviewView", () => {
     await user.click(screen.getByRole("button", { name: "Показать все" }));
     expect(await screen.findByText("dns")).toBeInTheDocument();
     expect(api.listClusterOperators).toHaveBeenCalledWith("c1");
+    expect(screen.queryByText("Остальное скрыто правами.")).not.toBeInTheDocument();
+  });
+
+  /** Значение строки «<подпись>» из списка фактов блока OpenShift. */
+  const fact = (label: string) => screen.getByText(label).nextElementSibling as HTMLElement;
+
+  it("OpenShift: инфраструктура со значением, консоль — ссылка", async () => {
+    vi.mocked(api.getClusterOverview).mockResolvedValue({
+      ...OPENSHIFT,
+      platformDetails: { ...OPENSHIFT.platformDetails, infrastructure: { data: "VSphere" } } as ClusterOverview["platformDetails"],
+    });
+    renderWithClient(<ClusterOverviewView connectionId="c1" />);
+    await screen.findByText("Инфраструктура");
+    expect(fact("Инфраструктура")).toHaveTextContent("VSphere");
+    expect(within(fact("Веб-консоль")).getByRole("button")).toHaveTextContent("https://console-openshift-console.apps.c.example.com");
+  });
+
+  it("OpenShift: объект есть, значения нет ({data: null}) — «—», не ошибка", async () => {
+    vi.mocked(api.getClusterOverview).mockResolvedValue({
+      ...OPENSHIFT,
+      platformDetails: { ...OPENSHIFT.platformDetails, infrastructure: { data: null }, consoleUrl: { data: null } } as ClusterOverview["platformDetails"],
+    });
+    renderWithClient(<ClusterOverviewView connectionId="c1" />);
+    await screen.findByText("Инфраструктура");
+    expect(fact("Инфраструктура")).toHaveTextContent(/^—$/);
+    expect(fact("Веб-консоль")).toHaveTextContent(/^—$/);
+    expect(within(fact("Веб-консоль")).queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.queryByText("Остальное скрыто правами.")).not.toBeInTheDocument();
+  });
+
+  it("OpenShift: консоль не прочитана из-за прав — причина вместо ссылки, остальной обзор виден", async () => {
+    vi.mocked(api.getClusterOverview).mockResolvedValue({
+      ...OPENSHIFT,
+      platformDetails: { ...OPENSHIFT.platformDetails, consoleUrl: { error: forbidden("consoles") } } as ClusterOverview["platformDetails"],
+    });
+    renderWithClient(<ClusterOverviewView connectionId="c1" />);
+    await screen.findByText("Инфраструктура");
+    expect(fact("Веб-консоль")).toHaveTextContent("— Нет прав: list consoles на уровне кластера");
+    expect(within(fact("Веб-консоль")).queryByRole("button")).not.toBeInTheDocument();
+    expect(fact("Инфраструктура")).toHaveTextContent("AWS");
+    expect(screen.getByText("Остальное скрыто правами.")).toBeInTheDocument();
+  });
+
+  it("OpenShift: ошибка чтения инфраструктуры не права — баннер, консоль на месте", async () => {
+    vi.mocked(api.getClusterOverview).mockResolvedValue({
+      ...OPENSHIFT,
+      platformDetails: {
+        ...OPENSHIFT.platformDetails,
+        infrastructure: { error: { code: "INTERNAL", message: "Infrastructure is broken", retryable: false } },
+      } as ClusterOverview["platformDetails"],
+    });
+    renderWithClient(<ClusterOverviewView connectionId="c1" />);
+    await screen.findByText("Инфраструктура");
+    expect(fact("Инфраструктура")).toHaveTextContent("Infrastructure is broken");
+    expect(within(fact("Веб-консоль")).getByRole("button")).toBeInTheDocument();
     expect(screen.queryByText("Остальное скрыто правами.")).not.toBeInTheDocument();
   });
 

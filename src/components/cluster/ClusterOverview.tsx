@@ -14,7 +14,7 @@ import { RefreshControls, useRefreshInterval } from "../common/RefreshControls";
 function hiddenByRights(o: ClusterOverview): boolean {
   const parts: (Part<unknown> | null | undefined)[] = [o.nodes, o.ingressClasses, o.gatewayClasses, o.projects];
   const os = o.platformDetails;
-  if (os) parts.push(os.clusterVersion, os.operators, os.machineConfigPools);
+  if (os) parts.push(os.clusterVersion, os.infrastructure, os.consoleUrl, os.operators, os.machineConfigPools);
   return parts.some((p) => p?.error?.code === "FORBIDDEN");
 }
 
@@ -183,16 +183,22 @@ function OpenShiftSection({ connectionId, os }: { connectionId: string; os: Open
       </PartView>
       <dl className="facts">
         <dt>{t("cluster.overview.infrastructure")}</dt>
-        <dd>{os.infrastructure ?? "—"}</dd>
+        <dd>
+          <PartView part={os.infrastructure}>{(infrastructure) => infrastructure ?? "—"}</PartView>
+        </dd>
         <dt>{t("cluster.overview.console")}</dt>
         <dd>
-          {os.consoleUrl ? (
-            <button type="button" className="link" onClick={() => void openUrl(os.consoleUrl as string)}>
-              {os.consoleUrl}
-            </button>
-          ) : (
-            "—"
-          )}
+          <PartView part={os.consoleUrl}>
+            {(url) =>
+              url ? (
+                <button type="button" className="link" onClick={() => void openUrl(url)}>
+                  {url}
+                </button>
+              ) : (
+                "—"
+              )
+            }
+          </PartView>
         </dd>
       </dl>
       <h4>{t("cluster.overview.operators")}</h4>

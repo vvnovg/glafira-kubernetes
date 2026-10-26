@@ -343,8 +343,9 @@ export interface MachineConfigPoolRow {
 export interface OpenShiftOverview {
   kind: "openshift";
   clusterVersion: Part<ClusterVersionInfo>;
-  infrastructure: string | null;
-  consoleUrl: string | null;
+  /** `data` null — объект есть, значения нет; `error` — не прочитан (например, нет прав на консоль). */
+  infrastructure: Part<string | null>;
+  consoleUrl: Part<string | null>;
   operators: Part<{ total: number; problems: OperatorRow[] }>;
   machineConfigPools: Part<MachineConfigPoolRow[]>;
 }
