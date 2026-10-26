@@ -3,7 +3,8 @@
 //!
 //! - **имена полей** (по умолчанию [`DEFAULT_NAMES`], без учёта регистра, вхождением): значение
 //!   аннотации с таким ключом, флага `--name=value` и `--name value` в `command`/`args`, пары
-//!   `name=value`, `name: value` и `"name": value` в тексте;
+//!   `name=value`, `name: value` и `"name": value` в тексте; у `authorization` значение — схема
+//!   и учётные данные (`Basic …`, `Token …`) — скрывается целиком;
 //! - **встроенные шаблоны:** JWT, `Bearer <токен>`, `user:pass@` в URL, email, номера карт
 //!   с проверкой Луна, ключи `AKIA…`/`ASIA…`, PEM-блоки приватных ключей, токены `sha256~…`.
 //!
@@ -30,6 +31,9 @@ pub const DEFAULT_NAMES: [&str; 10] = [
     "authorization",
 ];
 
+/// Имя заголовка, у которого значение — несколько слов (схема и учётные данные).
+const HEADER_NAME: &str = "authorization";
+
 /// Аннотации с копией всего объекта: в них лежат и значения env, и всё остальное (как в YAML
 /// интерфейса, спец. §6.4).
 pub const OBJECT_COPIES: [&str; 4] = [
@@ -40,7 +44,7 @@ pub const OBJECT_COPIES: [&str; 4] = [
 ];
 
 fn re(pattern: &str) -> Regex {
-    Regex::new(pattern).expect("шаблон маскировки")
+    Regex::new(pattern).expect("masking pattern")
 }
 
 static PEM_KEY: LazyLock<Regex> = LazyLock::new(|| {
@@ -77,6 +81,19 @@ fn luhn(digits: &str) -> bool {
     sum % 10 == 0
 }
 
+/// Значение уже замаскировано встроенными шаблонами: `***` или `sha256~***`, а для заголовка
+/// ещё и `<схема> ***` (`Bearer ***`), возможно в кавычках. Значение, лишь содержащее `***`
+/// (`a***b`), замаскированным не считается: это может быть настоящий пароль.
+fn is_masked(value: &str, header: bool) -> bool {
+    let v = value.trim_matches(|c| c == '"' || c == '\'');
+    let v = v.strip_prefix("sha256~").unwrap_or(v);
+    let v = match v.split_once(char::is_whitespace) {
+        Some((_, rest)) if header => rest.trim_start(),
+        _ => v,
+    };
+    v == MASK
+}
+
 /// Маскировщик с именами полей подключения.
 pub struct Masker {
     names: Vec<String>,
@@ -97,13 +114,31 @@ impl Masker {
             .filter(|n| !n.is_empty())
             .collect();
         let pairs = (!names.is_empty()).then(|| {
-            let alt = names
+            let alt = |names: &[&String]| {
+                names
+                    .iter()
+                    .map(|n| regex::escape(n))
+                    .collect::<Vec<_>>()
+                    .join("|")
+            };
+            let all: Vec<&String> = names.iter().collect();
+            // Заголовок с несколькими словами в значении (`Basic <данные>`): значение — до конца
+            // строки или закрывающей кавычки; ветка стоит первой, чтобы забрать пару целиком.
+            let headers: Vec<&String> = names
                 .iter()
-                .map(|n| regex::escape(n))
-                .collect::<Vec<_>>()
-                .join("|");
+                .filter(|n| n.contains(HEADER_NAME))
+                .collect();
+            let header = if headers.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    r#"(?P<hp>[A-Za-z0-9_.\-]*(?:{})[A-Za-z0-9_.\-]*"?[ \t]*[=:][ \t]*)(?P<hv>"[^"]*"|'[^']*'|[^\r\n"']*[^\s"'])|"#,
+                    alt(&headers)
+                )
+            };
             re(&format!(
-                r#"(?i)([A-Za-z0-9_.\-]*(?:{alt})[A-Za-z0-9_.\-]*"?\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s,;&|"']+)"#
+                r#"(?i){header}(?P<gp>[A-Za-z0-9_.\-]*(?:{})[A-Za-z0-9_.\-]*"?\s*[=:]\s*)(?P<gv>"[^"]*"|'[^']*'|[^\s,;&|"']+)"#,
+                alt(&all)
             ))
         });
         Self { names, pairs }
@@ -174,7 +209,8 @@ impl Masker {
         (s, n)
     }
 
-    /// Пары `name=value`, `name: value` и `"name": value` с именем из списка.
+    /// Пары `name=value`, `name: value` и `"name": value` с именем из списка. Уже замаскированное
+    /// значение (`is_masked`) не заменяется и не считается.
     pub fn pairs(&self, text: &str) -> (String, usize) {
         let Some(re) = &self.pairs else {
             return (text.to_string(), 0);
@@ -182,14 +218,17 @@ impl Masker {
         let mut n = 0;
         let s = re
             .replace_all(text, |c: &Captures| {
-                let value = &c[2];
-                if value == MASK || value == format!("\"{MASK}\"") {
+                let (prefix, value, header) = match (c.name("hp"), c.name("hv")) {
+                    (Some(p), Some(v)) => (p.as_str(), v.as_str(), true),
+                    _ => (&c["gp"], &c["gv"], false),
+                };
+                if is_masked(value, header) {
                     return c[0].to_string();
                 }
                 n += 1;
                 match value.chars().next() {
-                    Some(q @ ('"' | '\'')) => format!("{}{q}{MASK}{q}", &c[1]),
-                    _ => format!("{}{MASK}", &c[1]),
+                    Some(q @ ('"' | '\'')) => format!("{prefix}{q}{MASK}{q}"),
+                    _ => format!("{prefix}{MASK}"),
                 }
             })
             .into_owned();
@@ -197,7 +236,8 @@ impl Masker {
     }
 
     /// Текст из кластера: сначала встроенные шаблоны (`Authorization: Bearer …` теряет токен
-    /// целиком), затем пары с именами из списка.
+    /// целиком, `--token=sha256~…` — всё после `~`), затем пары с именами из списка; значение,
+    /// уже замаскированное шаблоном, пары не трогают и не считают.
     pub fn text(&self, text: &str) -> (String, usize) {
         let (s, a) = self.patterns(text);
         let (s, b) = self.pairs(&s);
@@ -385,5 +425,85 @@ mod tests {
         assert!(!m.is_secret_name("PASSWORD"));
         assert_eq!(m.pairs("pin=1234 password=x").1, 1);
         assert_eq!(Masker::new(Vec::<String>::new()).pairs("password=x").1, 0);
+    }
+
+    #[test]
+    fn text_masks_the_whole_authorization_value() {
+        let cases = [
+            (
+                "Authorization: Basic dXNlcjpwYXNzd29yZA==",
+                "Authorization: ***",
+            ),
+            ("Authorization: Token abc123def456", "Authorization: ***"),
+            (
+                "Authorization: Bearer abcdef.123-xyz=",
+                "Authorization: Bearer ***",
+            ),
+            (
+                r#"curl -H "Authorization: Basic dXNlcjpwYXNzd29yZA==" http://x"#,
+                r#"curl -H "Authorization: ***" http://x"#,
+            ),
+            (
+                r#"curl -H "Authorization: Token abc123def456" http://x"#,
+                r#"curl -H "Authorization: ***" http://x"#,
+            ),
+            (
+                r#"curl -H "Authorization: Bearer abcdef.123-xyz=" http://x"#,
+                r#"curl -H "Authorization: Bearer ***" http://x"#,
+            ),
+            (
+                "curl -H 'Authorization: Basic dXNlcjpwYXNzd29yZA==' http://x",
+                "curl -H 'Authorization: ***' http://x",
+            ),
+            (
+                "Authorization: Basic dXNlcjpwYXNzd29yZA==\nHost: example.com",
+                "Authorization: ***\nHost: example.com",
+            ),
+            (
+                r#"{"Authorization": "Basic dXNlcjpwYXNzd29yZA==", "user": "bob"}"#,
+                r#"{"Authorization": "***", "user": "bob"}"#,
+            ),
+            (
+                r#"{"Authorization": "Bearer abcdef.123-xyz=", "user": "bob"}"#,
+                r#"{"Authorization": "Bearer ***", "user": "bob"}"#,
+            ),
+            ("proxy-authorization=Basic dXNl", "proxy-authorization=***"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(m().text(input), (want.to_string(), 1), "{input}");
+        }
+    }
+
+    #[test]
+    fn text_does_not_remask_or_recount_masked_values() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N";
+        let cases = [
+            (
+                "oc login --token=sha256~AbCdEfGhIjKlMnOp".to_string(),
+                "oc login --token=sha256~***".to_string(),
+                1,
+            ),
+            ("DB_PASSWORD='***'".into(), "DB_PASSWORD='***'".into(), 0),
+            (
+                r#"DB_PASSWORD="***""#.into(),
+                r#"DB_PASSWORD="***""#.into(),
+                0,
+            ),
+            ("DB_PASSWORD=***".into(), "DB_PASSWORD=***".into(), 0),
+            (
+                "Authorization: Bearer ***".into(),
+                "Authorization: Bearer ***".into(),
+                0,
+            ),
+            (
+                format!("Authorization: Bearer {jwt}"),
+                "Authorization: Bearer ***".into(),
+                1,
+            ),
+            ("password=a***b".into(), "password=***".into(), 1),
+        ];
+        for (input, want, count) in cases {
+            assert_eq!(m().text(&input), (want, count), "{input}");
+        }
     }
 }
