@@ -132,4 +132,17 @@ describe("ConnectionNode", () => {
     expect(screen.queryByText("Ничего не найдено")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "p-a" })).toBeInTheDocument();
   });
+
+  it("значок LLM — только у подключения с доступом LLM", () => {
+    renderWithClient(
+      <ul>
+        <ConnectionNode connection={conn} />
+        <ConnectionNode connection={{ ...conn, id: "c2", name: "prod", llmAccess: "metadata" }} />
+      </ul>,
+    );
+    const badges = screen.getAllByTitle("Открыто LLM-ассистентам по MCP");
+    expect(badges).toHaveLength(1);
+    expect(badges[0]).toHaveTextContent("LLM");
+    expect(badges[0].closest(".tree-conn")).toHaveTextContent("prod");
+  });
 });

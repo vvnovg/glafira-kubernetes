@@ -228,6 +228,9 @@
     },
     "logs": {
       "filter": "The filter runs in Glafira before the lines reach the window: a substring or a regular expression (regex). Lines that do not match are counted but not shown."
+    },
+    "settings": {
+      "mcpEnable": "Starts a local MCP server for LLM assistants. Access is opened per connection and is off by default; each new client is confirmed in a dialog."
     }
   },
   "connections": {
@@ -433,7 +436,8 @@
     "projectsFilter": "Filter projects",
     "projectsFromProfile": "The cluster does not list projects for you — the projects of the profile are shown",
     "noProjects": "No projects",
-    "noProjectsFromProfile": "The cluster does not list projects for you, and the profile has none"
+    "noProjectsFromProfile": "The cluster does not list projects for you, and the profile has none",
+    "llmAccess": "Open to LLM assistants over MCP"
   },
   "settings": {
     "title": "Settings",
@@ -443,6 +447,59 @@
       "system": "System default ({{name}})",
       "systemUnknown": "System default",
       "policy": "The language is set by your organization"
+    },
+    "mcp": {
+      "section": "LLM assistants (MCP)",
+      "intro": "An LLM assistant (Claude Desktop, Claude Code, Cursor and others) can connect to Glafira over MCP, read the metadata of the connections you open for it, run a cluster check and leave notes. It cannot change anything in the clusters.",
+      "enable": "Allow the MCP server",
+      "policy": "MCP is disabled by your organization",
+      "state": {
+        "off": "The server is off",
+        "running": "The server is running",
+        "otherInstance": "MCP is served by another Glafira window",
+        "error": "The server did not start",
+        "disabledByPolicy": "Disabled by your organization"
+      },
+      "connectTitle": "Connect a client",
+      "connectHint": "Add Glafira to the client's MCP servers and restart the client. If Glafira is not running, the client starts it.",
+      "claudeDesktop": "Claude Desktop: add to claude_desktop_config.json",
+      "claudeCode": "Claude Code: run in a terminal",
+      "otherClient": "Other stdio clients: command and arguments",
+      "copy": "Copy",
+      "copied": "Copied",
+      "sessions": "Active sessions",
+      "noSessions": "No clients are connected.",
+      "colClient": "Client",
+      "colSince": "Connected",
+      "colCalls": "Calls",
+      "waiting": "waiting for approval",
+      "disconnect": "Disconnect",
+      "disconnectAll": "Disconnect all",
+      "clients": "Approved clients",
+      "noClients": "No approved clients yet.",
+      "colFirstSeen": "First connected",
+      "colLastSeen": "Last connected",
+      "revoke": "Revoke",
+      "audit": {
+        "title": "MCP log",
+        "refresh": "Refresh",
+        "reveal": "Show file",
+        "empty": "The log is empty.",
+        "colTime": "Time",
+        "colWhat": "Tool or event",
+        "colConnection": "Connection",
+        "colResult": "Result",
+        "colMs": "ms",
+        "ok": "success",
+        "error": "error",
+        "sessionStarted": "Session opened",
+        "sessionEnded": "Session closed",
+        "approved": "Client approved",
+        "rejected": "Client rejected",
+        "revoked": "Client access revoked",
+        "serverStarted": "Server started",
+        "serverStopped": "Server stopped"
+      }
     }
   },
   "help": {
@@ -735,5 +792,22 @@
     "followPrevious": "The previous run has already finished — there is nothing to follow",
     "dropped_one": "The window keeps the last {{max, number}} lines; {{count, number}} older line was dropped",
     "dropped_other": "The window keeps the last {{max, number}} lines; {{count, number}} older lines were dropped"
+  },
+  "mcp": {
+    "unknownClient": "Unknown MCP client",
+    "approval": {
+      "title": "{{client}} wants to connect to Glafira",
+      "body": "It will see the metadata of connections open to LLM assistants: {{n}}.",
+      "readOnly": "Through Glafira the assistant can only read projects, workloads, pods, events, network and quotas, run a check and leave notes in Glafira. Secret values, logs and passwords are not shared.",
+      "unnamed": "The client did not send its name, so the answer applies to this session only.",
+      "more": "Waiting for an answer: {{n}} more",
+      "allow": "Allow",
+      "reject": "Reject"
+    },
+    "indicator": {
+      "one": "LLM: {{client}}",
+      "many": "LLM clients: {{n}}",
+      "title": "MCP sessions: open Settings"
+    }
   }
 }

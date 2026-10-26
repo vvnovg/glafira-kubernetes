@@ -6,6 +6,7 @@ import { i18n, setLanguage } from "../../i18n";
 import { useHelpChapter } from "../../state/helpContext";
 import { tabId } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
+import { McpSection } from "./McpSection";
 
 export function SettingsPanel() {
   const { t } = useTranslation();
@@ -61,6 +62,7 @@ export function SettingsPanel() {
         {byPolicy && <p className="hint">{t("settings.language.policy")}</p>}
         {change.error && <ErrorBanner error={change.error} />}
       </section>
+      <McpSection />
     </div>
   );
 }

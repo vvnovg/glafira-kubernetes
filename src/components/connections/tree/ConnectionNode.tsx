@@ -29,6 +29,11 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
         <span className="dot" style={{ background: c.color }} />
         <span className="tree-name">{c.name}</span>
         <EnvBadge environment={c.environment} readOnly={c.readOnly} />
+        {c.llmAccess === "metadata" && (
+          <span className="llm-badge" title={t("sidebar.llmAccess")}>
+            LLM
+          </span>
+        )}
         <button type="button" className="icon" title={t("sidebar.editConnection")} onClick={() => open({ kind: "connection-form", connectionId: c.id })}>
           ✎
         </button>

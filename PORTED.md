@@ -154,3 +154,11 @@
 | `src-tauri/src/mcp/controller.rs` | `src-tauri/src/mcp/controller.rs` | `8bbd0bd` | адаптирован: крейты glafira-mcp-core и glafira-mcp-kubernetes, имя продукта в адресе |
 | `src-tauri/src/mcp/shim.rs` | `src-tauri/src/mcp/shim.rs` | `8bbd0bd` | адаптирован: имя продукта |
 | `src-tauri/src/commands/mcp.rs` | `src-tauri/src/commands/mcp.rs` | `8bbd0bd` | адаптирован: ссылка на спеку |
+| `src/lib/useMcpStatus.ts` | `src/lib/useMcpStatus.ts` | `8bbd0bd` | как есть |
+| `src/test/mcp.ts` | `src/test/mcp.ts` | `8bbd0bd` | как есть |
+| `src/components/mcp/ApprovalDialog.tsx` | `src/components/mcp/ApprovalDialog.tsx` | `8bbd0bd` | адаптирован: ссылка на спеку |
+| `src/components/mcp/ApprovalDialog.test.tsx` | `src/components/mcp/ApprovalDialog.test.tsx` | `8bbd0bd` | как есть |
+| `src/components/mcp/McpIndicator.tsx` | `src/components/mcp/McpIndicator.tsx` | `8bbd0bd` | как есть |
+| `src/components/mcp/McpIndicator.test.tsx` | `src/components/mcp/McpIndicator.test.tsx` | `8bbd0bd` | как есть |
+| `src/components/settings/McpSection.tsx` | `src/components/settings/McpSection.tsx` | `8bbd0bd` | как есть |
+| `src/components/settings/McpSection.test.tsx` | `src/components/settings/McpSection.test.tsx` | `8bbd0bd` | как есть |

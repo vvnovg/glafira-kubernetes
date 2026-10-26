@@ -6,6 +6,7 @@
     "cluster.nodes.version",
     "project.tabs.workloads",
     "project.workloads.title",
-    "project.network.service"
+    "project.network.service",
+    "mcp.indicator.one"
   ]
 }

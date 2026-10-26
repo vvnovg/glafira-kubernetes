@@ -10,6 +10,8 @@ import { i18n } from "../i18n";
 import { TabContent } from "./TabContent";
 import { TabActiveContext } from "../lib/tabActive";
 import { useHelpShortcut } from "../lib/useHelpShortcut";
+import { useMcpEvents } from "../lib/useMcpStatus";
+import { ApprovalDialog } from "./mcp/ApprovalDialog";
 
 function tabTitle(tab: Tab, byId: Map<string, ConnectionProfile>): string {
   const connId = "connectionId" in tab ? tab.connectionId : null;
@@ -40,6 +42,7 @@ export function Layout() {
   const { t } = useTranslation(); // заодно перерисовывает заголовки вкладок при смене языка
   const { tabs, activeId, activate, close } = useWorkspace();
   useHelpShortcut();
+  useMcpEvents();
   const { data: connections = [] } = useQuery({ queryKey: ["connections"], queryFn: api.listConnections });
   const byId = new Map(connections.map((c) => [c.id, c]));
   const active = tabs.find((x) => x.id === activeId);
@@ -88,6 +91,7 @@ export function Layout() {
           </section>
         ))}
       </main>
+      <ApprovalDialog />
     </div>
   );
 }

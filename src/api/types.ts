@@ -262,6 +262,68 @@ export interface LanguageSettings {
   languages: string[];
 }
 
+// --- MCP-шлюз (этап O2)
+
+export type McpServerState = "off" | "running" | "otherInstance" | "error" | "disabledByPolicy";
+
+export interface McpSession {
+  id: string;
+  clientName: string | null;
+  clientVersion: string | null;
+  startedMs: number;
+  calls: number;
+  /** Идёт вызов. */
+  active: boolean;
+  approved: boolean;
+}
+
+export interface McpApprovalRequest {
+  sessionId: string;
+  clientName: string | null;
+  clientVersion: string | null;
+}
+
+export interface McpApprovedClient {
+  name: string;
+  version: string;
+  firstSeenMs: number;
+  lastSeenMs: number;
+}
+
+export interface McpStatus {
+  state: McpServerState;
+  enabled: boolean;
+  policyAllows: boolean;
+  error: LocalizedText | null;
+  sessions: McpSession[];
+  pending: McpApprovalRequest[];
+  approvedClients: McpApprovedClient[];
+  /** Подключений с доступом LLM (для диалога подтверждения). */
+  allowedConnections: number;
+}
+
+export interface McpClientConfigs {
+  command: string;
+  args: string[];
+  claudeDesktop: string;
+  claudeCode: string;
+  /** Команда для любого stdio-клиента: путь с пробелами — в кавычках. */
+  otherClient: string;
+}
+
+/** Запись журнала MCP (`mcp-audit.jsonl`), новые первыми. */
+export interface McpAuditEntry {
+  ts: number;
+  event: string;
+  session?: string;
+  client?: string | null;
+  tool?: string;
+  connection?: { id: string; name: string } | null;
+  outcome?: "ok" | "error";
+  code?: string | null;
+  ms?: number;
+}
+
 // --- Чтение кластера (этап O1b). Время — секунды Unix.
 
 /** Часть экрана: данные или причина, почему их нет (права, ошибка чтения). */
