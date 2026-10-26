@@ -1147,6 +1147,18 @@ mod tests {
             ),
             app_err!(
                 ErrorCode::AuthFailed,
+                "errors.oauth.rejected",
+                "The OAuth server rejected the sign-in: {{reason}}",
+                reason = format!("no such user {USER} at {HOST}")
+            ),
+            app_err!(
+                ErrorCode::AuthFailed,
+                "errors.oauth.denied",
+                "Sign-in was not completed: {{error}}",
+                error = format!("access_denied for {USER}")
+            ),
+            app_err!(
+                ErrorCode::AuthFailed,
                 "errors.k8s.credentials",
                 "The credentials of this connection cannot be used: {{message}}",
                 message = format!("auth error for {USER}@{HOST}")
@@ -1165,7 +1177,7 @@ mod tests {
     #[test]
     fn connection_errors_hide_the_profile() {
         let errors = profile_errors();
-        assert_eq!(errors.len(), 11);
+        assert_eq!(errors.len(), 13);
         for e in errors {
             let expected_code = code(&e);
             let shown = [error_text(&e), {
@@ -1201,6 +1213,12 @@ mod tests {
         assert!(to_backend(e).message.contains("Bad_NS"));
         let e = crate::health::store::connection_not_found("c-9");
         assert!(error_text(&e).contains("c-9"));
+        let e = crate::app_err!(
+            ErrorCode::AuthFailed,
+            "errors.oauth.cancelled",
+            "Sign-in was cancelled"
+        );
+        assert_eq!(to_backend(e.clone()).message, e.message);
         let e = crate::k8s::errors::from_transport_text("tls handshake eof");
         assert_eq!(to_backend(e.clone()).message, e.message);
     }

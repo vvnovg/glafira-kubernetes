@@ -38,12 +38,16 @@ const PLAIN_CONNECTION_KEYS: &[&str] = &[
     "errors.connections.tokenMissing",
     "errors.connections.badNamespace",
     "errors.connections.notFound",
+    "errors.oauth.notAvailable",
+    "errors.oauth.cancelled",
+    "errors.oauth.timeout",
+    "errors.oauth.badTokenResponse",
 ];
 
 /// Текст ошибки для LLM. Чтение открывает подключение, если оно ещё не открыто, и тексты этих
 /// ошибок несут данные профиля: команду exec-плагина и параметры её запуска (`errors.exec.*`),
-/// адрес API-сервера и прокси (`errors.connections.*`), цепочку причин kube и сети, имя
-/// пользователя из ответа 403. Модель получает вместо них фиксированную фразу без этих данных;
+/// адрес API-сервера и прокси (`errors.connections.*`), ответ OAuth-сервера (`errors.oauth.*`),
+/// цепочку причин kube и сети, имя пользователя из ответа 403. Модель получает вместо них фиксированную фразу без этих данных;
 /// код ошибки остаётся прежним, подробности — только у человека в интерфейсе. Остальные ошибки
 /// несут имена объектов, о которых модель сама спросила, и не меняются.
 pub fn llm_message(e: &AppError) -> String {
@@ -53,6 +57,8 @@ pub fn llm_message(e: &AppError) -> String {
     }
     let hidden = if key.starts_with("errors.exec.") {
         "The connection's credential plugin failed; check the connection in Glafira"
+    } else if key.starts_with("errors.oauth.") {
+        "The sign-in was rejected; sign in again in Glafira"
     } else if key.starts_with("errors.connections.") {
         "The connection settings are invalid; check the connection in Glafira"
     } else {
