@@ -25,8 +25,9 @@ Use the address of the API server, as in `oc login` or the `server` of a kubecon
   `yc k8s create-token`, `rancher token`. Other commands are not run.
 
 OpenShift tokens usually expire after 24 hours. When the session expires, the connection tab offers to sign in again
-or to paste a new token. If sign-in via browser is not available on the cluster, use
-[[ui:cluster.session.tokenPage]]: it opens the token page of the cluster; copy the token from it and paste it.
+or to paste a new token. If sign-in via browser is not available on an OpenShift cluster, use
+[[ui:cluster.session.tokenPage]]: it opens the token page of the cluster; copy the token from it and paste it. Other
+clusters have no such page and no such button: paste a service account token, for example from `kubectl create token`.
 
 ## Exec plugins {#exec}
 

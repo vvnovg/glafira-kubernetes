@@ -1,4 +1,4 @@
-import { type QueryClient, useIsFetching, useMutation, useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, useIsFetching, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -43,7 +43,7 @@ export async function reconnect(queryClient: QueryClient, connectionId: string):
 
 /**
  * Что сделать, если сессия истекла или токена нет: войти через браузер, вставить токен
- * (в том числе со страницы токена кластера), запустить exec-плагин снова или изменить
+ * (в том числе со страницы токена кластера OpenShift), запустить exec-плагин снова или изменить
  * подключение (сертификат, строка запуска exec-плагина).
  */
 export function SessionActions({ profile }: { profile: ConnectionProfile }) {
@@ -78,11 +78,14 @@ export function SessionActions({ profile }: { profile: ConnectionProfile }) {
     },
     onSuccess: () => setToken(""),
   });
-  const tokenPage = useMutation({
-    mutationFn: async () => {
-      await openUrl(await api.oauthTokenPage(id));
-    },
+  // Страница токена и токены `sha256~…` есть только у OAuth-сервера OpenShift. Платформа до удачного подключения
+  // неизвестна (токен истёк к запуску), поэтому спрашиваем сам OAuth-сервер: на обычном Kubernetes его нет, и ссылки тоже.
+  const tokenPageUrl = useQuery({
+    queryKey: ["oauthTokenPage", id],
+    queryFn: () => api.oauthTokenPage(id),
+    enabled: profile.auth.method === "token" || profile.auth.method === "browser",
   });
+  const tokenPage = useMutation({ mutationFn: (url: string) => openUrl(url) });
 
   if (profile.auth.method === "clientCert")
     return (
@@ -133,16 +136,18 @@ export function SessionActions({ profile }: { profile: ConnectionProfile }) {
           id={`token-${id}`}
           type="password"
           autoComplete="off"
-          placeholder="sha256~…"
+          placeholder={tokenPageUrl.data ? "sha256~…" : t("cluster.session.tokenPlaceholder")}
           value={token}
           onChange={(e) => setToken(e.target.value)}
         />
         <button type="button" disabled={!token.trim() || paste.isPending || login.isPending || connecting} onClick={() => paste.mutate()}>
           {t("cluster.session.saveToken")}
         </button>
-        <button type="button" className="link" disabled={tokenPage.isPending} onClick={() => tokenPage.mutate()}>
-          {t("cluster.session.tokenPage")}
-        </button>
+        {tokenPageUrl.data && (
+          <button type="button" className="link" disabled={tokenPage.isPending} onClick={() => tokenPage.mutate(tokenPageUrl.data)}>
+            {t("cluster.session.tokenPage")}
+          </button>
+        )}
       </div>
       {paste.error && <ErrorBanner error={paste.error} />}
       {tokenPage.error && <ErrorBanner error={tokenPage.error} />}
