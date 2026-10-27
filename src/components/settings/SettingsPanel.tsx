@@ -22,6 +22,7 @@ export function SettingsPanel() {
   });
 
   // F1: в разделе MCP — глава «LLM-ассистенты», в остальных — «Начало работы» (язык описан там).
+  // Раздел выбирает и фокус, и щелчок: WebKit на macOS не даёт фокус флажку и кнопке по щелчку.
   const [mcpFocused, setMcpFocused] = useState(false);
   useHelpChapter(tabId({ kind: "settings" }), mcpFocused ? "llm-mcp" : "getting-started");
 
@@ -40,7 +41,7 @@ export function SettingsPanel() {
       <div className="toolbar">
         <h2>{t("settings.title")}</h2>
       </div>
-      <section onFocusCapture={() => setMcpFocused(false)}>
+      <section onFocusCapture={() => setMcpFocused(false)} onPointerDownCapture={() => setMcpFocused(false)}>
         <h3>{t("settings.language.section")}</h3>
         <div className="field">
           <label htmlFor="settings-language">{t("settings.language.label")}</label>
@@ -64,7 +65,7 @@ export function SettingsPanel() {
         {byPolicy && <p className="hint">{t("settings.language.policy")}</p>}
         {change.error && <ErrorBanner error={change.error} />}
       </section>
-      <div onFocusCapture={() => setMcpFocused(true)}>
+      <div onFocusCapture={() => setMcpFocused(true)} onPointerDownCapture={() => setMcpFocused(true)}>
         <McpSection />
       </div>
     </div>

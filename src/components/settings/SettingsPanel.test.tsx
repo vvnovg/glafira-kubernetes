@@ -1,4 +1,4 @@
-import { act, screen } from "@testing-library/react";
+import { act, fireEvent, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LanguageSettings } from "../../api/types";
@@ -84,6 +84,17 @@ describe("SettingsPanel", () => {
     act(() => mcp.focus());
     expect(useHelpContext.getState().byTab.settings).toBe("llm-mcp");
     act(() => screen.getByLabelText("Язык интерфейса").focus());
+    expect(useHelpContext.getState().byTab.settings).toBe("getting-started");
+    await mcpSettled();
+  });
+
+  it("раздел для F1 выбирает и щелчок без фокуса (флажки и кнопки в WebKit на macOS)", async () => {
+    vi.mocked(api.getLanguageSettings).mockResolvedValue(base);
+    renderWithClient(<SettingsPanel />);
+    const mcp = await screen.findByLabelText("Разрешить MCP-сервер");
+    fireEvent.pointerDown(mcp);
+    expect(useHelpContext.getState().byTab.settings).toBe("llm-mcp");
+    fireEvent.pointerDown(screen.getByLabelText("Язык интерфейса"));
     expect(useHelpContext.getState().byTab.settings).toBe("getting-started");
     await mcpSettled();
   });
