@@ -9,7 +9,7 @@
 | `tsconfig.json` | `tsconfig.json` | `8bbd0bd` | как есть |
 | `tsconfig.node.json` | `tsconfig.node.json` | `8bbd0bd` | как есть |
 | `vite.config.ts` | `vite.config.ts` | `8bbd0bd` | как есть |
-| `vitest.config.ts` | `vitest.config.ts` | `8bbd0bd` | как есть |
+| `vitest.config.ts` | `vitest.config.ts` | `8bbd0bd` | адаптирован: стили текстом (`?raw`) в тестах — для проверки правил `app.css` |
 | `.gitattributes` | `.gitattributes` | `8bbd0bd` | как есть |
 | `LICENSE` | `LICENSE` | `8bbd0bd` | как есть |
 | `src/vite-env.d.ts` | `src/vite-env.d.ts` | `8bbd0bd` | как есть |
