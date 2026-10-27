@@ -17,6 +17,8 @@ export function newProfile(): ConnectionProfile {
     manualNamespaces: [],
     requestTimeoutMs: 30000,
     connectTimeoutMs: 10000,
+    llmAccess: "off",
+    llmNamespaces: null,
   };
 }
 

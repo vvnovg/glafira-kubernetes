@@ -2,11 +2,15 @@
 
 Обычный Kubernetes в Docker для интеграционных тестов Rust: Glafira проверяет на нём подключение, вход
 (сертификат, токен и exec-плагин — скрипт, который выдаёт токен сервисной учётной записи), платформу `kubernetes`,
-права и импорт kubeconfig (`tests/it_connect.rs`), а также чтение кластера (`tests/it_read.rs`): проблемные поды
+права и импорт kubeconfig (`tests/it_connect.rs`), чтение кластера (`tests/it_read.rs`): проблемные поды
 (CrashLoopBackOff, ImagePullBackOff, Pending), workloads, события, сеть, конфигурацию, PVC, квоты, YAML, логи и
-watch. Объекты проекта team-a — в `fixtures.yaml`; образы не скачиваются: контейнеры запускает образ-помощник
-local-path-provisioner (bash), который уже есть на ноде. Особенностей OpenShift (проекты, OAuth, маршруты) на kind нет —
-их проверяет смоук на OpenShift Local или dev-кластере (`docs/smoke/o1a.md`, `docs/smoke/o1b.md`).
+watch, — проверку кластера (`tests/it_health.rs`): правила §8.2 на настоящем API-сервере, — и MCP-шлюз
+(`tests/it_mcp.rs`): клиент rmcp через `mcp.json` и рукопожатие вызывает инструменты в области LLM. Объекты проекта team-a —
+в `fixtures.yaml` и `health.yaml`; образы не скачиваются: контейнеры запускает образ-помощник local-path-provisioner
+(bash), который уже есть на ноде. `crds.yaml` — минимальные CRD Route и Gateway API без контроллеров: группы API есть,
+статус маршрута Gateway API пишет `setup.sh`, у Route статуса нет (роутера нет). Группы `config.openshift.io` нет —
+платформа стенда `kubernetes`. Остальное OpenShift (проекты, OAuth, операторы) проверяет смоук на OpenShift Local или
+dev-кластере (`docs/smoke/o1a.md`, `docs/smoke/o1b.md`, `docs/smoke/o2.md`).
 
 ```bash
 brew install kind            # или https://kind.sigs.k8s.io/docs/user/quick-start/

@@ -13,6 +13,7 @@ use futures::FutureExt;
 use glafira_kubernetes_lib::error::ErrorCode;
 use glafira_kubernetes_lib::k8s::pods::{PodProblem, PodRow, WorkloadRef, list_pods};
 use glafira_kubernetes_lib::k8s::pool::{Connected, open};
+use glafira_kubernetes_lib::k8s::read::Namespace;
 use glafira_kubernetes_lib::k8s::workloads::{WorkloadKind, WorkloadProblem};
 use glafira_kubernetes_lib::k8s::{
     access, configs, events, network, overview, projects, quotas, storage, workloads, yaml,
@@ -276,19 +277,30 @@ async fn events_network_config_storage_and_quotas() {
         Some((2, 2)),
         "готовые endpoints по EndpointSlices"
     );
-    let ing = &net.ingresses.data.unwrap()[0];
+    let ingresses = net.ingresses.data.unwrap();
+    let ing = ingresses.iter().find(|i| i.name == "web").unwrap();
     assert_eq!(ing.rules[0].host.as_deref(), Some("web.example.test"));
     assert_eq!(ing.rules[0].service.as_deref(), Some("web"));
-    assert!(
-        net.routes.is_none() && net.gateways.is_none(),
-        "на kind нет Route и Gateway API"
+    // CRD Route и Gateway API на стенде — без роутера и контроллера (dev/kind/crds.yaml).
+    let routes = net.routes.unwrap().data.unwrap();
+    assert_eq!(
+        (routes[0].name.as_str(), routes[0].admitted),
+        ("web", None),
+        "роутера нет — статуса нет"
     );
+    let http = net.http_routes.unwrap().data.unwrap();
+    assert_eq!(
+        http[0].parents[0].resolved_refs.as_ref().unwrap().status,
+        "False",
+        "статус маршрута пишет setup.sh"
+    );
+    assert_eq!(net.gateways.unwrap().data.unwrap()[0].name, "public");
 
     let cfg = configs::get_config(&r, NS).await;
     // Весь ответ целиком, до того как из него заберут части.
     assert_no_secret("get_config", &serde_json::to_string(&cfg).unwrap());
     // Проверка утечки имеет смысл, только пока в кластере лежит именно это значение.
-    let stored: kube::Api<Secret> = kube::Api::namespaced(c.client.clone(), NS);
+    let stored: kube::Api<Secret> = kube::Api::namespaced(c.kube_client().clone(), NS);
     let stored = stored.get("db").await.unwrap().data.unwrap();
     assert_eq!(
         stored["password"].0,
@@ -464,7 +476,7 @@ async fn watch_sees_a_new_pod() {
     let task = tokio::spawn(watch::run(
         watch::sources(
             &StreamClient::fixed(r.clone()),
-            NS,
+            &Namespace::new(NS).unwrap(),
             WatchKind::Pods,
             None,
             &c.info.api_groups,
@@ -499,7 +511,7 @@ async fn watch_sees_a_new_pod() {
     )
     .await;
     let name = format!("watch-probe-{}", uuid::Uuid::new_v4().simple());
-    let api: kube::Api<Pod> = kube::Api::namespaced(c.client.clone(), NS);
+    let api: kube::Api<Pod> = kube::Api::namespaced(c.kube_client().clone(), NS);
     let pod: Pod = serde_json::from_value(serde_json::json!({
         "metadata": {"name": name},
         "spec": {"nodeSelector": {"glafira/none": "true"}, "containers": [{"name": "x", "image": "registry.invalid/x:1"}]}
@@ -556,7 +568,14 @@ async fn cluster_overview_and_the_rights_of_a_service_account() {
     assert_eq!((nodes.total, nodes.ready), (1, 1));
     assert_eq!(nodes.roles[0].role, "control-plane");
     assert!(o.projects.data.unwrap().count >= 5);
-    assert!(o.platform_details.is_none() && o.gateway_classes.is_none());
+    assert!(
+        o.platform_details.is_none(),
+        "без config.openshift.io — kubernetes"
+    );
+    assert!(
+        o.gateway_classes.unwrap().data.unwrap().is_empty(),
+        "группа Gateway API есть, классов нет"
+    );
 
     let dev = connect("dev-token").await.unwrap();
     let r = dev.reader();

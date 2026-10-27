@@ -4,6 +4,7 @@ use tauri::State;
 use tauri::ipc::Channel;
 
 use crate::error::{AppResult, ErrorCode};
+use crate::k8s::read::Namespace;
 use crate::logs::{KubeLogs, LogEvent, LogParams, Matcher, Reported};
 use crate::sessions::{Connect, SessionGuard, Sink, StreamClient};
 use crate::state::AppState;
@@ -42,6 +43,8 @@ pub async fn start_watch_impl(
             "Pods of a CronJob are read by the list, not by watch"
         ));
     }
+    // Потоки watch открываются только с проверенным namespace: у потока нет своей ошибки.
+    let checked = Namespace::new(&params.namespace)?;
     // Сессия на учёте ещё до подключения: отключение, пока идёт вход (exec-плагин), её
     // остановит (`stop_for`). При ошибке её снимает с учёта `guard`.
     let (id, cancel) = st.sessions.register(&params.connection_id);
@@ -71,13 +74,8 @@ pub async fn start_watch_impl(
     }
     let groups = used.info.api_groups;
     let client = StreamClient::new(used.clone(), reconnect(st, &params.connection_id));
-    let sources = crate::watch::sources(
-        &client,
-        &params.namespace,
-        params.kind,
-        selector.as_deref(),
-        &groups,
-    );
+    let sources =
+        crate::watch::sources(&client, &checked, params.kind, selector.as_deref(), &groups);
     let poll = crate::watch::poll(
         client.fork(),
         params.namespace.clone(),

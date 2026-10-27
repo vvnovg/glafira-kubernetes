@@ -1,5 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
+  AnnotationStatus,
   AppError,
   AppInfo,
   ClusterOverview,
@@ -11,12 +12,16 @@ import type {
   EventObject,
   EventRow,
   ExportSummary,
+  HealthView,
   ImportPreview,
   KubeconfigPreview,
   LanguageSettings,
   Listed,
   LogEvent,
   LogParams,
+  McpAuditEntry,
+  McpClientConfigs,
+  McpStatus,
   NamespaceAccess,
   NetworkView,
   NodeDetails,
@@ -147,4 +152,25 @@ export const api = {
   /** Сохраняет лог (без follow) в файл; возвращает число строк. */
   saveLogs: (params: LogParams, path: string, timestamps: boolean) => call<number>("save_logs", { params, path, timestamps }),
   stopSession: (sessionId: string) => call<boolean>("stop_session", { sessionId }),
+
+  getMcpStatus: () => call<McpStatus>("get_mcp_status"),
+  setMcpEnabled: (enabled: boolean) => call<McpStatus>("set_mcp_enabled", { enabled }),
+  answerMcpApproval: (sessionId: string, approve: boolean) =>
+    call<McpStatus>("answer_mcp_approval", { sessionId, approve }),
+  revokeMcpClient: (name: string) => call<McpStatus>("revoke_mcp_client", { name }),
+  disconnectMcpSessions: (sessionId: string | null) => call<McpStatus>("disconnect_mcp_sessions", { sessionId }),
+  getMcpAudit: (limit: number) => call<McpAuditEntry[]>("get_mcp_audit", { limit }),
+  getMcpClientConfigs: () => call<McpClientConfigs>("get_mcp_client_configs"),
+  revealMcpAudit: () => call<void>("reveal_mcp_audit"),
+
+  /** «Проверить кластер»: все доступные проекты (не больше 50) и уровень кластера. */
+  runHealthCheck: (connectionId: string) => call<HealthView>("run_health_check", { connectionId }),
+  getHealth: (connectionId: string) => call<HealthView>("get_health", { connectionId }),
+  setFindingIgnored: (connectionId: string, key: string, ignored: boolean) =>
+    call<HealthView>("set_finding_ignored", { connectionId, key, ignored }),
+  setAnnotationStatus: (connectionId: string, annotationId: string, status: AnnotationStatus) =>
+    call<HealthView>("set_annotation_status", { connectionId, annotationId, status }),
+  deleteAnnotation: (connectionId: string, annotationId: string) =>
+    call<HealthView>("delete_annotation", { connectionId, annotationId }),
+  deleteAllAnnotations: (connectionId: string) => call<HealthView>("delete_all_annotations", { connectionId }),
 };

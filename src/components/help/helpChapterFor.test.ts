@@ -9,6 +9,7 @@ const cases: [TabSpec | null, string][] = [
   [{ kind: "project", connectionId: "c", namespace: "team-a" }, "projects-workloads"],
   [{ kind: "workload", connectionId: "c", namespace: "team-a", workloadKind: "Deployment", name: "web" }, "projects-workloads"],
   [{ kind: "pod", connectionId: "c", namespace: "team-a", name: "web-1" }, "pods-logs"],
+  [{ kind: "findings", connectionId: "c" }, "health-check"],
   [{ kind: "about" }, "getting-started"],
   [{ kind: "settings" }, "getting-started"],
   [{ kind: "help", chapter: "connections" }, "getting-started"],

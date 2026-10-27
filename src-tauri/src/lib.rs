@@ -5,9 +5,11 @@ pub mod commands;
 pub mod der;
 mod dock_name;
 pub mod error;
+pub mod health;
 pub mod k8s;
 pub mod logging;
 pub mod logs;
+pub mod mcp;
 pub mod platform;
 pub mod policy;
 pub mod product;
@@ -21,11 +23,31 @@ pub mod tls;
 pub mod watch;
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 use crate::secrets::KeyringStore;
 use crate::state::AppState;
+
+/// Сколько выход из приложения ждёт остановку MCP-сервера (сессии, `mcp.json`).
+const MCP_EXIT_GRACE: Duration = Duration::from_secs(2);
+
+/// При выходе: MCP-сервер останавливается, свой `mcp.json` удаляется — шим не пойдёт по
+/// мёртвому адресу. Не уложился в срок — `exit_now` убирает файл и закрывает сессии. Если
+/// `setup` не успел зарегистрировать контроллер, останавливать нечего.
+fn shutdown_mcp<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    let Some(mcp) = app.try_state::<Arc<crate::mcp::McpController>>() else {
+        return;
+    };
+    let mcp = mcp.inner().clone();
+    let stopped = tauri::async_runtime::block_on(mcp.shutdown_within(MCP_EXIT_GRACE));
+    if !stopped {
+        tracing::warn!(
+            "mcp server did not stop within {MCP_EXIT_GRACE:?}: its file was removed, exiting without waiting"
+        );
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -43,7 +65,24 @@ pub fn run() {
             let policy = crate::policy::sources::load();
             tracing::info!(managed = policy.status.managed, "policy");
             let st = AppState::new(&dir, Arc::new(KeyringStore::default()))?.with_policy(policy);
+            let handle = app.handle().clone();
+            st.health.set_notify(Arc::new(move |id: &str| {
+                let payload = serde_json::json!({ "connectionId": id });
+                if let Err(e) = handle.emit(crate::health::CHANGED_EVENT, payload) {
+                    tracing::warn!("health event not sent: {e}");
+                }
+            }));
+            if crate::mcp::files::data_dir().as_deref() != Some(dir.as_path()) {
+                tracing::warn!(
+                    shim = ?crate::mcp::files::data_dir(),
+                    "mcp: the shim looks for mcp.json in another data directory"
+                );
+            }
+            let mcp = crate::mcp::McpController::new(st.clone(), &dir);
+            mcp.set_ui(Box::new(crate::mcp::TauriUi(app.handle().clone())));
             app.manage(st);
+            app.manage(mcp.clone());
+            tauri::async_runtime::spawn(async move { mcp.apply().await });
             Ok(())
         })
         // Окно одно, и его каналы сессий живут, пока жива страница. Перезагрузка (Cmd+R, полная
@@ -103,7 +142,26 @@ pub fn run() {
             commands::objects::list_pvcs,
             commands::objects::get_quotas,
             commands::objects::get_yaml,
+            commands::health::run_health_check,
+            commands::health::get_health,
+            commands::health::set_finding_ignored,
+            commands::health::set_annotation_status,
+            commands::health::delete_annotation,
+            commands::health::delete_all_annotations,
+            commands::mcp::get_mcp_status,
+            commands::mcp::set_mcp_enabled,
+            commands::mcp::answer_mcp_approval,
+            commands::mcp::revoke_mcp_client,
+            commands::mcp::disconnect_mcp_sessions,
+            commands::mcp::get_mcp_audit,
+            commands::mcp::get_mcp_client_configs,
+            commands::mcp::reveal_mcp_audit,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while building tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                shutdown_mcp(app);
+            }
+        });
 }

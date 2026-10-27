@@ -6,6 +6,9 @@ import { api } from "../../api/client";
 import type { ClusterOverview, OpenShiftOverview, OperatorRow, Part } from "../../api/types";
 import { useRefetchInterval } from "../../lib/tabActive";
 import { Hint } from "../common/Hint";
+import { CheckBar } from "../health/CheckBar";
+import { matchCluster } from "../health/findings";
+import { HealthBlock } from "../health/HealthBlock";
 import { PartView, Unavailable } from "../common/PartView";
 import { ReadError } from "../common/ReadError";
 import { RefreshControls, useRefreshInterval } from "../common/RefreshControls";
@@ -59,6 +62,8 @@ export function ClusterOverviewView({ connectionId }: { connectionId: string }) 
         <h3>{t("cluster.overview.title")}</h3>
         <RefreshControls interval={interval} onInterval={setRefreshInterval} onRefresh={() => void q.refetch()} busy={q.isFetching} />
       </div>
+      <CheckBar connectionId={connectionId} allLink />
+      <HealthBlock connectionId={connectionId} match={matchCluster} showTarget />
       {q.isPending && <p className="muted">{t("common.loading")}</p>}
       {q.error && <ReadError error={q.error} connectionId={connectionId} onRetry={() => void q.refetch()} />}
       {o && (

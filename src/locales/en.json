@@ -161,6 +161,15 @@
       "lost": "The log stream was lost and did not recover in 60 s",
       "badSinceTime": "Invalid start time “{{value}}”: use RFC 3339, for example 2026-10-25T10:00:00Z",
       "saveStopped": "Saving the log was stopped: the connection was closed"
+    },
+    "health": {
+      "annotationNotFound": "The note was deleted or has expired"
+    },
+    "mcp": {
+      "startFailed": "The MCP server did not start: {{error}}",
+      "disabledByPolicy": "MCP is disabled by your organization",
+      "noExe": "Cannot find the Glafira executable: {{error}}",
+      "auditMissing": "The MCP log is not available yet: {{error}}"
     }
   },
   "messages": {
@@ -201,7 +210,9 @@
       "proxy": "System — the <code>HTTPS_PROXY</code> and <code>NO_PROXY</code> variables. Or an explicit address like <code>http://proxy:3128</code>.",
       "favorites": "Shown first in the tree. Separate with commas.",
       "manualNamespaces": "If the cluster does not let you list projects, list the ones you work with here.",
-      "test": "Checks step by step: address, TLS, sign-in, platform and projects. Unsaved fields are tested too."
+      "test": "Checks step by step: address, TLS, sign-in, platform and projects. Unsaved fields are tested too.",
+      "llmAccess": "What an LLM assistant connected over MCP may read. Metadata: objects, statuses, events, quotas — no secret, env or ConfigMap values. Off: the LLM does not see this connection.",
+      "llmScope": "Projects the LLM may read; an empty list means it sees no projects. The cluster itself and nodes stay visible if you can read them. The setting stays on this computer: export does not write it."
     },
     "cluster": {
       "platform": "Detected from the API groups and the version: OpenShift, or Kubernetes with its distribution (EKS, GKE, AKS, Rancher, Deckhouse, k3s, RKE2).",
@@ -217,6 +228,13 @@
     },
     "logs": {
       "filter": "The filter runs in Glafira before the lines reach the window: a substring or a regular expression (regex). Lines that do not match are counted but not shown."
+    },
+    "settings": {
+      "mcpEnable": "Starts a local MCP server for LLM assistants. Access is opened per connection and is off by default; each new client is confirmed in a dialog."
+    },
+    "health": {
+      "check": "Runs the built-in Glafira rules over the cluster, its nodes and up to 50 projects. Severity depends on the connection environment. The check only reads the cluster.",
+      "hidden": "Findings you hid for a particular object. They are not counted in badges; LLM assistants see them marked as hidden."
     }
   },
   "connections": {
@@ -288,7 +306,14 @@
         "auth": "Sign-in",
         "discovery": "Platform",
         "projects": "Projects"
-      }
+      },
+      "llmAccess": "LLM access (MCP)",
+      "llmAccessOff": "Off",
+      "llmAccessMetadata": "Metadata only",
+      "llmScope": "Projects for the LLM",
+      "llmScopeAll": "All available",
+      "llmScopeList": "Only these",
+      "llmNamespaces": "LLM projects"
     }
   },
   "cluster": {
@@ -415,7 +440,9 @@
     "projectsFilter": "Filter projects",
     "projectsFromProfile": "The cluster does not list projects for you — the projects of the profile are shown",
     "noProjects": "No projects",
-    "noProjectsFromProfile": "The cluster does not list projects for you, and the profile has none"
+    "noProjectsFromProfile": "The cluster does not list projects for you, and the profile has none",
+    "llmAccess": "Open to LLM assistants over MCP",
+    "findings": "Findings"
   },
   "settings": {
     "title": "Settings",
@@ -425,6 +452,59 @@
       "system": "System default ({{name}})",
       "systemUnknown": "System default",
       "policy": "The language is set by your organization"
+    },
+    "mcp": {
+      "section": "LLM assistants (MCP)",
+      "intro": "An LLM assistant (Claude Desktop, Claude Code, Cursor and others) can connect to Glafira over MCP, read the metadata of the connections you open for it, run a cluster check and leave notes. It cannot change anything in the clusters.",
+      "enable": "Allow the MCP server",
+      "policy": "MCP is disabled by your organization",
+      "state": {
+        "off": "The server is off",
+        "running": "The server is running",
+        "otherInstance": "MCP is served by another Glafira window",
+        "error": "The server did not start",
+        "disabledByPolicy": "Disabled by your organization"
+      },
+      "connectTitle": "Connect a client",
+      "connectHint": "Add Glafira to the client's MCP servers and restart the client. If Glafira is not running, the client starts it.",
+      "claudeDesktop": "Claude Desktop: add to claude_desktop_config.json",
+      "claudeCode": "Claude Code: run in a terminal",
+      "otherClient": "Other stdio clients: command and arguments",
+      "copy": "Copy",
+      "copied": "Copied",
+      "sessions": "Active sessions",
+      "noSessions": "No clients are connected.",
+      "colClient": "Client",
+      "colSince": "Connected",
+      "colCalls": "Calls",
+      "waiting": "waiting for approval",
+      "disconnect": "Disconnect",
+      "disconnectAll": "Disconnect all",
+      "clients": "Approved clients",
+      "noClients": "No approved clients yet.",
+      "colFirstSeen": "First connected",
+      "colLastSeen": "Last connected",
+      "revoke": "Revoke",
+      "audit": {
+        "title": "MCP log",
+        "refresh": "Refresh",
+        "reveal": "Show file",
+        "empty": "The log is empty.",
+        "colTime": "Time",
+        "colWhat": "Tool or event",
+        "colConnection": "Connection",
+        "colResult": "Result",
+        "colMs": "ms",
+        "ok": "success",
+        "error": "error",
+        "sessionStarted": "Session opened",
+        "sessionEnded": "Session closed",
+        "approved": "Client approved",
+        "rejected": "Client rejected",
+        "revoked": "Client access revoked",
+        "serverStarted": "Server started",
+        "serverStopped": "Server stopped"
+      }
     }
   },
   "help": {
@@ -479,7 +559,8 @@
     "connection": "Connection: {{name}}",
     "newConnection": "New connection",
     "cluster": "{{conn}} · Overview",
-    "nodes": "{{conn}} · Nodes"
+    "nodes": "{{conn}} · Nodes",
+    "findings": "{{conn}} · Findings"
   },
   "layout": {
     "closeTab": "Close tab",
@@ -717,5 +798,327 @@
     "followPrevious": "The previous run has already finished — there is nothing to follow",
     "dropped_one": "The window keeps the last {{max, number}} lines; {{count, number}} older line was dropped",
     "dropped_other": "The window keeps the last {{max, number}} lines; {{count, number}} older lines were dropped"
+  },
+  "mcp": {
+    "unknownClient": "Unknown MCP client",
+    "approval": {
+      "title": "{{client}} wants to connect to Glafira",
+      "body": "It will see the metadata of connections open to LLM assistants: {{n}}.",
+      "readOnly": "Through Glafira the assistant can only read projects, workloads, pods, events, network and quotas, run a check and leave notes in Glafira. Secret values, logs and passwords are not shared.",
+      "unnamed": "The client did not send its name, so the answer applies to this session only.",
+      "more": "Waiting for an answer: {{n}} more",
+      "allow": "Allow",
+      "reject": "Reject"
+    },
+    "indicator": {
+      "one": "LLM: {{client}}",
+      "many": "LLM clients: {{n}}",
+      "title": "MCP sessions: open Settings"
+    }
+  },
+  "health": {
+    "title": "Findings",
+    "check": "Check the cluster",
+    "checking": "Checking…",
+    "never": "The cluster has not been checked yet.",
+    "last": "Last check: {{when}} · {{who}}",
+    "byUi": "in Glafira",
+    "scope": "Projects: {{checked}} of {{total}}; pods: {{pods}}; nodes: {{nodes}}",
+    "nodesUnknown": "not read",
+    "scopeRequested": "Projects requested by the LLM: {{projects}}",
+    "partial": "checked partially",
+    "checkedAs": "checked as {{env}}",
+    "filterSeverity": "Severity",
+    "allSeverities": "Any severity",
+    "filterSource": "Source",
+    "allSources": "All sources",
+    "sourceRules": "Rules",
+    "sourceLlm": "LLM notes",
+    "filterKind": "Object",
+    "allKinds": "All objects",
+    "search": "Search by name or project",
+    "showHidden": "Show hidden ({{count}})",
+    "hide": "Hide for this object",
+    "restore": "Restore",
+    "groupSize": "objects: {{count}}",
+    "noFindings": "No findings: the rules found no problems.",
+    "nothingMatches": "Nothing matches the filters.",
+    "allHidden": "All findings are hidden. Turn on “Show hidden” to see them.",
+    "fix": "What to do:",
+    "notes": "LLM notes",
+    "noteBy": "LLM note · {{client}}",
+    "resolve": "Resolved",
+    "dismiss": "Not relevant",
+    "reopen": "Reopen",
+    "deleteAll": "Delete all LLM notes",
+    "deleteAllConfirm": "Delete all LLM notes of this connection?",
+    "closedNotes": "Closed ({{count}})",
+    "noNotes": "No LLM notes.",
+    "llmNotes": "LLM assistants connected over MCP can leave notes here about the cluster, projects and their objects.",
+    "status": {
+      "resolved": "resolved",
+      "dismissed": "not relevant"
+    },
+    "allFindings": "All findings",
+    "badgeTitle": "Need attention: {{count}}",
+    "severity": {
+      "critical": "Critical",
+      "warning": "Warning",
+      "info": "Info"
+    },
+    "podsIn": " in {{count}} of {{total}} pods ({{pods}})",
+    "partialParts": {
+      "projects": "only {{checked}} of {{total}} projects were checked (limit 50)",
+      "pods": "only the first 5000 pods were checked",
+      "timedOut": "the check stopped at its 45 s deadline",
+      "gaps": "not read: {{gaps}}"
+    },
+    "kind": {
+      "cluster": "Cluster",
+      "node": "Node",
+      "project": "Project",
+      "workload": "Workload",
+      "pod": "Pod",
+      "service": "Service",
+      "route": "Route",
+      "ingress": "Ingress",
+      "httproute": "HTTPRoute",
+      "grpcroute": "GRPCRoute",
+      "gateway": "Gateway",
+      "pvc": "PVC",
+      "hpa": "HPA",
+      "quota": "ResourceQuota"
+    },
+    "object": {
+      "cluster": "the cluster",
+      "node": "node {{name}}",
+      "project": "project {{project}}",
+      "workload": "{{workloadKind}} {{project}}/{{name}}",
+      "pod": "pod {{project}}/{{name}}",
+      "service": "Service {{project}}/{{name}}",
+      "route": "Route {{project}}/{{name}}",
+      "ingress": "Ingress {{project}}/{{name}}",
+      "httproute": "HTTPRoute {{project}}/{{name}}",
+      "grpcroute": "GRPCRoute {{project}}/{{name}}",
+      "gateway": "Gateway {{project}}/{{name}}",
+      "pvc": "PVC {{project}}/{{name}}",
+      "hpa": "HPA {{project}}/{{name}}",
+      "quota": "ResourceQuota {{project}}/{{name}}"
+    },
+    "ruleNames": {
+      "cluster.apiNotReady": "API server not ready",
+      "cluster.operatorDegraded": "Degraded ClusterOperators",
+      "cluster.updateFailing": "Cluster update failing",
+      "cluster.mcpDegraded": "Degraded MachineConfigPools",
+      "node.notReady": "Nodes not ready",
+      "node.pressure": "Nodes under pressure",
+      "node.requestsHigh": "Nodes almost fully requested",
+      "node.unschedulable": "Cordoned nodes",
+      "pod.crashLoop": "Restart loops",
+      "pod.imagePull": "Images not pulled",
+      "pod.pending": "Pending pods",
+      "pod.oomKilled": "OOMKilled containers",
+      "pod.restartsFrequent": "Frequent restarts",
+      "workload.unavailable": "Unavailable workloads",
+      "workload.rolloutStuck": "Stuck rollouts",
+      "workload.singleReplica": "Single replica",
+      "container.noRequests": "No requests",
+      "container.noMemoryLimit": "No memory limit",
+      "container.noReadinessProbe": "No readiness probe",
+      "container.latestTag": "latest tag",
+      "quota.nearLimit": "Quotas almost used up",
+      "pvc.pending": "PVCs not bound",
+      "hpa.atMax": "HPAs at maximum",
+      "hpa.unableToScale": "HPAs unable to scale",
+      "service.noEndpoints": "Services without endpoints",
+      "route.notAdmitted": "Routes not admitted",
+      "route.certExpiring": "Route certificates expiring",
+      "ingress.classMissing": "Ingress class missing",
+      "ingress.backendMissing": "Ingress backends missing",
+      "ingress.tlsSecretMissing": "Ingress TLS Secrets missing",
+      "gatewayRoute.notAccepted": "Routes not accepted by Gateways",
+      "gatewayRoute.refsUnresolved": "Route references unresolved",
+      "gateway.notProgrammed": "Gateways not programmed",
+      "check.partial": "Incomplete check"
+    },
+    "rules": {
+      "cluster.apiNotReady": {
+        "title": "API server is not ready",
+        "details": "/readyz reports failed checks: {{failed}}. Requests to the cluster may fail or be slow until they pass.",
+        "fix": "Check the control plane: etcd, the API server logs and the control-plane nodes."
+      },
+      "cluster.operatorDegraded": {
+        "title": "ClusterOperators are degraded or unavailable",
+        "details": "ClusterOperators with Degraded=True or Available=False: {{names}} (total {{count}}).",
+        "fix": "Open the operators on the cluster overview: the cause is usually in the pods and events of the operator's project."
+      },
+      "cluster.updateFailing": {
+        "title": "Cluster update is failing",
+        "details": "ClusterVersion reports Failing=True{{because}}: the cluster cannot complete its update.",
+        "fix": "Check the ClusterVersion conditions and the operators that block the update."
+      },
+      "cluster.mcpDegraded": {
+        "title": "MachineConfigPools are degraded",
+        "details": "MachineConfigPools with Degraded=True: {{pools}} (total {{count}}). Nodes of these pools do not get configuration updates.",
+        "fix": "Check the pool conditions and the machine-config-daemon logs on its nodes."
+      },
+      "node.notReady": {
+        "title": "Node {{name}} is not ready",
+        "details": "The Ready condition is {{status}}{{because}}: pods on the node may be evicted and new pods are not scheduled there.",
+        "fix": "Check the kubelet and the container runtime on the node, its network and its disk."
+      },
+      "node.pressure": {
+        "title": "Node {{name}} is under pressure",
+        "details": "Conditions that are True: {{conditions}}. The kubelet evicts pods and refuses new ones until the pressure goes away.",
+        "fix": "Free memory, disk or process IDs on the node, or move some workloads to other nodes."
+      },
+      "node.requestsHigh": {
+        "title": "Node {{name}} is almost fully requested",
+        "details": "Pods on the node request {{cpuPercent}}% of its allocatable CPU and {{memoryPercent}}% of its memory: new pods may not fit.",
+        "fix": "Add nodes or lower the requests of pods that request more than they use."
+      },
+      "node.unschedulable": {
+        "title": "Node {{name}} is cordoned",
+        "details": "spec.unschedulable is set: no new pods are scheduled on the node.",
+        "fix": "If the maintenance is over, uncordon the node (kubectl uncordon)."
+      },
+      "pod.crashLoop": {
+        "title": "{{object}}: containers restart in a loop",
+        "details": "Containers {{containers}} keep crashing{{affected}}: last exit {{reason}}, exit code {{exitCode}}, up to {{restarts}} restarts.",
+        "fix": "Read the logs of the previous run of the container and the pod events: the cause is usually in the application or its configuration."
+      },
+      "pod.imagePull": {
+        "title": "{{object}}: image cannot be pulled",
+        "details": "Image {{image}} cannot be pulled{{affected}}{{because}}.",
+        "fix": "Check the image name and tag, that the registry is reachable from the nodes, and the pull secret."
+      },
+      "pod.pending": {
+        "title": "{{object}}: Pending for too long",
+        "details": "Pending for more than 5 minutes (up to {{minutes}} min){{affected}}{{because}}.",
+        "fix": "Look at the pod events: usually the scheduler finds no node with enough resources and matching selectors and tolerations, or a volume is not ready."
+      },
+      "pod.oomKilled": {
+        "title": "{{object}}: containers were OOMKilled",
+        "details": "Containers {{containers}} were killed for exceeding their memory limit in the last 24 hours{{affected}}.",
+        "fix": "Raise the memory limit or find out why the application needs more memory."
+      },
+      "pod.restartsFrequent": {
+        "title": "{{object}}: frequent restarts",
+        "details": "Containers restarted at least 5 times (up to {{restarts}}){{affected}}, the last time {{lastRestartMinutes}} min ago.",
+        "fix": "Read the logs of the previous run and the pod events; check the liveness probe and the memory limit."
+      },
+      "workload.unavailable": {
+        "title": "{{object}} is unavailable",
+        "details": "Only {{available}} of {{desired}} desired replicas have been available for more than 5 minutes (about {{minutes}} min).",
+        "fix": "Open the pods and events of the workload and find out why the pods are not ready."
+      },
+      "workload.rolloutStuck": {
+        "title": "{{object}}: rollout is stuck",
+        "details": "Progressing=False with ProgressDeadlineExceeded{{because}}: new pods did not become available in time.",
+        "fix": "Check the pods of the new ReplicaSet; roll back if the new version does not start."
+      },
+      "workload.singleReplica": {
+        "title": "{{object}} runs a single replica",
+        "details": "One replica and no HPA: a restart, a node drain or an update makes it unavailable.",
+        "detailsHpa": "One replica and HPA {{hpa}} with minReplicas = 1: a restart, a node drain or an update makes it unavailable.",
+        "fix": "Run at least two replicas (or minReplicas ≥ 2) and add a PodDisruptionBudget."
+      },
+      "container.noRequests": {
+        "title": "{{object}}: containers without requests",
+        "details": "Running containers without a CPU request: {{cpu}}; without a memory request: {{memory}} (after LimitRange defaults).",
+        "fix": "Set requests close to the real usage: the scheduler places pods by them, and pods without requests are evicted first."
+      },
+      "container.noMemoryLimit": {
+        "title": "{{object}}: containers without a memory limit",
+        "details": "Running containers without a memory limit: {{containers}}.",
+        "fix": "Set a memory limit: one leaking container can starve the whole node."
+      },
+      "container.noReadinessProbe": {
+        "title": "{{object}}: containers without a readiness probe",
+        "details": "Containers without a readiness probe: {{containers}}.",
+        "fix": "Add a readiness probe: without it, traffic reaches pods before they are ready, also during rollouts."
+      },
+      "container.latestTag": {
+        "title": "{{object}}: images with the latest tag",
+        "details": "Running containers use images tagged latest or without a tag: {{images}}.",
+        "fix": "Pin a version tag or a digest: otherwise pods may run different versions after restarts."
+      },
+      "quota.nearLimit": {
+        "title": "{{object}} is almost used up",
+        "details": "Resources used at 90% or more: {{resources}}.",
+        "fix": "Raise the quota or free resources: new pods and objects are rejected once it is exceeded."
+      },
+      "pvc.pending": {
+        "title": "{{object}} is {{phase}}",
+        "details": "The claim has been Pending for more than 5 minutes (about {{minutes}} min) while pods {{pods}} wait for it (storage class {{class}}).",
+        "detailsLost": "The bound volume is lost: pods that use it cannot start.",
+        "fix": "Check the storage class, its provisioner and the claim events."
+      },
+      "hpa.atMax": {
+        "title": "{{object}} is at its maximum",
+        "details": "ScalingLimited=True with TooManyReplicas: {{target}} needs more than maxReplicas = {{maxReplicas}}.",
+        "fix": "Raise maxReplicas or reduce the load per replica."
+      },
+      "hpa.unableToScale": {
+        "title": "{{object}} cannot scale",
+        "details": "{{condition}}=False{{because}}: the HPA does not change the replicas of {{target}}.",
+        "fix": "Check that metrics are available (metrics-server or an adapter) and that the target pods have requests for the scaled resource."
+      },
+      "service.noEndpoints": {
+        "title": "{{object}} has no ready endpoints",
+        "details": "The Service selects no ready pods: requests to it fail.",
+        "detailsUsedBy": "The Service selects no ready pods: requests to it fail. It is used by {{referencedBy}}.",
+        "fix": "Compare the Service selector with the pod labels and find out why the pods are not ready."
+      },
+      "route.notAdmitted": {
+        "title": "{{object}} is not admitted",
+        "details": "Admitted=False{{because}}: the Route does not serve traffic.",
+        "detailsNoStatus": "No router has admitted the Route (it has no status): it does not serve traffic.",
+        "fix": "Check whether another Route already uses the host, and the router shard selectors."
+      },
+      "route.certExpiring": {
+        "title": "{{object}}: certificate expires",
+        "details": "The certificate in spec.tls expires in {{days}} day(s).",
+        "detailsExpired": "The certificate in spec.tls expired {{daysAgo}} day(s) ago: clients reject the connection.",
+        "fix": "Renew the certificate in the Route."
+      },
+      "ingress.classMissing": {
+        "title": "{{object}}: ingress class is missing",
+        "details": "IngressClass {{class}} does not exist: no controller serves this Ingress.",
+        "detailsNoClass": "The Ingress names no class and there is no default IngressClass: no controller may serve it.",
+        "fix": "Set spec.ingressClassName to an existing class or mark one class as the default."
+      },
+      "ingress.backendMissing": {
+        "title": "{{object}}: backend is missing",
+        "details": "Services that do not exist in the project: {{services}}; ports missing on existing Services: {{ports}}. Requests to these paths fail.",
+        "fix": "Fix the backend names and ports in the Ingress rules or create the missing Services."
+      },
+      "ingress.tlsSecretMissing": {
+        "title": "{{object}}: TLS Secret is missing",
+        "details": "Secrets from spec.tls have not been found for more than 5 minutes: {{secrets}}. The controller serves its default certificate instead.",
+        "fix": "Create the Secrets or fix their names in spec.tls; check whether cert-manager fails to issue them."
+      },
+      "gatewayRoute.notAccepted": {
+        "title": "{{object}} is not accepted",
+        "details": "Gateways {{parents}} did not accept the route{{because}}: its rules do not apply there.",
+        "fix": "Check the parentRefs, the allowedRoutes of the listeners and the hostnames."
+      },
+      "gatewayRoute.refsUnresolved": {
+        "title": "{{object}}: references are unresolved",
+        "details": "ResolvedRefs=False{{because}} on {{parents}}: some backends are missing or not permitted.",
+        "fix": "Check the backendRefs and, for other namespaces, the ReferenceGrant."
+      },
+      "gateway.notProgrammed": {
+        "title": "{{object}} is not programmed",
+        "details": "{{condition}}=False for more than 5 minutes{{because}}: the Gateway does not serve traffic.",
+        "fix": "Check the GatewayClass and the controller that implements it."
+      },
+      "check.partial": {
+        "title": "The check is incomplete",
+        "details": "Some objects were not checked: {{parts}}. Findings may be missing for them.",
+        "detailsUnknown": "Some objects were not checked: findings may be missing for them.",
+        "fix": "Check as a user who can read more, or check fewer projects; the permissions are on the cluster overview."
+      }
+    }
   }
 }

@@ -7,7 +7,7 @@ vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 
 vi.mock("../../api/client", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../../api/client")>();
-  return { ...orig, api: { getClusterOverview: vi.fn(), listClusterOperators: vi.fn(), connect: vi.fn() } };
+  return { ...orig, api: { getHealth: vi.fn().mockResolvedValue({ lastCheck: null, ignored: [], annotations: [] }), listConnections: vi.fn().mockResolvedValue([]), getClusterOverview: vi.fn(), listClusterOperators: vi.fn(), connect: vi.fn() } };
 });
 
 import { openUrl } from "@tauri-apps/plugin-opener";

@@ -46,7 +46,11 @@ async fn admin_certificate_passes_every_step() {
         "у администратора kind есть группы"
     );
     assert!(r.steps[3].message.params["groups"].contains("system:authenticated"));
-    assert_eq!(r.steps[4].message.key, "messages.connectionTest.discovery");
+    // На стенде — CRD Route и Gateway API (dev/kind/crds.yaml): шаг называет найденные группы.
+    assert_eq!(
+        r.steps[4].message.key,
+        "messages.connectionTest.discoveryGroups"
+    );
     assert!(r.steps[4].message.params["platform"].starts_with("Kubernetes 1."));
     let c = pool::open(profile, secrets, no_cancel()).await.unwrap();
     assert_eq!(c.info.platform.kind, PlatformKind::Kubernetes);
@@ -54,7 +58,11 @@ async fn admin_certificate_passes_every_step() {
         c.info.platform.distribution, None,
         "kind — без дистрибутива"
     );
-    assert!(!c.info.api_groups.routes && !c.info.api_groups.projects);
+    assert!(c.info.api_groups.routes && c.info.api_groups.gateway_api);
+    assert!(
+        !c.info.api_groups.projects && !c.info.api_groups.deployment_configs,
+        "проектов и DeploymentConfig OpenShift на стенде нет"
+    );
     assert!(
         c.info.capabilities.list_nodes,
         "у администратора kind есть права на ноды"
@@ -89,8 +97,16 @@ async fn service_account_sees_only_its_project() {
     assert!(!c.info.capabilities.list_projects);
     // Роль edit есть только в team-a: права проверяются и в обе стороны.
     let limit = std::time::Duration::from_secs(10);
-    let create =
-        |ns: &'static str| can_i(&c.client, limit, "create", "apps", "deployments", Some(ns));
+    let create = |ns: &'static str| {
+        can_i(
+            c.kube_client(),
+            limit,
+            "create",
+            "apps",
+            "deployments",
+            Some(ns),
+        )
+    };
     assert!(create("team-a").await, "роль edit в team-a");
     assert!(!create("default").await, "в default прав нет");
 }

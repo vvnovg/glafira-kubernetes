@@ -355,7 +355,7 @@ struct DcStatus {
 /// в шаблоне) — ошибка, а не строка из пустого объекта с ложной проблемой.
 fn parse_deployment_config(o: &DynamicObject) -> AppResult<Parsed> {
     let dc = DeploymentConfigData::deserialize(&o.data)
-        .map_err(|e| malformed("DeploymentConfig", &name(&o.metadata), e))?;
+        .map_err(|_| malformed("DeploymentConfig", &name(&o.metadata)))?;
     let mut r = row(
         WorkloadKind::DeploymentConfig,
         &o.metadata,
@@ -429,25 +429,53 @@ pub async fn list_kind(
     namespace: &str,
     kind: WorkloadKind,
 ) -> AppResult<(Listed<WorkloadRow>, Option<AppError>)> {
+    let (facts, skipped) = list_facts(r, namespace, kind).await?;
+    Ok((facts.map(|f| f.row), skipped))
+}
+
+/// Workload вместе с условиями и шаблоном подов — для проверки (спец. §8).
+#[derive(Debug, Clone)]
+pub struct WorkloadFacts {
+    pub row: WorkloadRow,
+    pub conditions: Vec<ConditionView>,
+    pub template: Option<PodTemplateSpec>,
+}
+
+impl From<Parsed> for WorkloadFacts {
+    fn from(p: Parsed) -> Self {
+        Self {
+            row: p.row,
+            conditions: p.conditions,
+            template: p.template,
+        }
+    }
+}
+
+/// Как `list_kind`, но с условиями и шаблоном подов каждого workload'а.
+pub async fn list_facts(
+    r: &ReadClient,
+    namespace: &str,
+    kind: WorkloadKind,
+) -> AppResult<(Listed<WorkloadFacts>, Option<AppError>)> {
     let lp = ListParams::default();
     let ns = Some(namespace);
     macro_rules! typed {
         ($t:ty, $f:ident) => {
-            (r.list::<$t>(ns, &lp).await?.map(|o| $f(&o)), None)
+            (r.list::<$t>(ns, &lp).await?.map(|o| $f(&o).into()), None)
         };
     }
     Ok(match kind {
-        WorkloadKind::Deployment => typed!(Deployment, deployment_row),
-        WorkloadKind::StatefulSet => typed!(StatefulSet, stateful_set_row),
-        WorkloadKind::DaemonSet => typed!(DaemonSet, daemon_set_row),
-        WorkloadKind::Job => typed!(Job, job_row),
-        WorkloadKind::CronJob => typed!(CronJob, cron_job_row),
+        WorkloadKind::Deployment => typed!(Deployment, parse_deployment),
+        WorkloadKind::StatefulSet => typed!(StatefulSet, parse_stateful_set),
+        WorkloadKind::DaemonSet => typed!(DaemonSet, parse_daemon_set),
+        WorkloadKind::Job => typed!(Job, parse_job),
+        WorkloadKind::CronJob => typed!(CronJob, parse_cron_job),
         WorkloadKind::DeploymentConfig => {
             let l = r.list_dynamic(&deployment_configs(), ns, &lp).await?;
             let (mut items, mut skipped) = (Vec::new(), None);
             for o in &l.items {
                 match parse_deployment_config(o) {
-                    Ok(p) => items.push(p.row),
+                    Ok(p) => items.push(p.into()),
                     Err(e) => {
                         skipped.get_or_insert(e);
                     }
@@ -620,6 +648,9 @@ pub struct WorkloadDetails {
     pub pdb: Part<Option<PdbView>>,
     /// История выкладки; у Job и CronJob её нет.
     pub history: Option<Part<Vec<Revision>>>,
+    /// Тома шаблона подов — только для MCP (интерфейс показывает тома на вкладке пода).
+    #[serde(skip)]
+    pub volumes: Vec<crate::k8s::pods::VolumeView>,
 }
 
 fn owned_by(meta: &ObjectMeta, uid: Option<&str>) -> bool {
@@ -848,8 +879,26 @@ pub async fn get_workload(
         hpa,
         pdb,
         history,
+        volumes: p
+            .template
+            .as_ref()
+            .and_then(|t| t.spec.as_ref())
+            .map(crate::k8s::pods::volumes_of)
+            .unwrap_or_default(),
         workload: p.row,
     })
+}
+
+/// Строка workload'а и селектор его подов без HPA, PDB и истории — для частого чтения
+/// (наблюдение MCP за workload'ом).
+pub async fn get_row(
+    r: &ReadClient,
+    namespace: &str,
+    kind: WorkloadKind,
+    workload: &str,
+) -> AppResult<(WorkloadRow, Option<String>)> {
+    let p = parsed(r, namespace, kind, workload).await?;
+    Ok((p.row, p.selector))
 }
 
 #[cfg(test)]
@@ -1376,7 +1425,10 @@ mod tests {
             ("DeploymentConfig", "broken"),
             "ошибка первого из пропущенных"
         );
-        assert!(e.error.details.as_deref().unwrap().contains("null"));
+        assert_eq!(
+            e.error.details, None,
+            "текст serde (он цитирует значения полей) в ошибку не попадает"
+        );
 
         let e = get_workload(&r, "team-a", WorkloadKind::DeploymentConfig, "broken")
             .await

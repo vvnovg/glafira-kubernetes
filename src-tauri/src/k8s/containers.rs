@@ -22,6 +22,12 @@ pub struct ContainerSpecView {
     pub readiness: Option<String>,
     pub startup: Option<String>,
     pub env: Vec<EnvView>,
+    /// `command` и `args` — только для MCP: крейт шлюза маскирует их (спец. §10.3). Интерфейс их
+    /// не получает (обзор контейнера показывает env именами), их видно в YAML.
+    #[serde(skip)]
+    pub command: Vec<String>,
+    #[serde(skip)]
+    pub args: Vec<String>,
 }
 
 /// Переменная окружения: имя и откуда берётся значение (само значение не показывается).
@@ -167,6 +173,8 @@ pub fn container_view(c: &Container, init: bool) -> ContainerSpecView {
         readiness: c.readiness_probe.as_ref().map(probe_text),
         startup: c.startup_probe.as_ref().map(probe_text),
         env: env_views(c),
+        command: c.command.clone().unwrap_or_default(),
+        args: c.args.clone().unwrap_or_default(),
     }
 }
 

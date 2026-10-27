@@ -29,3 +29,6 @@ dist-ssr
 
 # Стенд kind: kubeconfig с ключом администратора и токеном
 dev/kind/out/
+
+# Сборка крейтов MCP-шлюза
+/crates/*/target/

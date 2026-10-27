@@ -5,6 +5,8 @@ export type TabSpec =
   /** Обзор подключения и кластера: кто вошёл, права, API-сервер, ноды, у OpenShift — обновления и операторы. */
   | { kind: "cluster"; connectionId: string }
   | { kind: "nodes"; connectionId: string }
+  /** Находки проверки кластера и замечания LLM подключения. */
+  | { kind: "findings"; connectionId: string }
   | { kind: "project"; connectionId: string; namespace: string }
   | { kind: "workload"; connectionId: string; namespace: string; workloadKind: WorkloadKind; name: string }
   | { kind: "pod"; connectionId: string; namespace: string; name: string }

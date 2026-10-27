@@ -119,7 +119,56 @@
 | `src/components/TabContent.tsx` | `src/components/TabContent.tsx` | `8bbd0bd` | адаптирован: вкладки O1 |
 | `deny.toml` | `deny.toml` | `8bbd0bd` | адаптирован: без C-библиотек librdkafka и OpenSSL |
 | `.github/FUNDING.yml` | `.github/FUNDING.yml` | `8bbd0bd` | адаптирован: адрес поддержки |
-| `.github/workflows/ci.yml` | `.github/workflows/ci.yml` | `8bbd0bd` | адаптирован: без Kafka и MCP-крейта, стенд kind |
+| `.github/workflows/ci.yml` | `.github/workflows/ci.yml` | `8bbd0bd` | адаптирован: без Kafka, стенд kind, крейты MCP-шлюза |
 | `docs/i18n/README.md` | `docs/i18n/README.md` | `8bbd0bd` | адаптирован: языки en и ru, без Kafka |
 | `docs/i18n/glossary.md` | `docs/i18n/glossary.md` | `8bbd0bd` | адаптирован: термины Kubernetes и OpenShift, en и ru |
 | `src-tauri/src/der.rs` | `src-tauri/src/tls/der.rs` | `8bbd0bd` | адаптирован: комментарий модуля |
+| `crates/glafira-mcp-core/Cargo.toml` | `crates/glafira-mcp/Cargo.toml` | `8bbd0bd` | адаптирован: только транспорт и сессии, без schemars |
+| `crates/glafira-mcp-core/src/endpoint.rs` | `crates/glafira-mcp/src/endpoint.rs` | `8bbd0bd` | адаптирован: имя продукта — параметр `choose` |
+| `crates/glafira-mcp-core/src/handshake.rs` | `crates/glafira-mcp/src/handshake.rs` | `8bbd0bd` | адаптирован: ссылка на спеку |
+| `crates/glafira-mcp-core/src/audit.rs` | `crates/glafira-mcp/src/audit.rs` | `8bbd0bd` | адаптирован: ссылка на спеку |
+| `crates/glafira-mcp-core/src/limits.rs` | `crates/glafira-mcp/src/limits.rs` | `8bbd0bd` | адаптирован: комментарии |
+| `crates/glafira-mcp-core/src/fit.rs` | `crates/glafira-mcp/src/rules.rs` | `8bbd0bd` | адаптирован: без конфигов Kafka — фильтр, страницы и предел ответа |
+| `crates/glafira-mcp-core/src/session.rs` | `crates/glafira-mcp/src/model.rs` | `8bbd0bd` | адаптирован: только сессия, право, ошибка и `Hooks` |
+| `crates/glafira-mcp-core/src/server.rs` | `crates/glafira-mcp/src/server/mod.rs` | `8bbd0bd` | адаптирован: обвязка вызова без доменных типов, обработчик продукта создаёт `make` |
+| `crates/glafira-mcp-core/src/bin/gui_stdio_probe.rs` | `crates/glafira-mcp/src/bin/gui_stdio_probe.rs` | `8bbd0bd` | как есть |
+| `crates/glafira-mcp-core/tests/gui_stdio.rs` | `crates/glafira-mcp/tests/gui_stdio.rs` | `8bbd0bd` | как есть |
+| `crates/glafira-mcp-core/tests/manifest.rs` | `crates/glafira-mcp/tests/manifest.rs` | `8bbd0bd` | адаптирован: запрещены зависимости Kubernetes и приложения |
+| `crates/glafira-mcp-core/tests/server.rs` | `crates/glafira-mcp/tests/server.rs` | `8bbd0bd` | адаптирован: игрушечный обработчик вместо инструментов Kafka |
+| `crates/glafira-mcp-kubernetes/Cargo.toml` | `crates/glafira-mcp/Cargo.toml` | `8bbd0bd` | адаптирован: поверх glafira-mcp-core, regex для маскировки |
+| `crates/glafira-mcp-kubernetes/src/model.rs` | `crates/glafira-mcp/src/model.rs` | `8bbd0bd` | адаптирован: операции и ответы Kubernetes, область LLM (`Scope`) |
+| `crates/glafira-mcp-kubernetes/src/health.rs` | `crates/glafira-mcp/src/health.rs` | `8bbd0bd` | адаптирован: объекты Kubernetes с проектом, проекты проверки, фильтр области |
+| `crates/glafira-mcp-kubernetes/src/observe.rs` | `crates/glafira-mcp/src/observe.rs` | `8bbd0bd` | адаптирован: хронология workload'а вместо группы |
+| `crates/glafira-mcp-kubernetes/tests/manifest.rs` | `crates/glafira-mcp/tests/manifest.rs` | `8bbd0bd` | адаптирован: запрещены kube, k8s-openapi, reqwest и приложение |
+| `crates/glafira-mcp-kubernetes/src/server/mod.rs` | `crates/glafira-mcp/src/server/mod.rs` | `8bbd0bd` | адаптирован: обработчик поверх `glafira_mcp_core::Session`, инструкции Kubernetes, проверка области LLM |
+| `crates/glafira-mcp-kubernetes/src/server/tools.rs` | `crates/glafira-mcp/src/server/tools.rs` | `8bbd0bd` | адаптирован: 13 инструментов чтения Kubernetes, маскировка в ответах |
+| `crates/glafira-mcp-kubernetes/tests/server.rs` | `crates/glafira-mcp/tests/server.rs` | `8bbd0bd` | адаптирован: фальшивый Backend Kubernetes, область LLM, маскировка |
+| `crates/glafira-mcp-kubernetes/src/server/health_tools.rs` | `crates/glafira-mcp/src/server/health_tools.rs` | `8bbd0bd` | адаптирован: проекты проверки, фильтр области LLM, объекты Kubernetes |
+| `src-tauri/src/health/store.rs` | `src-tauri/src/health/store.rs` | `8bbd0bd` | адаптирован: без предложений LLM (этап O3) и лага групп, проекты проверки, объекты Kubernetes |
+| `src-tauri/src/health/service.rs` | `src-tauri/src/health/service.rs` | `8bbd0bd` | адаптирован: сборщик снимка Kubernetes, проекты проверки, без лага групп |
+| `src-tauri/src/commands/health.rs` | `src-tauri/src/commands/health.rs` | `8bbd0bd` | адаптирован: без предложений LLM (этап O3) |
+| `src-tauri/src/mcp/files.rs` | `src-tauri/src/mcp/files.rs` | `8bbd0bd` | адаптирован: ссылка на спеку |
+| `src-tauri/src/mcp/approvals.rs` | `src-tauri/src/mcp/approvals.rs` | `8bbd0bd` | адаптирован: крейт glafira-mcp-core, ссылка на спеку |
+| `src-tauri/src/mcp/backend.rs` | `src-tauri/src/mcp/backend.rs` | `8bbd0bd` | адаптирован: чтения Kubernetes через ReadClient, область llmNamespaces, проверка по проектам, объекты Kubernetes |
+| `src-tauri/src/mcp/mod.rs` | `src-tauri/src/mcp/mod.rs` | `8bbd0bd` | адаптирован: имена Kubernetes, сторожок «через MCP кластер не изменить» |
+| `src-tauri/src/mcp/controller.rs` | `src-tauri/src/mcp/controller.rs` | `8bbd0bd` | адаптирован: крейты glafira-mcp-core и glafira-mcp-kubernetes, имя продукта в адресе |
+| `src-tauri/src/mcp/shim.rs` | `src-tauri/src/mcp/shim.rs` | `8bbd0bd` | адаптирован: имя продукта |
+| `src-tauri/src/commands/mcp.rs` | `src-tauri/src/commands/mcp.rs` | `8bbd0bd` | адаптирован: ссылка на спеку |
+| `src/lib/useMcpStatus.ts` | `src/lib/useMcpStatus.ts` | `8bbd0bd` | как есть |
+| `src/test/mcp.ts` | `src/test/mcp.ts` | `8bbd0bd` | как есть |
+| `src/components/mcp/ApprovalDialog.tsx` | `src/components/mcp/ApprovalDialog.tsx` | `8bbd0bd` | адаптирован: ссылка на спеку |
+| `src/components/mcp/ApprovalDialog.test.tsx` | `src/components/mcp/ApprovalDialog.test.tsx` | `8bbd0bd` | как есть |
+| `src/components/mcp/McpIndicator.tsx` | `src/components/mcp/McpIndicator.tsx` | `8bbd0bd` | как есть |
+| `src/components/mcp/McpIndicator.test.tsx` | `src/components/mcp/McpIndicator.test.tsx` | `8bbd0bd` | как есть |
+| `src/components/settings/McpSection.tsx` | `src/components/settings/McpSection.tsx` | `8bbd0bd` | как есть |
+| `src/components/settings/McpSection.test.tsx` | `src/components/settings/McpSection.test.tsx` | `8bbd0bd` | как есть |
+| `src/lib/useHealth.ts` | `src/lib/useHealth.ts` | `8bbd0bd` | адаптирован: без предложений LLM (этап O3) |
+| `src/components/health/findings.ts` | `src/components/health/findings.ts` | `8bbd0bd` | адаптирован: объекты Kubernetes, параметры и варианты текстов правил, без предложений LLM |
+| `src/components/health/findings.test.ts` | `src/components/health/findings.test.ts` | `8bbd0bd` | адаптирован: правила Kubernetes |
+| `src/components/health/parts.tsx` | `src/components/health/parts.tsx` | `8bbd0bd` | адаптирован: ссылки на вкладки объектов Kubernetes |
+| `src/components/health/CheckBar.tsx` | `src/components/health/CheckBar.tsx` | `8bbd0bd` | адаптирован: охват проверки — проекты, поды, ноды |
+| `src/components/health/CheckBar.test.tsx` | `src/components/health/CheckBar.test.tsx` | `8bbd0bd` | адаптирован: охват проверки |
+| `src/components/health/FindingsPanel.tsx` | `src/components/health/FindingsPanel.tsx` | `8bbd0bd` | адаптирован: виды объектов Kubernetes, поиск и по проекту, без предложений LLM |
+| `src/components/health/FindingsPanel.test.tsx` | `src/components/health/FindingsPanel.test.tsx` | `8bbd0bd` | адаптирован: правила Kubernetes, без предложений LLM |
+| `src/components/health/HealthBlock.tsx` | `src/components/health/HealthBlock.tsx` | `8bbd0bd` | адаптирован: без предложений LLM |
+| `src/components/health/HealthBlock.test.tsx` | `src/components/health/HealthBlock.test.tsx` | `8bbd0bd` | адаптирован: объекты Kubernetes, под и находки его workload'а |

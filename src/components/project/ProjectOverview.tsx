@@ -9,6 +9,8 @@ import { PartView } from "../common/PartView";
 import { ReadError } from "../common/ReadError";
 import { RefreshControls, useRefreshInterval } from "../common/RefreshControls";
 import { TruncatedNote } from "../common/TruncatedNote";
+import { matchProject } from "../health/findings";
+import { HealthBlock } from "../health/HealthBlock";
 import { KindErrors } from "./KindErrors";
 import { QUOTA_NEAR_LIMIT_PERCENT, isNearLimit } from "./quota";
 import { refreshNamespaceAccess, useNamespaceAccess } from "./useNamespaceAccess";
@@ -57,6 +59,7 @@ export function ProjectOverview({ connectionId, namespace }: { connectionId: str
   return (
     <div className="section">
       <RefreshControls interval={interval} onInterval={setRefreshInterval} onRefresh={() => void refresh()} busy={busy} />
+      <HealthBlock connectionId={connectionId} match={matchProject(namespace)} showTarget />
       <h3>{t("project.overview.pods")}</h3>
       {pods.error && sectionError(pods.error)}
       {pods.data && (

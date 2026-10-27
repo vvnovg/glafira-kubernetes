@@ -7,6 +7,8 @@ import { formatAge } from "../../lib/age";
 import { workloadKey } from "../../lib/useWatchList";
 import { useWorkspace } from "../../state/workspace";
 import { type Column, VirtualTable } from "../common/VirtualTable";
+import { matchWorkload } from "../health/findings";
+import { HealthBadge } from "../health/HealthBlock";
 
 const KINDS: WorkloadKind[] = ["Deployment", "StatefulSet", "DaemonSet", "DeploymentConfig", "Job", "CronJob"];
 
@@ -34,7 +36,17 @@ export function WorkloadsTable({ connectionId, namespace, rows }: { connectionId
   }, [rows, kind, filter]);
   const columns: Column<WorkloadRow>[] = [
     { key: "kind", title: t("project.workloads.kind"), width: "130px", render: (w) => w.kind },
-    { key: "name", title: t("project.workloads.name"), width: "minmax(180px, 2fr)", render: (w) => w.name },
+    {
+      key: "name",
+      title: t("project.workloads.name"),
+      width: "minmax(180px, 2fr)",
+      render: (w) => (
+        <>
+          {w.name}
+          <HealthBadge connectionId={connectionId} match={matchWorkload(namespace, w.kind, w.name)} />
+        </>
+      ),
+    },
     { key: "ready", title: t("project.workloads.ready"), width: "110px", render: (w) => <span className={w.problem ? "problem" : undefined}>{readyText(w)}</span> },
     { key: "images", title: t("project.workloads.images"), width: "minmax(200px, 3fr)", render: (w) => <span title={w.images.join(", ")}>{w.images.join(", ")}</span> },
     { key: "age", title: t("project.workloads.age"), width: "70px", render: (w) => formatAge(w.created) },

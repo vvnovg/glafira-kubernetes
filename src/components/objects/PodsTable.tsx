@@ -4,13 +4,25 @@ import { formatAge } from "../../lib/age";
 import { podKey } from "../../lib/useWatchList";
 import { useWorkspace } from "../../state/workspace";
 import { type Column, VirtualTable } from "../common/VirtualTable";
+import { matchPod } from "../health/findings";
+import { HealthBadge } from "../health/HealthBlock";
 
 /** Таблица подов (спец. §6.3): статус с причиной, готовность, рестарты, нода, возраст, QoS, владелец; щелчок открывает под. */
 export function PodsTable({ connectionId, namespace, rows }: { connectionId: string; namespace: string; rows: PodRow[] }) {
   const { t } = useTranslation();
   const open = useWorkspace((s) => s.open);
   const columns: Column<PodRow>[] = [
-    { key: "name", title: t("objects.pods.name"), width: "minmax(200px, 2fr)", render: (p) => p.name },
+    {
+      key: "name",
+      title: t("objects.pods.name"),
+      width: "minmax(200px, 2fr)",
+      render: (p) => (
+        <>
+          {p.name}
+          <HealthBadge connectionId={connectionId} match={matchPod(namespace, p.name)} />
+        </>
+      ),
+    },
     {
       key: "status",
       title: t("objects.pods.status"),

@@ -157,6 +157,25 @@ fn default_connect_timeout() -> u64 {
     10_000
 }
 
+/// Доступ LLM к подключению через MCP (спец. §10.2): `off` — подключения для LLM нет,
+/// `metadata` — объекты, статусы и события без значений конфигурации. Уровень `logs` — этап O4.
+/// Неизвестное значение из файла более новой версии читается как `Off`: старая версия доступ
+/// только сужает.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LlmAccess {
+    Metadata,
+    #[default]
+    #[serde(other)]
+    Off,
+}
+
+impl LlmAccess {
+    pub fn is_off(&self) -> bool {
+        *self == LlmAccess::Off
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionProfile {
@@ -190,6 +209,13 @@ pub struct ConnectionProfile {
     pub folder_id: Option<String>,
     #[serde(default)]
     pub order: i64,
+    /// Доступ LLM (MCP). Локальное поле, как папка и порядок: экспорт его не пишет, импорт не
+    /// переносит (спец. §5.1) — чужой файл не откроет кластер модели.
+    #[serde(default, skip_serializing_if = "LlmAccess::is_off")]
+    pub llm_access: LlmAccess,
+    /// Проекты, которые видит LLM; `None` — все доступные пользователю. Локальное поле.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_namespaces: Option<Vec<String>>,
     /// Поля из более новой версии Glafira: сохраняются при записи как есть.
     /// `ConnectionStore::upsert` входящий `extra` не принимает: у существующего профиля
     /// остаётся сохранённый, новый получает пустой.
@@ -206,7 +232,10 @@ pub fn normalize_profile(p: &mut ConnectionProfile) {
         .take()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    for list in [&mut p.favorite_namespaces, &mut p.manual_namespaces] {
+    for list in [&mut p.favorite_namespaces, &mut p.manual_namespaces]
+        .into_iter()
+        .chain(p.llm_namespaces.as_mut())
+    {
         let mut seen = std::collections::HashSet::new();
         list.retain_mut(|n| {
             *n = n.trim().to_string();
@@ -398,6 +427,20 @@ pub fn validate_profile(p: &ConnectionProfile) -> AppResult<()> {
     if let AuthConfig::Exec(e) = &p.auth {
         validate_exec(e)?;
     }
+    // Проекты для LLM сверяются с namespace запросов MCP: имя, которое не может быть namespace,
+    // никогда бы не совпало.
+    if let Some(bad) = p
+        .llm_namespaces
+        .iter()
+        .flatten()
+        .find(|n| !is_valid_namespace(n))
+    {
+        return Err(invalid(ltext!(
+            "errors.connections.badNamespace",
+            "“{{name}}” is not a valid project name: use lowercase letters, digits and “-”",
+            name = bad.escape_debug()
+        )));
+    }
     if let ProxyConfig::Url { url } = &p.proxy {
         let proxy = url::Url::parse(url.trim())
             .ok()
@@ -513,6 +556,8 @@ pub fn sample_profile(id: &str) -> ConnectionProfile {
         connect_timeout_ms: 10_000,
         folder_id: None,
         order: 0,
+        llm_access: LlmAccess::Off,
+        llm_namespaces: None,
         extra: Default::default(),
     }
 }
@@ -524,6 +569,59 @@ pub const TEST_CERT_PEM: &str = include_str!("testdata/test-cert.pem");
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn llm_access_is_off_by_default_and_written_only_when_open() {
+        let mut v = serde_json::to_value(sample_profile("a")).unwrap();
+        assert!(
+            v.get("llmAccess").is_none() && v.get("llmNamespaces").is_none(),
+            "{v}"
+        );
+        let p: ConnectionProfile = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!((p.llm_access, p.llm_namespaces), (LlmAccess::Off, None));
+        v["llmAccess"] = "metadata".into();
+        v["llmNamespaces"] = serde_json::json!(["team-a"]);
+        let p: ConnectionProfile = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(p.llm_access, LlmAccess::Metadata);
+        let back = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            (&back["llmAccess"], &back["llmNamespaces"][0]),
+            (&"metadata".into(), &"team-a".into())
+        );
+        assert!(p.extra.is_empty(), "известные поля не уходят в extra");
+        v["llmAccess"] = "logs".into();
+        let p: ConnectionProfile = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            p.llm_access,
+            LlmAccess::Off,
+            "уровень более новой версии сужается до off"
+        );
+    }
+
+    #[test]
+    fn llm_namespaces_are_normalized_and_checked() {
+        let mut p = sample_profile("a");
+        p.llm_namespaces = Some(vec![
+            " team-a ".into(),
+            "".into(),
+            "team-a".into(),
+            "team-b".into(),
+        ]);
+        normalize_profile(&mut p);
+        assert_eq!(
+            p.llm_namespaces.as_deref(),
+            Some(&["team-a".to_string(), "team-b".to_string()][..])
+        );
+        assert!(validate_profile(&p).is_ok());
+        p.llm_namespaces = Some(vec!["Team_A".into()]);
+        let e = validate_profile(&p).unwrap_err();
+        assert_eq!(e.key, "errors.connections.badNamespace");
+        p.llm_namespaces = Some(vec![]);
+        assert!(
+            validate_profile(&p).is_ok(),
+            "пустой список — LLM не видит ни одного проекта"
+        );
+    }
 
     #[test]
     fn json_shape_matches_frontend_contract() {

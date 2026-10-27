@@ -150,6 +150,9 @@ pub fn build_export(
         .filter(|p| in_scope(p.folder_id.as_deref()))
         .map(|mut profile| {
             profile.extra.clear();
+            // Доступ LLM — локальное решение получателя (спец. §5.1): в файл не пишется.
+            profile.llm_access = Default::default();
+            profile.llm_namespaces = None;
             strip_exec_for_export(&mut profile);
             strip_pem_keys_for_export(&mut profile);
             let needs_secret = needs_secret(secrets, &profile)?;
@@ -406,6 +409,8 @@ fn same_settings(local: &ConnectionProfile, incoming: &ConnectionProfile) -> boo
             id: String::new(),
             folder_id: None,
             order: 0,
+            llm_access: Default::default(),
+            llm_namespaces: None,
             extra: Default::default(),
             ..p.clone()
         };
@@ -617,9 +622,12 @@ pub(crate) fn plan_import(
                 unchanged.push((TreeItemKind::Connection, profile.id.clone()));
                 continue;
             }
-            // Место в дереве и неизвестные поля — локальные; пароли получателя не трогаются.
+            // Место в дереве, доступ LLM и неизвестные поля — локальные; пароли получателя не
+            // трогаются.
             profile.folder_id = slot.folder_id.clone();
             profile.order = slot.order;
+            profile.llm_access = slot.llm_access;
+            profile.llm_namespaces = slot.llm_namespaces.take();
             profile.extra = std::mem::take(&mut slot.extra);
             // Секреты exec-плагина тоже локальные: файл их не несёт. Подтверждение остаётся,
             // только если строка запуска с этими секретами не изменилась (спец. §5.2).
@@ -670,6 +678,9 @@ pub(crate) fn plan_import(
             .unwrap_or(0);
         profile.folder_id = folder;
         profile.name = name;
+        // Файл не открывает кластер модели: доступ LLM нового подключения выключен.
+        profile.llm_access = Default::default();
+        profile.llm_namespaces = None;
         profile.extra = Default::default();
         if needs.token || needs.client_key {
             preview.needs_secrets += 1;
@@ -867,6 +878,59 @@ mod tests {
         let out = build_export(&s, &MemoryStore::default(), None, "1", "now").unwrap();
         assert!(out.connections[0].profile.extra.is_empty());
         assert!(!serde_json::to_string(&out).unwrap().contains("futureField"));
+    }
+
+    /// Доступ LLM — локальное решение (спец. §5.1): экспорт его не пишет, импорт не переносит.
+    #[test]
+    fn llm_access_is_never_exported_or_imported() {
+        use crate::storage::profile::LlmAccess;
+        let (_d, s) = store();
+        let mut open = sample_profile("a");
+        open.llm_access = LlmAccess::Metadata;
+        open.llm_namespaces = Some(vec!["team-a".into()]);
+        s.upsert(open.clone()).unwrap();
+        let out = build_export(&s, &MemoryStore::default(), None, "1", "now").unwrap();
+        let json = serde_json::to_value(&out).unwrap();
+        assert!(json["connections"][0].get("llmAccess").is_none(), "{json}");
+        assert!(
+            json["connections"][0].get("llmNamespaces").is_none(),
+            "{json}"
+        );
+
+        let data = StoreData {
+            connections: vec![open],
+            ..Default::default()
+        };
+        let mut incoming_a = conn_json("a", "conn-a", None);
+        incoming_a["apiUrl"] = "https://api.other.example.com:6443".into();
+        let mut incoming_b = conn_json("b", "conn-b", None);
+        incoming_b["llmAccess"] = "metadata".into();
+        incoming_b["llmNamespaces"] = serde_json::json!(["prod"]);
+        let p = plan(
+            &data,
+            &file(vec![], vec![incoming_a, incoming_b]),
+            &opts(None),
+        );
+        let a = conn(&p.next, "a");
+        assert_eq!(
+            (a.llm_access, a.llm_namespaces.clone()),
+            (LlmAccess::Metadata, Some(vec!["team-a".to_string()])),
+            "своё решение сохраняется"
+        );
+        let b = conn(&p.next, "b");
+        assert_eq!(
+            (b.llm_access, b.llm_namespaces.clone()),
+            (LlmAccess::Off, None),
+            "файл не открывает доступ"
+        );
+
+        // Отличие только в доступе LLM — «без изменений».
+        let p = plan(
+            &data,
+            &file(vec![], vec![conn_json("a", "conn-a", None)]),
+            &opts(None),
+        );
+        assert_eq!(preview_ids(&p.preview.unchanged), ["a"]);
     }
 
     #[test]

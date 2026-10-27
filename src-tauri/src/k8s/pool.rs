@@ -18,7 +18,8 @@ use crate::storage::profile::{AuthConfig, ConnectionProfile};
 use crate::sync::MutexExt;
 
 pub struct Connected {
-    pub client: kube::Client,
+    /// Клиент `kube` наружу не отдаётся: чтение — через `reader()` (спец. §4.1).
+    client: kube::Client,
     pub info: ConnectionInfo,
     /// Таймаут одного запроса (из профиля).
     pub timeout: Duration,
@@ -27,6 +28,27 @@ pub struct Connected {
 }
 
 impl Connected {
+    pub fn new(
+        client: kube::Client,
+        info: ConnectionInfo,
+        timeout: Duration,
+        expires_at: Option<SystemTime>,
+    ) -> Self {
+        Self {
+            client,
+            info,
+            timeout,
+            expires_at,
+        }
+    }
+
+    /// Клиент `kube` подключения — только для интеграционных тестов (запросы мимо `ReadClient`:
+    /// проверка прав, значения Secret, удаление пода). MCP-шлюз его не берёт (сторожок в `mcp/`).
+    #[doc(hidden)]
+    pub fn kube_client(&self) -> &kube::Client {
+        &self.client
+    }
+
     /// Чтение кластера этим подключением.
     pub fn reader(&self) -> ReadClient {
         ReadClient::new(self.client.clone(), self.timeout)
@@ -187,12 +209,7 @@ pub async fn open(
             )
             .await;
     }
-    Ok(Connected {
-        client,
-        info,
-        timeout,
-        expires_at,
-    })
+    Ok(Connected::new(client, info, timeout, expires_at))
 }
 
 /// Подключение для тестов: клиент — мок API-сервера с ответами `handler`, платформа — Kubernetes

@@ -23,10 +23,12 @@ pnpm tauri dev
 
 ## Тесты
 ```bash
-pnpm test                                              # фронтенд
-pnpm test:scripts                                      # скрипты scripts/*.mjs
-pnpm i18n:check                                        # словари, ключи Rust, руководство
-cargo test --manifest-path src-tauri/Cargo.toml --lib  # Rust unit
+pnpm test                                                            # фронтенд
+pnpm test:scripts                                                    # скрипты scripts/*.mjs
+pnpm i18n:check                                                      # словари, ключи Rust, руководство
+cargo test --manifest-path src-tauri/Cargo.toml --lib                # Rust unit
+cargo test --manifest-path crates/glafira-mcp-core/Cargo.toml        # MCP: транспорт, сессии, лимиты, журнал
+cargo test --manifest-path crates/glafira-mcp-kubernetes/Cargo.toml  # MCP: инструменты, область LLM, маскировка
 GO_IT_KUBECONFIG="$PWD/dev/kind/out/kubeconfig" cargo test --manifest-path src-tauri/Cargo.toml --tests  # интеграционные (kind)
 ```
 Без `GO_IT_KUBECONFIG` интеграционные тесты пропускаются.
@@ -115,6 +117,42 @@ GO_IT_KUBECONFIG="$PWD/dev/kind/out/kubeconfig" cargo test --manifest-path src-t
   получает ту же ошибку (`AppState::connected`, в том числе через команду `connect`), — exec-плагин не запускается по
   разу на каждую подвкладку. Клиент выбывает из пула, только если упал именно он (`evict_if_same`).
 
+## Проверка кластера и MCP-шлюз
+- Проверка (`src-tauri/src/health/`): снимок кластера (`collect.rs`) — `/readyz`, ноды, у OpenShift ClusterOperators,
+  ClusterVersion и MachineConfigPools, до 50 проектов и 5000 подов, не больше 4 запросов одновременно (считая `/readyz`)
+  и не дольше 45 с; непрочитанное — в `coverage.gaps` и находке `check.partial` (в её `params` список разрывов целиком, в текстах и ответе модели — первые 20: шлюз сначала сужает полный список по области LLM). Ответ 404 на вид объектов значит, что
+  вида в кластере нет, и разрывом не считается; у `/readyz` и списка проектов 404 — разрыв. Проект, чей список подов не
+  поместился в 5000, и следующие за ним проекты с подами остаются без списка подов: в `check.partial` — только
+  `podLimit`, а правила, которым нужны поды, такие проекты пропускают. Правила (`rules/`) — чистые функции над снимком,
+  34 правила со строгостью по окружению из таблицы §8.2 спеки (`RULES`, тест `severity_matrix_matches_spec`). Одна
+  проверка на подключение: запрос с тем же списком проектов и в том же окружении, пришедший во время проверки, ждёт её,
+  иной дожидается её окончания и запускает свою; свежую проверку повторно используют, только если она сделана в текущем
+  окружении и охватывает запрошенные проекты (`service.rs`). Результат, скрытые находки и замечания LLM —
+  `health/<id подключения>.json`; изменение шлёт событие `health://changed`. Тексты находок для интерфейса —
+  `health.rules.<ruleId>.*` в словарях, для LLM — `health/texts.rs` (по-английски).
+- MCP (`crates/glafira-mcp-core`, `crates/glafira-mcp-kubernetes`, `src-tauri/src/mcp/`): шим `glafira-kubernetes mcp`
+  соединяется с запущенным приложением через локальный сокет или named pipe по `mcp.json` (адрес и токен, 0600, есть,
+  пока сервер работает). Крейты не зависят от kube, k8s-openapi, reqwest, hyper, tauri и самого приложения (тест
+  `manifest` в каждом крейте): данные дают `Backend` приложения (`mcp/backend.rs`), чтения идут через `ReadClient` и
+  общий пул клиентов, подключение открывается по запросу. Область LLM (`llmAccess`, `llmNamespaces` профиля) проверяется
+  в крейте до каждого чтения и ещё раз в бэкенде; чужой, выключенный и несуществующий объект дают одинаковый
+  `not_allowed`. Сторожок `mcp_never_reaches_writes_or_the_raw_client` (`mcp/mod.rs`) ищет по тексту файлов `mcp/` и не
+  даёт коду дойти до записи в кластер и до `kube::Client`.
+- Маскировка (`glafira-mcp-kubernetes/src/mask.rs`): `command`/`args` и аннотации — по именам полей и встроенным
+  шаблонам (§10.3 спеки). К тексту из кластера применяются только встроенные шаблоны, без пар `имя=значение`: в прозе
+  они портят диагностику. Это сообщения событий и условий, сообщения состояний контейнеров, образы и строки проб,
+  сообщения Route, HTTPRoute, GRPCRoute, ClusterOperator и ClusterVersion, `warningEvent` в `observe_workload` и
+  `title`, `details`, `params` находок `health_check`. Счётчик `masked` считает замены только в `describe_workload` и
+  `describe_pod`, в остальных ответах маскировка молчит.
+- Ошибки для модели (`mcp/map.rs`, `mcp/backend.rs`): код остаётся прежним, а тексты `errors.exec.*`, `errors.oauth.*`,
+  `errors.connections.*` и `errors.k8s.credentials|transport|forbidden` заменены фиксированными английскими фразами,
+  подробности не уходят; остальные ошибки и фиксированные фразы без данных профиля (например,
+  `errors.connections.loginRequired`) остаются как есть. Сбой файла проверки и замечаний и паника фоновой задачи —
+  `internal` с общей фразой.
+- Интеграционные тесты на kind: `tests/it_health.rs` (правила на настоящем API-сервере, частичная проверка без прав) и
+  `tests/it_mcp.rs` (клиент rmcp → `mcp.json` → рукопожатие → инструменты в области LLM; значения Secret в ответы не
+  попадают).
+
 ## Где хранятся данные
 - Профили и папки: `connections.json` в каталоге данных (macOS: `~/Library/Application Support/io.github.vvnovg.glafira.kubernetes/`).
 - Токены и ключи клиентских сертификатов — в системном хранилище секретов, сервис `glafira-kubernetes`, ключи
@@ -123,7 +161,14 @@ GO_IT_KUBECONFIG="$PWD/dev/kind/out/kubeconfig" cargo test --manifest-path src-t
   CREDENTIAL, BEARER или COOKIE: `--client-secret x`, `--oidc-client-secret=x`, `AWS_SECRET_ACCESS_KEY`
   (`is_secret_name` в `src-tauri/src/auth/exec.rs`). В строке запуска такие значения скрыты (`••••`), в отладочном
   выводе — `***`.
-- Настройки: `settings.json`. Файлы — с правами только для владельца (0600 на macOS и Linux).
+- Настройки: `settings.json` (в том числе включённый MCP и подтверждённые MCP-клиенты). Файлы — с правами только для
+  владельца (0600 на macOS и Linux).
+- Проверка кластера и замечания LLM: `health/<id>.json` (id из строчных латинских букв, цифр, `-` и `_` — как есть; любой другой,
+  в том числе с заглавной буквой (файловые системы macOS и Windows по умолчанию не различают регистр, и `Prod-1` с
+  `prod-1` делили бы файл) и начинающийся с `h-`, — `h-<hex>`; у id длиннее 100 байт файла нет); удаляется вместе с подключением. Журнал
+  MCP — `mcp-audit.jsonl` (ротация при 5 МБ в `mcp-audit.1.jsonl`): вызовы без содержимого ответов и текстов замечаний.
+  `mcp.json` — только пока работает MCP-сервер.
+- Доступ LLM (`llmAccess`, `llmNamespaces`) — локальные поля профиля: экспорт их не пишет, импорт не переносит.
 - Экспорт подключений — файл `*.glafira-kubernetes-connections.json` без токенов и ключей; секретные значения
   exec-плагина в нём пустые (`--oidc-client-secret=`), строка запуска приходит неподтверждённой. Повторный импорт поверх
   существующего подключения сохраняет локальные значения. Если импорт с «Обновлять существующие подключения» меняет

@@ -1,0 +1,1225 @@
+//! Реализация `glafira_mcp_kubernetes::Backend` (спец. §10): чтения O1b через `ReadClient`
+//! (`AppState::read` и `read_in`: клиент из общего пула или новое подключение), проверка кластера
+//! и замечания LLM. Функций, меняющих кластер, здесь нет и быть не должно (сторожок в
+//! `mcp/mod.rs`); замечания пишутся только в файл Glafira.
+
+use std::collections::BTreeSet;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use glafira_mcp_core::{BackendError, BoxFuture, Hooks, SessionAccess, SessionView};
+use glafira_mcp_kubernetes::health as mh;
+use glafira_mcp_kubernetes::model::{self as m, Scope, not_allowed};
+use glafira_mcp_kubernetes::{Backend, ReadOp, ReadOutput};
+use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
+use k8s_openapi::api::core::v1::{Node, PersistentVolumeClaim, Pod, ResourceQuota, Service};
+use k8s_openapi::api::networking::v1::Ingress;
+use kube::api::ListParams;
+
+use super::approvals::Approvals;
+use super::map::{self, code, error_text, reshape};
+use crate::commands::blocking;
+use crate::error::{AppError, AppResult, ErrorCode};
+use crate::health::collect::requests_by_node;
+use crate::health::model::{Finding, Target, TargetKind};
+use crate::health::rules;
+use crate::health::service::now_ms;
+use crate::health::store::{
+    Annotated, AnnotationStatus, Author, CheckRun, MAX_TITLE_CHARS, NewAnnotation, Removed,
+    Trigger, sanitize,
+};
+use crate::health::texts;
+use crate::k8s::events::{EventObject, list_events};
+use crate::k8s::network::{gateways, grpc_routes, http_routes, routes};
+use crate::k8s::pods::{WorkloadRef, get_pod, list_pods};
+use crate::k8s::read::{ReadClient, by_labels, check_field_value};
+use crate::k8s::workloads::{WorkloadKind, get_row, get_workload, list_workloads};
+use crate::state::AppState;
+use crate::storage::profile::{ConnectionProfile, is_valid_namespace};
+
+/// Что-то изменилось для интерфейса; `true` — нужен диалог подтверждения (привлечь внимание).
+pub type OnChange = Arc<dyn Fn(bool) + Send + Sync>;
+
+/// Сколько последних событий пода отдаёт `describe_pod`.
+const POD_EVENTS: usize = 20;
+
+pub struct AppBackend {
+    state: AppState,
+    approvals: Arc<Approvals>,
+    on_change: OnChange,
+}
+
+/// Код ошибки — как в приложении (`FORBIDDEN`, `NOT_FOUND`, `SESSION_EXPIRED`…), текст —
+/// английский. Подробности (`details`) LLM не получает, а тексты с данными профиля — адресом,
+/// командой плагина, именем пользователя — заменены фиксированной фразой (`map::llm_message`).
+fn to_backend(e: AppError) -> BackendError {
+    BackendError::new(code(&e), map::llm_message(&e))
+}
+
+/// Текст для LLM при сбое файла `health/<id>.json`: путь к файлу не раскрывается.
+const HEALTH_FILE_FAILED: &str = "Glafira could not read or save its data for this connection";
+/// Текст для LLM, когда фоновая задача Glafira не завершилась (паника blocking-потока).
+const BACKGROUND_FAILED: &str = "A background task in Glafira failed; retry the call";
+
+/// Ошибки проверки и замечаний: сбой файла Glafira и паника фоновой задачи — `internal` с
+/// общим текстом; остальные (кластер, подключение) — как у чтений.
+fn health_to_backend(e: AppError) -> BackendError {
+    if ["errors.io", "errors.json"].contains(&e.key.as_str())
+        || e.key.starts_with("errors.storage.")
+    {
+        BackendError::new("internal", HEALTH_FILE_FAILED)
+    } else if e.key == "errors.app.taskPanicked" {
+        BackendError::new("internal", BACKGROUND_FAILED)
+    } else {
+        to_backend(e)
+    }
+}
+
+fn now_s() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
+fn workload_kind(k: m::WorkloadKind) -> WorkloadKind {
+    reshape(&k).unwrap_or(WorkloadKind::Deployment)
+}
+
+impl AppBackend {
+    pub fn new(state: AppState, approvals: Arc<Approvals>, on_change: OnChange) -> Self {
+        Self {
+            state,
+            approvals,
+            on_change,
+        }
+    }
+
+    /// Подключения, которые видит LLM; платформа — у тех, что сейчас в пуле.
+    pub fn connections(&self) -> Vec<m::Connection> {
+        let store = &self.state.connections;
+        store
+            .list()
+            .into_iter()
+            .filter(|p| !p.llm_access.is_off())
+            .map(|p| m::Connection {
+                folder_path: p
+                    .folder_id
+                    .as_deref()
+                    .map(|f| store.folder_path(f))
+                    .unwrap_or_default(),
+                environment: serde_json::to_value(p.environment)
+                    .ok()
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_default(),
+                llm_access: serde_json::to_value(p.llm_access)
+                    .ok()
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_default(),
+                platform: self
+                    .state
+                    .pool
+                    .get(&p.id)
+                    .map(|c| map::platform(&c.info.platform)),
+                id: p.id,
+                name: p.name,
+                read_only: p.read_only,
+            })
+            .collect()
+    }
+
+    /// Профиль подключения, открытого для LLM; нет подключения и доступ выключен — одна ошибка.
+    fn allowed(&self, id: &str) -> Result<ConnectionProfile, BackendError> {
+        match self.state.connections.get(id) {
+            Ok(p) if !p.llm_access.is_off() => Ok(p),
+            _ => Err(not_allowed()),
+        }
+    }
+
+    /// Проект в области LLM подключения (крейт проверяет это до вызова; здесь — ещё раз).
+    fn in_scope(p: &ConnectionProfile, namespace: &str) -> Result<(), BackendError> {
+        match &p.llm_namespaces {
+            Some(list) if !list.iter().any(|n| n == namespace) => Err(not_allowed()),
+            _ => Ok(()),
+        }
+    }
+
+    async fn read_impl(&self, op: ReadOp) -> Result<ReadOutput, BackendError> {
+        if let Some(id) = op.connection_id() {
+            let p = self.allowed(id)?;
+            if let Some(ns) = op.namespace() {
+                Self::in_scope(&p, ns)?;
+            }
+        }
+        let st = &self.state;
+        let now = now_s();
+        let out = match op {
+            ReadOp::ListConnections => ReadOutput::Connections(self.connections()),
+            ReadOp::ClusterOverview { connection_id } => ReadOutput::Cluster(
+                Box::pin(st.read(&connection_id, |c| async move {
+                    let o = crate::k8s::overview::cluster_overview(&c.reader(), &c.info).await;
+                    Ok(map::cluster(o, &c.info.capabilities, now))
+                }))
+                .await
+                .map_err(to_backend)?,
+            ),
+            ReadOp::ListProjects { connection_id } => {
+                let profile = self.allowed(&connection_id)?;
+                let l = Box::pin(st.read(&connection_id, |c| async move {
+                    crate::k8s::projects::list_projects(
+                        &c.reader(),
+                        c.info.api_groups.projects,
+                        &profile,
+                    )
+                    .await
+                }))
+                .await
+                .map_err(to_backend)?;
+                ReadOutput::Projects(m::ProjectList {
+                    items: l.items.into_iter().map(map::project).collect(),
+                    truncated: l.truncated,
+                    error: l.error.as_ref().map(error_text),
+                })
+            }
+            ReadOp::ListNodes { connection_id } => ReadOutput::Nodes(
+                Box::pin(st.read(&connection_id, |c| async move {
+                    let r = c.reader();
+                    let nodes = crate::k8s::nodes::list_nodes(&r).await?;
+                    let (requests, requests_error) = match c.info.capabilities.list_all_pods {
+                        true => match r.list::<Pod>(None, &ListParams::default()).await {
+                            Ok(l) => (Some(requests_by_node(&l.items)), None),
+                            Err(e) => (None, Some(error_text(&e))),
+                        },
+                        false => (
+                            None,
+                            Some("FORBIDDEN: pods of all projects cannot be listed".to_string()),
+                        ),
+                    };
+                    Ok(m::NodeList {
+                        items: nodes
+                            .items
+                            .into_iter()
+                            .map(|n| {
+                                let req = requests
+                                    .as_ref()
+                                    .map(|m| m.get(&n.name).copied().unwrap_or_default());
+                                map::node_item(n, req, now)
+                            })
+                            .collect(),
+                        truncated: nodes.truncated,
+                        requests_error,
+                    })
+                }))
+                .await
+                .map_err(to_backend)?,
+            ),
+            ReadOp::DescribeNode {
+                connection_id,
+                name,
+            } => ReadOutput::Node(
+                Box::pin(st.read(&connection_id, |c| async move {
+                    let r = c.reader();
+                    let d = crate::k8s::nodes::get_node(&r, &name).await?;
+                    let usage = match c.info.capabilities.list_all_pods {
+                        true => {
+                            check_field_value(&name)?;
+                            let lp = ListParams::default().fields(&format!("spec.nodeName={name}"));
+                            match r.list::<Pod>(None, &lp).await {
+                                Ok(l) => m::Part::Data(map::node_usage(&l.items)),
+                                Err(e) => m::Part::error(error_text(&e)),
+                            }
+                        }
+                        false => m::Part::error("FORBIDDEN: pods of all projects cannot be listed"),
+                    };
+                    Ok(map::node_details(d, usage, now))
+                }))
+                .await
+                .map_err(to_backend)?,
+            ),
+            ReadOp::ListWorkloads {
+                connection_id,
+                namespace,
+            } => {
+                let ns = namespace.clone();
+                let l = Box::pin(st.read_in(&connection_id, &namespace, |c| async move {
+                    Ok(list_workloads(&c.reader(), &ns, &c.info.api_groups).await)
+                }))
+                .await
+                .map_err(to_backend)?;
+                ReadOutput::Workloads(m::WorkloadList {
+                    items: l
+                        .items
+                        .into_iter()
+                        .map(|w| map::workload_item(w, now))
+                        .collect(),
+                    errors: l
+                        .errors
+                        .into_iter()
+                        .map(|e| m::KindError {
+                            kind: reshape(&e.kind).unwrap_or(m::WorkloadKind::Deployment),
+                            error: error_text(&e.error),
+                        })
+                        .collect(),
+                    truncated: l.truncated,
+                })
+            }
+            ReadOp::DescribeWorkload {
+                connection_id,
+                namespace,
+                workload,
+            } => {
+                let ns = namespace.clone();
+                let d = Box::pin(st.read_in(&connection_id, &namespace, |c| async move {
+                    get_workload(
+                        &c.reader(),
+                        &ns,
+                        workload_kind(workload.kind),
+                        &workload.name,
+                    )
+                    .await
+                }))
+                .await
+                .map_err(to_backend)?;
+                ReadOutput::Workload(map::workload_details(d, now))
+            }
+            ReadOp::ListPods {
+                connection_id,
+                namespace,
+                workload,
+            } => {
+                let ns = namespace.clone();
+                let w = workload.map(|w| WorkloadRef {
+                    kind: workload_kind(w.kind),
+                    name: w.name,
+                });
+                let l = Box::pin(st.read_in(&connection_id, &namespace, |c| async move {
+                    list_pods(&c.reader(), &ns, w.as_ref()).await
+                }))
+                .await
+                .map_err(to_backend)?;
+                ReadOutput::Pods(m::PodList {
+                    items: l.items.into_iter().map(|p| map::pod_item(p, now)).collect(),
+                    truncated: l.truncated,
+                })
+            }
+            ReadOp::DescribePod {
+                connection_id,
+                namespace,
+                name,
+            } => {
+                let ns = namespace.clone();
+                let d = Box::pin(st.read_in(&connection_id, &namespace, |c| async move {
+                    let r = c.reader();
+                    let object = EventObject {
+                        kind: "Pod".into(),
+                        name: name.clone(),
+                    };
+                    let (pod, events) =
+                        tokio::join!(get_pod(&r, &ns, &name), list_events(&r, &ns, Some(&object)));
+                    let events = match events {
+                        Ok(l) => m::Part::Data(
+                            l.items
+                                .into_iter()
+                                .take(POD_EVENTS)
+                                .map(|e| map::event(e, now))
+                                .collect(),
+                        ),
+                        Err(e) => m::Part::error(error_text(&e)),
+                    };
+                    Ok(map::pod_details(pod?, events, now))
+                }))
+                .await
+                .map_err(to_backend)?;
+                ReadOutput::Pod(d)
+            }
+            ReadOp::ListEvents {
+                connection_id,
+                namespace,
+                object,
+            } => {
+                let ns = namespace.clone();
+                let object = object.map(|o| EventObject {
+                    kind: o.kind,
+                    name: o.name,
+                });
+                let l = Box::pin(st.read_in(&connection_id, &namespace, |c| async move {
+                    list_events(&c.reader(), &ns, object.as_ref()).await
+                }))
+                .await
+                .map_err(to_backend)?;
+                ReadOutput::Events(m::EventList {
+                    items: l.items.into_iter().map(|e| map::event(e, now)).collect(),
+                    truncated: l.truncated,
+                })
+            }
+            ReadOp::Quotas {
+                connection_id,
+                namespace,
+            } => {
+                let ns = namespace.clone();
+                let q = Box::pin(st.read_in(&connection_id, &namespace, |c| async move {
+                    Ok(crate::k8s::quotas::get_quotas(&c.reader(), &ns).await)
+                }))
+                .await
+                .map_err(to_backend)?;
+                ReadOutput::Quotas(map::quotas(q))
+            }
+            ReadOp::Network {
+                connection_id,
+                namespace,
+            } => {
+                let ns = namespace.clone();
+                let n = Box::pin(st.read_in(&connection_id, &namespace, |c| async move {
+                    Ok(
+                        crate::k8s::network::get_network(&c.reader(), &ns, &c.info.api_groups)
+                            .await,
+                    )
+                }))
+                .await
+                .map_err(to_backend)?;
+                ReadOutput::Network(map::network(n, now))
+            }
+            ReadOp::WorkloadState {
+                connection_id,
+                namespace,
+                workload,
+            } => {
+                let ns = namespace.clone();
+                let s = Box::pin(st.read_in(&connection_id, &namespace, |c| async move {
+                    let r = c.reader();
+                    let kind = workload_kind(workload.kind);
+                    let (row, selector) = get_row(&r, &ns, kind, &workload.name).await?;
+                    // Без селектора поды workload'а не определить: пустой подошёл бы всем.
+                    let pods = match selector.filter(|s| !s.is_empty()) {
+                        Some(sel) => {
+                            r.list::<Pod>(Some(&ns), &by_labels(Some(&sel)))
+                                .await?
+                                .items
+                        }
+                        None => Vec::new(),
+                    };
+                    let object = EventObject {
+                        kind: format!("{kind:?}"),
+                        name: workload.name.clone(),
+                    };
+                    let events = list_events(&r, &ns, Some(&object))
+                        .await
+                        .map(|l| l.items)
+                        .unwrap_or_default();
+                    Ok(map::workload_state(&row, &pods, events))
+                }))
+                .await
+                .map_err(to_backend)?;
+                ReadOutput::WorkloadState(s)
+            }
+        };
+        Ok(out)
+    }
+}
+
+impl AppBackend {
+    /// Автор замечаний и проверок: имя из диалога подтверждения.
+    fn author(&self, session: &SessionView) -> Author {
+        Author {
+            client: self.approvals.shown_name(&session.id),
+            session_id: session.id.clone(),
+        }
+    }
+
+    /// Объект замечания есть в кластере (защита от придуманных имён). Проект проверяется по
+    /// имени: его самого пользователь без прав на `namespaces` прочитать не может.
+    async fn target_exists(&self, connection_id: &str, t: &Target) -> Result<(), BackendError> {
+        let ns = t.namespace.clone().unwrap_or_default();
+        let name = t.name.clone().unwrap_or_default();
+        let found = match t.kind {
+            TargetKind::Cluster => true,
+            TargetKind::Project => is_valid_namespace(&ns),
+            _ => {
+                let t = t.clone();
+                let r = Box::pin(self.state.read(connection_id, |c| async move {
+                    exists(&c.reader(), &t, &ns, &name).await
+                }))
+                .await;
+                match r {
+                    Ok(found) => found,
+                    Err(e) if e.code == ErrorCode::NotFound => false,
+                    Err(e) => return Err(to_backend(e)),
+                }
+            }
+        };
+        if found {
+            Ok(())
+        } else {
+            Err(BackendError::not_found(format!(
+                "There is no {} {} in this cluster",
+                t.kind.as_str(),
+                [t.namespace.as_deref(), t.name.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join("/")
+            )))
+        }
+    }
+
+    async fn health_impl(&self, op: mh::HealthOp) -> Result<mh::HealthOutput, BackendError> {
+        // Поколение — до проверки доступа: запись в подключение, удалённое за это время, отклоняется.
+        let generation = self.state.health.generation(op.connection_id());
+        let profile = self.allowed(op.connection_id())?;
+        let st = self.state.clone();
+        match op {
+            mh::HealthOp::Check {
+                connection_id,
+                max_age_ms,
+                run_id,
+                namespaces,
+                session,
+            } => {
+                if let Some(list) = &namespaces {
+                    for ns in list {
+                        Self::in_scope(&profile, ns)?;
+                    }
+                }
+                let (st2, cid) = (st.clone(), connection_id.clone());
+                let (run, reused, ignored) = match run_id {
+                    Some(id) => {
+                        let file = blocking(move || st2.health.store.load(&cid, now_ms()))
+                            .await
+                            .map_err(health_to_backend)?;
+                        match file.last_check {
+                            Some(r) if r.run_id == id => (Arc::new(r), true, file.ignored),
+                            _ => {
+                                return Err(BackendError::not_found(
+                                    "This check was replaced by a newer one; call health_check without runId",
+                                ));
+                            }
+                        }
+                    }
+                    None => {
+                        let trigger = Trigger::Mcp {
+                            client: self.author(&session).client,
+                        };
+                        let svc = st.health.clone();
+                        let (run, reused) = Box::pin(svc.latest_or_run(
+                            &st,
+                            &connection_id,
+                            trigger,
+                            max_age_ms,
+                            namespaces,
+                        ))
+                        .await
+                        .map_err(health_to_backend)?;
+                        let ignored =
+                            blocking(move || Ok(st2.health.store.load(&cid, now_ms())?.ignored))
+                                .await
+                                .map_err(health_to_backend)?;
+                        (run, reused, ignored)
+                    }
+                };
+                Ok(mh::HealthOutput::Run(map_run(&run, reused, |k| {
+                    ignored.iter().any(|i| i.key == k)
+                })))
+            }
+            mh::HealthOp::Annotate {
+                connection_id,
+                session,
+                note,
+            } => {
+                check_note_texts(note.related_rule_id.as_deref(), &note.title)?;
+                if let Some(ns) = &note.target.namespace {
+                    Self::in_scope(&profile, ns)?;
+                }
+                let target: Target = reshape(&note.target)
+                    .ok_or_else(|| BackendError::invalid_argument("target cannot be read"))?;
+                Box::pin(self.target_exists(&connection_id, &target)).await?;
+                let new = NewAnnotation {
+                    target,
+                    severity: reshape(&note.severity).ok_or_else(BackendError::unexpected)?,
+                    title: note.title,
+                    body: note.body,
+                    related_rule_id: note.related_rule_id,
+                    author: self.author(&session),
+                };
+                let id = connection_id.clone();
+                let st2 = st.clone();
+                let r = blocking(move || {
+                    st2.health
+                        .write(&id, generation, |s| s.annotate(&id, new, now_ms()))
+                })
+                .await
+                .map_err(health_to_backend)?;
+                let (annotation_id, created) = match r {
+                    Annotated::Created(id) => (id, true),
+                    Annotated::Updated(id) => (id, false),
+                    Annotated::LimitReached => {
+                        return Err(BackendError::new(
+                            "limit_reached",
+                            "This connection already has 200 open notes; ask the user to close some in Glafira",
+                        ));
+                    }
+                };
+                st.health.changed(&connection_id);
+                Ok(mh::HealthOutput::Annotated {
+                    annotation_id,
+                    created,
+                })
+            }
+            mh::HealthOp::ListAnnotations {
+                connection_id,
+                status,
+            } => {
+                let f = blocking(move || st.health.store.load(&connection_id, now_ms()))
+                    .await
+                    .map_err(health_to_backend)?;
+                let items = f
+                    .annotations
+                    .into_iter()
+                    .filter(|a| match status {
+                        mh::StatusFilter::Open => a.status == AnnotationStatus::Open,
+                        mh::StatusFilter::Closed => a.status != AnnotationStatus::Open,
+                        mh::StatusFilter::All => true,
+                    })
+                    .filter_map(|a| {
+                        Some(mh::AnnotationView {
+                            target: reshape(&a.target)?,
+                            severity: reshape(&a.severity)?,
+                            status: serde_json::to_value(a.status).ok()?.as_str()?.to_string(),
+                            id: a.id,
+                            title: a.title,
+                            body: a.body,
+                            related_rule_id: a.related_rule_id,
+                            client: a.client,
+                            created_at_ms: a.created_at_ms,
+                            updated_at_ms: a.updated_at_ms,
+                        })
+                    })
+                    .collect();
+                Ok(mh::HealthOutput::Annotations(items))
+            }
+            mh::HealthOp::RemoveAnnotation {
+                connection_id,
+                session,
+                annotation_id,
+            } => {
+                let author = self.author(&session);
+                let id = connection_id.clone();
+                let st2 = st.clone();
+                let r = blocking(move || {
+                    st2.health.write(&id, generation, |s| {
+                        s.remove_own(&id, &annotation_id, &author, now_ms())
+                    })
+                })
+                .await
+                .map_err(health_to_backend)?;
+                match r {
+                    Removed::Removed => {
+                        st.health.changed(&connection_id);
+                        Ok(mh::HealthOutput::Removed)
+                    }
+                    Removed::NotFound => Err(BackendError::not_found(
+                        "The note was deleted or has expired",
+                    )),
+                    Removed::NotOwner => Err(BackendError::new(
+                        "not_allowed",
+                        "Only notes created by this client can be removed",
+                    )),
+                }
+            }
+        }
+    }
+}
+
+/// Объект замечания в проекте: чтение по виду (`NOT_FOUND` — его нет).
+async fn exists(r: &ReadClient, t: &Target, ns: &str, name: &str) -> AppResult<bool> {
+    Ok(match t.kind {
+        TargetKind::Node => {
+            r.get_cluster::<Node>(name).await?;
+            true
+        }
+        TargetKind::Workload => {
+            let kind = t.workload_kind.unwrap_or(WorkloadKind::Deployment);
+            get_row(r, ns, kind, name).await?;
+            true
+        }
+        TargetKind::Pod => r.get_opt::<Pod>(ns, name).await?.is_some(),
+        TargetKind::Service => r.get_opt::<Service>(ns, name).await?.is_some(),
+        TargetKind::Ingress => r.get_opt::<Ingress>(ns, name).await?.is_some(),
+        TargetKind::Pvc => r
+            .get_opt::<PersistentVolumeClaim>(ns, name)
+            .await?
+            .is_some(),
+        TargetKind::Hpa => r
+            .get_opt::<HorizontalPodAutoscaler>(ns, name)
+            .await?
+            .is_some(),
+        TargetKind::Quota => r.get_opt::<ResourceQuota>(ns, name).await?.is_some(),
+        TargetKind::Route => {
+            r.get_dynamic(&routes(), Some(ns), name).await?;
+            true
+        }
+        TargetKind::Gateway => {
+            r.get_dynamic(&gateways(), Some(ns), name).await?;
+            true
+        }
+        TargetKind::Httproute => {
+            r.get_dynamic(&http_routes(), Some(ns), name).await?;
+            true
+        }
+        TargetKind::Grpcroute => {
+            r.get_dynamic(&grpc_routes(), Some(ns), name).await?;
+            true
+        }
+        TargetKind::Cluster | TargetKind::Project => true,
+    })
+}
+
+/// Общие проверки текстов замечания: правило из каталога, непустой заголовок.
+fn check_note_texts(related_rule_id: Option<&str>, title: &str) -> Result<(), BackendError> {
+    if let Some(r) = related_rule_id
+        && !rules::rule_ids().any(|id| id == r)
+    {
+        return Err(BackendError::invalid_argument(format!(
+            "relatedRuleId {r} is not a health_check rule"
+        )));
+    }
+    // Заголовок из одних управляющих символов после очистки пуст — как пустой заголовок.
+    if sanitize(title, MAX_TITLE_CHARS).is_empty() {
+        return Err(BackendError::invalid_argument("title must not be empty"));
+    }
+    Ok(())
+}
+
+fn map_finding(f: &Finding, ignored: bool) -> Option<mh::HealthFinding> {
+    let (title, details) = texts::english(f);
+    Some(mh::HealthFinding {
+        key: f.key.clone(),
+        rule_id: f.rule_id.clone(),
+        severity: reshape(&f.severity)?,
+        target: reshape(&f.target)?,
+        title,
+        details,
+        params: f.params.clone(),
+        ignored,
+    })
+}
+
+fn map_run(r: &CheckRun, reused: bool, ignored: impl Fn(&str) -> bool) -> mh::HealthRun {
+    mh::HealthRun {
+        run_id: r.run_id.clone(),
+        started_at_ms: r.started_at_ms,
+        duration_ms: r.duration_ms,
+        trigger: serde_json::to_value(&r.trigger).unwrap_or_default(),
+        environment: serde_json::to_value(r.environment)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default(),
+        incomplete: r.incomplete,
+        reused,
+        scope: mh::HealthScope {
+            projects: r.scope.projects.clone(),
+            projects_total: r.scope.projects_total,
+            pods: r.scope.pods,
+            nodes: r.scope.nodes,
+        },
+        findings: r
+            .findings
+            .iter()
+            .filter_map(|f| map_finding(f, ignored(&f.key)))
+            .collect(),
+    }
+}
+
+impl Hooks for AppBackend {
+    fn access(&self, session: &SessionView) -> SessionAccess {
+        if !self.state.policy.status.mcp_enabled {
+            return SessionAccess::Disabled;
+        }
+        let (access, new_pending) = self
+            .approvals
+            .access(session, glafira_mcp_core::audit::now_ms());
+        if new_pending {
+            (self.on_change)(true);
+        }
+        access
+    }
+
+    fn connection_name(&self, id: &str) -> Option<String> {
+        self.state.connections.get(id).ok().map(|p| p.name)
+    }
+
+    fn session_closed(&self, session_id: &str) {
+        self.approvals.closed(session_id);
+    }
+
+    fn sessions_changed(&self) {
+        (self.on_change)(false);
+    }
+}
+
+impl Backend for AppBackend {
+    fn scope(&self, connection_id: &str) -> Option<Scope> {
+        let p = self.allowed(connection_id).ok()?;
+        Some(Scope {
+            namespaces: p
+                .llm_namespaces
+                .map(|v| v.into_iter().collect::<BTreeSet<_>>()),
+        })
+    }
+
+    fn read(&self, op: ReadOp) -> BoxFuture<'_, Result<ReadOutput, BackendError>> {
+        Box::pin(self.read_impl(op))
+    }
+
+    fn health(&self, op: mh::HealthOp) -> BoxFuture<'_, Result<mh::HealthOutput, BackendError>> {
+        Box::pin(self.health_impl(op))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::k8s::pods::fixtures::{crash_looping, running};
+    use crate::k8s::pool::test_connected;
+    use crate::k8s::testing::{Seen, status};
+    use crate::secrets::MemoryStore;
+    use crate::storage::profile::{LlmAccess, sample_profile};
+
+    /// Подключения: `open` открыт для LLM в проекте team-a, `all` — во всех, `closed` — нет.
+    fn backend() -> (tempfile::TempDir, AppBackend) {
+        let dir = tempfile::tempdir().unwrap();
+        let st = AppState::new(dir.path(), Arc::new(MemoryStore::default())).unwrap();
+        let mut open = sample_profile("open");
+        open.name = "dev".into();
+        open.llm_access = LlmAccess::Metadata;
+        open.llm_namespaces = Some(vec!["team-a".into()]);
+        st.connections.upsert(open).unwrap();
+        let mut all = sample_profile("all");
+        all.llm_access = LlmAccess::Metadata;
+        st.connections.upsert(all).unwrap();
+        st.connections.upsert(sample_profile("closed")).unwrap();
+        let approvals = Arc::new(Approvals::new(st.settings.clone()));
+        (dir, AppBackend::new(st, approvals, Arc::new(|_| {})))
+    }
+
+    /// Мок кластера в пуле подключения: запросы чтения не уходят в сеть.
+    fn pooled(
+        b: &AppBackend,
+        id: &str,
+        handler: impl Fn(&Seen) -> (u16, serde_json::Value) + Send + 'static,
+    ) {
+        let pool = &b.state.pool;
+        assert!(pool.insert_if_current(id, pool.generation(id), test_connected(handler)));
+    }
+
+    fn list(items: Vec<serde_json::Value>) -> (u16, serde_json::Value) {
+        (
+            200,
+            serde_json::json!({"apiVersion": "v1", "kind": "List", "metadata": {}, "items": items}),
+        )
+    }
+
+    fn view(id: &str, name: Option<&str>) -> SessionView {
+        SessionView {
+            id: id.into(),
+            client: name.map(|n| glafira_mcp_core::ClientIdent {
+                name: n.into(),
+                version: "1".into(),
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn only_open_connections_are_listed_with_their_scope() {
+        let (_d, b) = backend();
+        let mut ids: Vec<String> = b.connections().into_iter().map(|c| c.id).collect();
+        ids.sort();
+        assert_eq!(ids, ["all", "open"]);
+        let open = b
+            .connections()
+            .into_iter()
+            .find(|c| c.id == "open")
+            .unwrap();
+        assert_eq!(
+            (open.llm_access.as_str(), open.platform),
+            ("metadata", None),
+            "не подключено — платформы нет"
+        );
+        assert_eq!(b.connection_name("open").as_deref(), Some("dev"));
+        assert_eq!(
+            b.scope("open").unwrap().namespaces,
+            Some(BTreeSet::from(["team-a".to_string()]))
+        );
+        assert_eq!(b.scope("all").unwrap().namespaces, None);
+        assert!(b.scope("closed").is_none() && b.scope("missing").is_none());
+        pooled(&b, "open", |_| list(vec![]));
+        let open = b
+            .connections()
+            .into_iter()
+            .find(|c| c.id == "open")
+            .unwrap();
+        assert_eq!(open.platform.unwrap().kind, m::PlatformKind::Kubernetes);
+    }
+
+    #[tokio::test]
+    async fn closed_unknown_and_foreign_projects_are_not_allowed_before_network() {
+        let (_d, b) = backend();
+        for id in ["closed", "missing"] {
+            let e = b
+                .read(ReadOp::ClusterOverview {
+                    connection_id: id.into(),
+                })
+                .await
+                .unwrap_err();
+            assert_eq!(e, not_allowed(), "{id}");
+        }
+        let e = b
+            .read(ReadOp::ListPods {
+                connection_id: "open".into(),
+                namespace: "team-b".into(),
+                workload: None,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(e, not_allowed());
+    }
+
+    #[tokio::test]
+    async fn reads_use_the_pooled_client_and_map_for_the_llm() {
+        let (_d, b) = backend();
+        pooled(&b, "open", |s| match s.path() {
+            "/api/v1/namespaces/team-a/pods" => {
+                list(vec![crash_looping("web-1"), running("web-2")])
+            }
+            _ => list(vec![]),
+        });
+        let ReadOutput::Pods(p) = b
+            .read(ReadOp::ListPods {
+                connection_id: "open".into(),
+                namespace: "team-a".into(),
+                workload: None,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("pods")
+        };
+        assert_eq!(p.items.len(), 2);
+        assert_eq!(p.items[0].problem.as_deref(), Some("crashLoop"));
+        assert_eq!(p.items[0].owner.as_ref().unwrap().name, "web");
+    }
+
+    #[test]
+    fn policy_disables_every_session() {
+        let (_d, b) = backend();
+        let mut st = b.state.clone();
+        let mut policy = (*st.policy).clone();
+        policy.status.mcp_enabled = false;
+        st.policy = Arc::new(policy);
+        let b = AppBackend::new(st, b.approvals.clone(), Arc::new(|_| {}));
+        assert_eq!(b.access(&view("s1", None)), SessionAccess::Disabled);
+    }
+
+    #[tokio::test]
+    async fn check_runs_over_the_llm_projects() {
+        let (_d, b) = backend();
+        pooled(&b, "open", |s| match s.path() {
+            "/api/v1/namespaces/team-a/pods" => list(vec![crash_looping("web-1")]),
+            _ => list(vec![]),
+        });
+        let mh::HealthOutput::Run(run) = b
+            .health(mh::HealthOp::Check {
+                connection_id: "open".into(),
+                max_age_ms: 300_000,
+                run_id: None,
+                namespaces: Some(vec!["team-a".into()]),
+                session: view("s1", Some("claude-ai")),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("run")
+        };
+        assert!(!run.reused);
+        assert_eq!(run.scope.projects, ["team-a"]);
+        let f = run
+            .findings
+            .iter()
+            .find(|f| f.rule_id == "pod.crashLoop")
+            .unwrap();
+        assert_eq!(f.target.name.as_deref(), Some("web"));
+        assert!(f.title.contains("restart in a loop"), "{}", f.title);
+        // Повтор по тем же проектам — прошлая проверка.
+        let mh::HealthOutput::Run(again) = b
+            .health(mh::HealthOp::Check {
+                connection_id: "open".into(),
+                max_age_ms: 300_000,
+                run_id: None,
+                namespaces: Some(vec!["team-a".into()]),
+                session: view("s1", Some("claude-ai")),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("run")
+        };
+        assert_eq!((again.reused, again.run_id), (true, run.run_id));
+        let e = b
+            .health(mh::HealthOp::Check {
+                connection_id: "open".into(),
+                max_age_ms: 0,
+                run_id: None,
+                namespaces: Some(vec!["team-b".into()]),
+                session: view("s1", None),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(e, not_allowed());
+    }
+
+    fn note(target: Target, title: &str) -> mh::NewNote {
+        mh::NewNote {
+            target: reshape(&target).unwrap(),
+            severity: mh::Severity::Warning,
+            title: title.into(),
+            body: "body".into(),
+            related_rule_id: Some("pod.crashLoop".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn notes_are_checked_against_the_cluster_and_removed_by_their_author() {
+        let (_d, b) = backend();
+        pooled(&b, "open", |s| match s.path() {
+            "/api/v1/namespaces/team-a/pods/web-1" => (200, running("web-1")),
+            _ => status(404, "NotFound", "not found"),
+        });
+        let session = view("s1", Some("claude-ai"));
+        b.access(&session);
+        let annotate = |target: Target, title: &str| {
+            b.health(mh::HealthOp::Annotate {
+                connection_id: "open".into(),
+                session: session.clone(),
+                note: note(target, title),
+            })
+        };
+        let pod = |name: &str| Target::object(TargetKind::Pod, "team-a", name);
+        let e = annotate(pod("ghost"), "t").await.unwrap_err();
+        assert_eq!(e.code, "not_found", "{e:?}");
+        let e = annotate(Target::object(TargetKind::Pod, "team-b", "x"), "t")
+            .await
+            .unwrap_err();
+        assert_eq!(e, not_allowed());
+        let e = annotate(pod("web-1"), "\u{7}").await.unwrap_err();
+        assert_eq!(e.code, "invalid_argument");
+        let mh::HealthOutput::Annotated {
+            annotation_id,
+            created,
+        } = annotate(pod("web-1"), "Restarts on OOM").await.unwrap()
+        else {
+            panic!("annotated")
+        };
+        assert!(created);
+        assert!(matches!(
+            annotate(Target::cluster(), "Cluster note").await.unwrap(),
+            mh::HealthOutput::Annotated { created: true, .. }
+        ));
+        let mh::HealthOutput::Annotations(items) = b
+            .health(mh::HealthOp::ListAnnotations {
+                connection_id: "open".into(),
+                status: mh::StatusFilter::Open,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("list")
+        };
+        assert_eq!(items.len(), 2);
+        let n = items.iter().find(|n| n.id == annotation_id).unwrap();
+        assert_eq!(
+            (n.client.as_deref(), n.status.as_str()),
+            (Some("claude-ai"), "open")
+        );
+        assert_eq!(n.target.namespace.as_deref(), Some("team-a"));
+        let foreign = view("s2", Some("cursor"));
+        b.access(&foreign);
+        let e = b
+            .health(mh::HealthOp::RemoveAnnotation {
+                connection_id: "open".into(),
+                session: foreign,
+                annotation_id: annotation_id.clone(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, "not_allowed");
+        assert!(matches!(
+            b.health(mh::HealthOp::RemoveAnnotation {
+                connection_id: "open".into(),
+                session: session.clone(),
+                annotation_id,
+            })
+            .await
+            .unwrap(),
+            mh::HealthOutput::Removed
+        ));
+    }
+
+    #[tokio::test]
+    async fn health_ops_need_llm_access() {
+        let (_d, b) = backend();
+        let e = b
+            .health(mh::HealthOp::ListAnnotations {
+                connection_id: "closed".into(),
+                status: mh::StatusFilter::All,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(e, not_allowed());
+    }
+
+    #[test]
+    fn file_errors_hide_the_path() {
+        let e = AppError::from(std::io::Error::other("/secret/path/health/c1.json"));
+        let b = health_to_backend(e);
+        assert_eq!(b.code, "internal");
+        assert!(!b.message.contains("/secret"), "{b:?}");
+        let e = crate::k8s::errors::not_allowed("get", "pods", Some("team-a"));
+        assert_eq!(health_to_backend(e).code, "FORBIDDEN");
+    }
+
+    const HOST: &str = "marker-host.example";
+    const CMD: &str = "/opt/marker-cmd";
+    const USER: &str = "marker-user";
+
+    /// Ошибки подключения, у которых в тексте может оказаться адрес, команда плагина или имя
+    /// пользователя профиля.
+    fn profile_errors() -> Vec<AppError> {
+        let mut errors = vec![
+            app_err!(
+                ErrorCode::AuthFailed,
+                "errors.exec.start",
+                "Cannot start the exec plugin {{command}}: {{error}}",
+                command = CMD,
+                error = format!("{USER} at {HOST}")
+            ),
+            app_err!(
+                ErrorCode::Timeout,
+                "errors.exec.timeout",
+                "The exec plugin {{command}} did not finish in {{seconds}} s",
+                command = CMD,
+                seconds = 30
+            ),
+            app_err!(
+                ErrorCode::AuthFailed,
+                "errors.exec.failed",
+                "The exec plugin {{command}} failed (exit code {{code}})",
+                command = CMD,
+                code = 1
+            ),
+            app_err!(
+                ErrorCode::AuthFailed,
+                "errors.exec.badOutput",
+                "The exec plugin {{command}} returned no credentials",
+                command = CMD
+            ),
+            app_err!(
+                ErrorCode::AuthFailed,
+                "errors.exec.commandNotAbsolute",
+                "Specify the full path to “{{command}}” — use “Find”",
+                command = CMD
+            ),
+            app_err!(
+                ErrorCode::AuthFailed,
+                "errors.exec.argsNotAllowed",
+                "The exec plugin “{{command}}” may run only as “{{expected}} …”",
+                command = CMD,
+                expected = format!("{CMD} --user={USER}")
+            ),
+            app_err!(
+                ErrorCode::InvalidInput,
+                "errors.connections.badApiUrl",
+                "Invalid API server address “{{url}}”",
+                url = format!("https://{HOST}:6443")
+            ),
+            app_err!(
+                ErrorCode::InvalidInput,
+                "errors.connections.badProxyUrl",
+                "Invalid proxy address “{{url}}”: use http://host:port",
+                url = format!("socks5://{HOST}:1080")
+            ),
+            app_err!(
+                ErrorCode::AuthFailed,
+                "errors.oauth.rejected",
+                "The OAuth server rejected the sign-in: {{reason}}",
+                reason = format!("no such user {USER} at {HOST}")
+            ),
+            app_err!(
+                ErrorCode::AuthFailed,
+                "errors.oauth.denied",
+                "Sign-in was not completed: {{error}}",
+                error = format!("access_denied for {USER}")
+            ),
+            app_err!(
+                ErrorCode::AuthFailed,
+                "errors.k8s.credentials",
+                "The credentials of this connection cannot be used: {{message}}",
+                message = format!("auth error for {USER}@{HOST}")
+            ),
+        ];
+        // Запасные тексты сети и 403 строит сам код приложения, как и при настоящем сбое.
+        errors.push(crate::k8s::errors::from_transport_text(&format!(
+            "error sending request for {HOST}: odd failure"
+        )));
+        errors.push(crate::k8s::errors::forbidden(&format!(
+            "User \"{USER}\" may not do this at {HOST}"
+        )));
+        errors
+    }
+
+    #[test]
+    fn connection_errors_hide_the_profile() {
+        let errors = profile_errors();
+        assert_eq!(errors.len(), 13);
+        for e in errors {
+            let expected_code = code(&e);
+            let shown = [error_text(&e), {
+                let b = to_backend(e.clone());
+                assert_eq!(b.code, expected_code, "{}", e.key);
+                format!("{}: {}", b.code, b.message)
+            }];
+            for text in shown {
+                for marker in [HOST, CMD, USER] {
+                    assert!(!text.contains(marker), "{}: {text}", e.key);
+                }
+                assert!(
+                    text.starts_with(&format!("{expected_code}: ")),
+                    "{}: {text}",
+                    e.key
+                );
+                assert!(text.len() > expected_code.len() + 2, "{}: {text}", e.key);
+            }
+        }
+    }
+
+    #[test]
+    fn errors_with_names_the_model_asked_for_keep_their_text() {
+        let e = crate::k8s::errors::not_allowed("get", "pods", Some("team-a"));
+        assert_eq!(to_backend(e.clone()).message, e.message);
+        assert!(error_text(&e).contains("team-a"));
+        let e = crate::k8s::errors::from_status(
+            &kube::core::Status::failure("pods \"web-1\" not found", "NotFound").with_code(404),
+        );
+        assert_eq!(to_backend(e.clone()).message, e.message);
+        assert!(error_text(&e).contains("web-1"));
+        let e = crate::k8s::read::check_namespace("Bad_NS").unwrap_err();
+        assert!(to_backend(e).message.contains("Bad_NS"));
+        let e = crate::health::store::connection_not_found("c-9");
+        assert!(error_text(&e).contains("c-9"));
+        let e = crate::app_err!(
+            ErrorCode::AuthFailed,
+            "errors.oauth.cancelled",
+            "Sign-in was cancelled"
+        );
+        assert_eq!(to_backend(e.clone()).message, e.message);
+        let e = crate::k8s::errors::from_transport_text("tls handshake eof");
+        assert_eq!(to_backend(e.clone()).message, e.message);
+    }
+}

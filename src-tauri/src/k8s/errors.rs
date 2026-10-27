@@ -220,8 +220,9 @@ pub fn breaks_client(code: ErrorCode) -> bool {
 }
 
 /// Объект `kind` с именем `name` пришёл в виде, который Glafira не разбирает (вид без типа
-/// в `k8s-openapi`, например DeploymentConfig). Текст ошибки разбора — в `details`.
-pub fn malformed(kind: &str, name: &str, details: impl std::fmt::Display) -> AppError {
+/// в `k8s-openapi`, например DeploymentConfig). Текст ошибки разбора в ошибку не попадает: serde
+/// цитирует в нём значение поля, а ошибка уходит в интерфейс и MCP.
+pub fn malformed(kind: &str, name: &str) -> AppError {
     app_err!(
         ErrorCode::Internal,
         "errors.k8s.malformedObject",
@@ -229,7 +230,6 @@ pub fn malformed(kind: &str, name: &str, details: impl std::fmt::Display) -> App
         kind = kind,
         name = name
     )
-    .with_details(details.to_string())
 }
 
 #[cfg(test)]

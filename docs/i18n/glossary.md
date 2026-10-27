@@ -54,3 +54,14 @@ HTTPRoute, GRPCRoute, Service, ConfigMap, Secret, PVC, HPA, ResourceQuota, Limit
 | expired | истёк | срок сертификата Route, токена |
 | the list is incomplete | список неполный | показаны первые 10 000 объектов (`truncated`) |
 | dropped (log lines) | отброшены (строки лога) | ранние строки, которые не помещаются в окно логов |
+| cluster check / check | проверка кластера / проверка | запуск встроенных правил; «Проверить кластер» |
+| finding | находка | результат правила проверки; вкладка с находками и замечаниями — «Замечания» (Findings) |
+| LLM note / note | замечание LLM / замечание | пишет LLM-ассистент через MCP; статусы — «решено», «не актуально» |
+| severity: critical / warning / info | строгость: критично / предупреждение / информация | |
+| hide / restore (a finding) | скрыть / вернуть | скрытая находка не считается в значках |
+| restart loop | перезапуски по кругу | `CrashLoopBackOff` или завершение с ошибкой между перезапусками |
+| cordoned (node) | закрыта для новых подов | `spec.unschedulable` |
+| LLM assistant | LLM-ассистент | Claude Desktop, Claude Code, Cursor… |
+| LLM access | доступ LLM | настройка подключения: «Выключен» / «Только метаданные» |
+| LLM projects | проекты для LLM | `llmNamespaces`: «Все доступные» / «Только перечисленные» |
+| MCP client / approve / revoke | MCP-клиент / разрешить / отозвать | подтверждение нового клиента диалогом |

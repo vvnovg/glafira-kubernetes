@@ -423,6 +423,8 @@ pub fn import_context(
         connect_timeout_ms: 10_000,
         folder_id: None,
         order: 0,
+        llm_access: Default::default(),
+        llm_namespaces: None,
         extra: Default::default(),
     };
     normalize_profile(&mut profile);

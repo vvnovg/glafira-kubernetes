@@ -17,6 +17,7 @@ vi.mock("../../api/client", async (importOriginal) => {
   return {
     ...orig,
     api: {
+      getHealth: vi.fn().mockResolvedValue({ lastCheck: null, ignored: [], annotations: [] }),
       getNamespaceAccess: vi.fn(),
       listPods: vi.fn(),
       listWorkloads: vi.fn(),

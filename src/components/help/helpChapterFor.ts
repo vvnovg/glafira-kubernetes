@@ -13,6 +13,8 @@ export function helpChapterFor(tab: TabSpec | null): ChapterId {
       return "projects-workloads";
     case "pod":
       return "pods-logs";
+    case "findings":
+      return "health-check";
     default:
       return "getting-started";
   }

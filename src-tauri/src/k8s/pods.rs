@@ -196,8 +196,33 @@ fn oom(state: Option<&ContainerState>) -> bool {
         .is_some_and(|t| t.reason.as_deref() == Some("OOMKilled"))
 }
 
+/// Контейнер перезапускается в цикле: ждёт с причиной `CrashLoopBackOff` или — между
+/// перезапусками, пока kubelet не написал эту причину (Kubernetes 1.37 держит контейнер так
+/// минутами), — завершён с ошибкой (код ≠ 0 или сигнал) и уже перезапускался, а под не завершён,
+/// не удаляется и перезапускает этот контейнер (`restartPolicy` пода не `Never`; нативный
+/// sidecar перезапускается всегда). Решение пользователя на этапе O2.
+pub fn in_crash_loop(p: &Pod, c: &ContainerStatus) -> bool {
+    if waiting_reason(c) == Some("CrashLoopBackOff") {
+        return true;
+    }
+    let failed = c
+        .state
+        .as_ref()
+        .and_then(|s| s.terminated.as_ref())
+        .is_some_and(|t| t.exit_code != 0 || t.signal.is_some_and(|s| s != 0));
+    let phase = p.status.as_ref().and_then(|s| s.phase.as_deref());
+    let restarts = p.spec.as_ref().and_then(|s| s.restart_policy.as_deref()) != Some("Never")
+        || sidecar_names(p).contains(c.name.as_str());
+    failed
+        && c.restart_count >= 1
+        && restarts
+        && !matches!(phase, Some("Succeeded" | "Failed"))
+        && p.metadata.deletion_timestamp.is_none()
+}
+
 /// Проблема пода — то, что видно сейчас: образ не скачивается, контейнер завершён по памяти
-/// (сейчас или в последний раз), перезапускается в цикле, под ждёт размещения или упал.
+/// (сейчас или в последний раз), перезапускается в цикле (`in_crash_loop`), под ждёт
+/// размещения или упал.
 pub fn pod_problem(p: &Pod) -> Option<PodProblem> {
     let all: Vec<&ContainerStatus> = statuses(p, true).iter().chain(statuses(p, false)).collect();
     let phase = p.status.as_ref().and_then(|s| s.phase.as_deref());
@@ -211,10 +236,7 @@ pub fn pod_problem(p: &Pod) -> Option<PodProblem> {
         .any(|c| oom(c.state.as_ref()) || oom(c.last_state.as_ref()))
     {
         Some(PodProblem::OomKilled)
-    } else if all
-        .iter()
-        .any(|c| waiting_reason(c) == Some("CrashLoopBackOff"))
-    {
+    } else if all.iter().any(|c| in_crash_loop(p, c)) {
         Some(PodProblem::CrashLoop)
     } else if phase == Some("Pending") {
         Some(PodProblem::Pending)
@@ -452,6 +474,19 @@ pub struct PodDetails {
     pub volumes: Vec<VolumeView>,
 }
 
+/// Тома спецификации пода (или шаблона подов workload'а).
+pub fn volumes_of(spec: &k8s_openapi::api::core::v1::PodSpec) -> Vec<VolumeView> {
+    spec.volumes
+        .as_ref()
+        .map(|vs| {
+            vs.iter()
+                .filter_map(|v| serde_json::to_value(v).ok())
+                .filter_map(|v| volume_view(&v))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Вид тома и его источник — первое заданное поле `volumes[]` кроме имени.
 fn volume_view(v: &serde_json::Value) -> Option<VolumeView> {
     let obj = v.as_object()?;
@@ -514,15 +549,7 @@ pub fn pod_details(p: &Pod) -> PodDetails {
         containers,
         labels: p.metadata.labels.clone().unwrap_or_default(),
         annotations,
-        volumes: spec
-            .and_then(|s| s.volumes.as_ref())
-            .map(|vs| {
-                vs.iter()
-                    .filter_map(|v| serde_json::to_value(v).ok())
-                    .filter_map(|v| volume_view(&v))
-                    .collect()
-            })
-            .unwrap_or_default(),
+        volumes: spec.map(volumes_of).unwrap_or_default(),
     }
 }
 
@@ -640,6 +667,64 @@ mod tests {
                 "2026-10-25T10:00:00Z".parse().unwrap(),
             ));
         assert_eq!(pod_status(&deleting), "Terminating");
+    }
+
+    /// Между перезапусками kubelet 1.37 показывает упавший контейнер завершённым (`Error`), а не
+    /// `CrashLoopBackOff`: такой под — тоже в цикле перезапусков, пока он вообще перезапускается.
+    #[test]
+    fn a_failed_container_between_restarts_is_a_crash_loop() {
+        let between = || {
+            let mut p = pod(
+                "a",
+                "Running",
+                serde_json::json!({"terminated": {"exitCode": 1, "reason": "Error"}}),
+            );
+            p["status"]["containerStatuses"][0]["restartCount"] = 3.into();
+            p
+        };
+        let p = from(between());
+        assert_eq!(pod_status(&p), "Error", "статус — как у kubectl");
+        assert_eq!(pod_problem(&p), Some(PodProblem::CrashLoop));
+        let mut killed = between();
+        killed["status"]["containerStatuses"][0]["state"] =
+            serde_json::json!({"terminated": {"exitCode": 0, "signal": 9}});
+        assert_eq!(pod_problem(&from(killed)), Some(PodProblem::CrashLoop));
+
+        let mut first = between();
+        first["status"]["containerStatuses"][0]["restartCount"] = 0.into();
+        assert_eq!(pod_problem(&from(first)), None, "ещё не перезапускался");
+        let mut clean = between();
+        clean["status"]["containerStatuses"][0]["state"] =
+            serde_json::json!({"terminated": {"exitCode": 0, "reason": "Completed"}});
+        assert_eq!(pod_problem(&from(clean)), None, "завершился без ошибки");
+        let mut never = between();
+        never["spec"]["restartPolicy"] = "Never".into();
+        assert_eq!(pod_problem(&from(never)), None, "не перезапускается");
+        let mut failed = between();
+        failed["status"]["phase"] = "Failed".into();
+        assert_eq!(pod_problem(&from(failed)), Some(PodProblem::Failed));
+        let mut deleting = from(between());
+        deleting.metadata.deletion_timestamp =
+            Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                "2026-10-25T10:00:00Z".parse().unwrap(),
+            ));
+        assert_eq!(
+            pod_problem(&deleting),
+            None,
+            "удаляемый под гасит контейнеры"
+        );
+    }
+
+    #[test]
+    fn a_sidecar_restarts_even_in_a_pod_that_never_restarts() {
+        let mut p = running("a");
+        p["spec"]["restartPolicy"] = "Never".into();
+        p["spec"]["initContainers"] =
+            serde_json::json!([{"name": "proxy", "image": "proxy:1", "restartPolicy": "Always"}]);
+        p["status"]["initContainerStatuses"] = serde_json::json!([{"name": "proxy",
+            "image": "proxy:1", "imageID": "", "ready": false, "restartCount": 2,
+            "state": {"terminated": {"exitCode": 2, "reason": "Error"}}}]);
+        assert_eq!(pod_problem(&from(p)), Some(PodProblem::CrashLoop));
     }
 
     #[test]

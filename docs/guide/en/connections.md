@@ -122,6 +122,15 @@ conditions, taints, capacity and allocatable resources, addresses and labels.
 [[ui:connections.form.environment]] sets the color of the connection. A new `prod` connection is
 [[ui:common.readOnly]]: Glafira will not change anything in the cluster through it.
 
+## LLM access {#llm}
+
+[[ui:connections.form.llmAccess]] decides what an LLM assistant connected over MCP sees: [[ui:connections.form.llmAccessOff]]
+(the default) — the connection does not exist for it; [[ui:connections.form.llmAccessMetadata]] — objects, statuses,
+events and quotas without the values of Secrets, ConfigMaps and environment variables. [[ui:connections.form.llmScope]]
+narrows the access down to the listed projects; the assistant sees the cluster and the nodes if you can read them.
+Both settings stay on this computer: export does not write them, and import does not change them for connections you
+already have. More in [LLM assistants (MCP)](llm-mcp.md#what-llm-sees).
+
 ## Folders, export and import {#folders}
 
 Connections can be arranged in nested folders: [[ui:sidebar.newFolder]], drag and drop. [[ui:sidebar.exportAll]]
