@@ -1026,6 +1026,8 @@
       "container.noRequests": {
         "title": "{{object}}: containers without requests",
         "details": "Running containers without a CPU request: {{cpu}}; without a memory request: {{memory}} (after LimitRange defaults).",
+        "detailsCpu": "Running containers without a CPU request: {{cpu}} (after LimitRange defaults).",
+        "detailsMemory": "Running containers without a memory request: {{memory}} (after LimitRange defaults).",
         "fix": "Set requests close to the real usage: the scheduler places pods by them, and pods without requests are evicted first."
       },
       "container.noMemoryLimit": {

@@ -42,9 +42,14 @@ fn param(f: &Finding, name: &str) -> String {
     f.params.get(name).map(text).unwrap_or_default()
 }
 
-/// « (reason: message)» из параметров, если они есть.
+/// « (reason: message)» из параметров, если они есть. Точку в конце сообщения Kubernetes
+/// ставит сам текст находки, иначе выходит «….).».
 fn because(f: &Finding) -> String {
-    match (f.param_str("reason"), f.param_str("message")) {
+    let message = f
+        .param_str("message")
+        .map(|m| m.trim_end_matches(|c: char| c == '.' || c.is_whitespace()))
+        .filter(|m| !m.is_empty());
+    match (f.param_str("reason"), message) {
         (Some(r), Some(m)) => format!(" ({r}: {m})"),
         (Some(r), None) => format!(" ({r})"),
         (None, Some(m)) => format!(" ({m})"),
@@ -226,14 +231,23 @@ pub fn english(f: &Finding) -> (String, String) {
                 None => "One replica and no HPA: a restart, a node drain or an update makes it unavailable.".into(),
             },
         ),
-        "container.noRequests" => (
-            format!("{o}: containers without requests"),
-            format!(
-                "Running containers without a CPU request: {}; without a memory request: {} (after LimitRange defaults). The scheduler cannot place such pods reliably and they are evicted first.",
-                list(f, "cpu"),
-                list(f, "memory")
-            ),
-        ),
+        "container.noRequests" => {
+            // Пустой список не называется: «without a CPU request: ;» читается как сбой.
+            let parts: Vec<String> = [("a CPU request", "cpu"), ("a memory request", "memory")]
+                .into_iter()
+                .filter_map(|(what, name)| {
+                    let l = list(f, name);
+                    (!l.is_empty()).then(|| format!("without {what}: {l}"))
+                })
+                .collect();
+            (
+                format!("{o}: containers without requests"),
+                format!(
+                    "Running containers {} (after LimitRange defaults). The scheduler cannot place such pods reliably and they are evicted first.",
+                    parts.join("; ")
+                ),
+            )
+        }
         "container.noMemoryLimit" => (
             format!("{o}: containers without a memory limit"),
             format!(
@@ -422,6 +436,39 @@ mod tests {
         assert!(
             details.contains("exit code 1, up to 7 restarts"),
             "{details}"
+        );
+    }
+
+    #[test]
+    fn empty_lists_and_final_dots_do_not_reach_the_text() {
+        let requests = Finding::new(
+            "container.noRequests",
+            Severity::Warning,
+            Target::object(TargetKind::Pod, "kube-system", "kube-apiserver-n1"),
+            None,
+            serde_json::json!({ "cpu": [], "memory": ["kube-apiserver"] }),
+        );
+        assert!(
+            english(&requests)
+                .1
+                .starts_with("Running containers without a memory request: kube-apiserver (after"),
+            "{}",
+            english(&requests).1
+        );
+        let pending = Finding::new(
+            "pod.pending",
+            Severity::Critical,
+            Target::workload("team-a", WorkloadKind::Deployment, "web"),
+            None,
+            serde_json::json!({ "pods": ["web-1"], "count": 1, "total": 1, "minutes": 9,
+                "reason": "Unschedulable", "message": "0/1 nodes are available. " }),
+        );
+        assert!(
+            english(&pending)
+                .1
+                .ends_with("(Unschedulable: 0/1 nodes are available)."),
+            "{}",
+            english(&pending).1
         );
     }
 

@@ -13,8 +13,11 @@ use glafira_mcp_core::{
 use glafira_mcp_kubernetes::health::*;
 use glafira_mcp_kubernetes::model::*;
 use glafira_mcp_kubernetes::{GatewayOptions, INSTRUCTIONS};
-use rmcp::model::{CallToolRequestParams, CallToolResult};
-use rmcp::service::RunningService;
+use rmcp::model::{
+    CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig, Implementation,
+    ProtocolVersion,
+};
+use rmcp::service::{ClientLifecycleMode, RunningService, serve_client_with_lifecycle};
 use rmcp::{RoleClient, ServiceExt};
 use serde_json::{Value, json};
 
@@ -44,6 +47,8 @@ struct Fake {
     scope_overrides: Mutex<BTreeMap<String, Option<BTreeSet<String>>>>,
     /// Смена области, которая происходит, пока идёт проверка: подключение и его новая область.
     scope_after_check: Mutex<Option<(String, Option<BTreeSet<String>>)>>,
+    /// Клиенты, о праве которых шлюз спрашивал приложение, по порядку (`None` — безымянный).
+    asked: Mutex<Vec<Option<String>>>,
 }
 
 impl Fake {
@@ -61,6 +66,7 @@ impl Fake {
             many_notes: AtomicUsize::new(0),
             scope_overrides: Mutex::new(BTreeMap::new()),
             scope_after_check: Mutex::new(None),
+            asked: Mutex::new(Vec::new()),
         })
     }
 
@@ -278,7 +284,11 @@ fn annotations() -> BTreeMap<String, String> {
 }
 
 impl Hooks for Fake {
-    fn access(&self, _session: &SessionView) -> SessionAccess {
+    fn access(&self, session: &SessionView) -> SessionAccess {
+        self.asked
+            .lock()
+            .unwrap()
+            .push(session.client.as_ref().map(|c| c.name.clone()));
         SessionAccess::Approved
     }
 
@@ -662,6 +672,35 @@ async fn exposes_exactly_the_tools() {
             assert!(!schema.contains(note), "{}: {note}: {schema}", t.name);
         }
     }
+}
+
+/// MCP 2026-07-28 без `initialize` (так подключается Claude Code): клиент называет себя в `_meta`
+/// каждого запроса. Подтверждение запрашивается уже на `server/discover` и на списке
+/// инструментов — диалог появляется при подключении, а не после отказа первому вызову.
+#[tokio::test]
+async fn client_without_initialize_is_known_before_the_first_call() {
+    let fake = Fake::new();
+    let e = env(fake.clone()).await;
+    let mut s = endpoint::connect(&e.ep).await.unwrap();
+    handshake::client(&mut s, TOKEN).await.unwrap();
+    let me = ClientConfig::new(
+        ClientCapabilities::default(),
+        Implementation::new("claude-code", "2.1.311"),
+    );
+    let c = serve_client_with_lifecycle(
+        me,
+        s,
+        ClientLifecycleMode::Discover {
+            preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+        },
+    )
+    .await
+    .unwrap();
+    let asked = || fake.asked.lock().unwrap().clone();
+    let me = Some("claude-code".to_string());
+    assert_eq!(asked(), std::slice::from_ref(&me));
+    c.list_all_tools().await.unwrap();
+    assert_eq!(asked(), [me.clone(), me]);
 }
 
 #[tokio::test]

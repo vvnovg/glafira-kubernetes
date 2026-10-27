@@ -10,6 +10,7 @@ import { ErrorBanner } from "../common/ErrorBanner";
 import { Hint } from "../common/Hint";
 import { formatArgs, formatEnv, hasSecretValues, launchKey, launchLine, maskArgs, maskEnv, needsExecConfirmation, newExec, parseArgs, parseEnv } from "./exec";
 import { formatNamespaces, parseNamespaces, withAuthMethod, withCaMode, withProxyMode } from "./profile";
+import { ProjectListInput } from "./ProjectListInput";
 import { folderPaths } from "./tree/folderTree";
 
 const ENVIRONMENTS: Environment[] = ["local", "dev", "test", "stage", "prod"];
@@ -53,6 +54,14 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
   const insecureForbidden = policyQ.data?.allowInsecureTls === false;
   const execForbidden = policyQ.data?.allowExecAuth === false;
   const paths = useMemo(() => folderPaths(foldersQ.data ?? []), [foldersQ.data]);
+  // Подсказки полей проектов: проекты, которые уже прочитало дерево (из кэша, без нового запроса), и
+  // проекты сохранённого профиля — не недописанный текст полей.
+  const clusterProjectsQ = useQuery({ queryKey: ["projects", initial.id], queryFn: () => api.listProjects(initial.id), enabled: false });
+  const knownProjects = useMemo(() => {
+    const saved = [...initial.favoriteNamespaces, ...initial.manualNamespaces, ...(initial.llmNamespaces ?? [])];
+    const all = new Set([...(clusterProjectsQ.data?.items ?? []).map((p) => p.name), ...saved]);
+    return [...all].sort((a, b) => a.localeCompare(b));
+  }, [clusterProjectsQ.data, initial]);
   // Ссылка на несуществующую папку означает корень (так её показывает и дерево).
   const knownFolder = (id: string | null | undefined): string | null =>
     !id || (foldersQ.isSuccess && !paths.some((p) => p.id === id)) ? null : id;
@@ -406,13 +415,13 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
           <label htmlFor="cf-fav">{t("connections.form.favorites")}</label>
           <Hint k="hints.connections.favorites" label={t("connections.form.favorites")} />
         </span>
-        <input id="cf-fav" placeholder="team-a, team-b" value={favorites} onChange={(e) => setFavorites(e.target.value)} />
+        <ProjectListInput id="cf-fav" placeholder="team-a, team-b" value={favorites} onChange={setFavorites} known={knownProjects} />
 
         <span className="field-label">
           <label htmlFor="cf-manual">{t("connections.form.manualNamespaces")}</label>
           <Hint k="hints.connections.manualNamespaces" label={t("connections.form.manualNamespaces")} />
         </span>
-        <input id="cf-manual" value={manual} onChange={(e) => setManual(e.target.value)} />
+        <ProjectListInput id="cf-manual" value={manual} onChange={setManual} known={knownProjects} />
 
         <label htmlFor="cf-timeout">{t("connections.form.requestTimeout")}</label>
         <input
@@ -457,7 +466,7 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
             {llmListed && (
               <>
                 <label htmlFor="cf-llm-ns">{t("connections.form.llmNamespaces")}</label>
-                <input id="cf-llm-ns" placeholder="team-a, team-b" value={llmList} onChange={(e) => setLlmList(e.target.value)} />
+                <ProjectListInput id="cf-llm-ns" placeholder="team-a, team-b" value={llmList} onChange={setLlmList} known={knownProjects} />
               </>
             )}
           </>

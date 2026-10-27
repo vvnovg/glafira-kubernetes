@@ -42,7 +42,8 @@ export function findingParams(f: Finding, t: TFunction): Record<string, string |
       ? t("health.podsIn", { count: Number(f.params.count ?? 0), total: Number(f.params.total ?? 0), pods: list(f.params.pods) })
       : "";
   const reason = str(f.params.reason);
-  const message = str(f.params.message);
+  // Точку в конце сообщения Kubernetes ставит сам текст находки, иначе выходит «….).».
+  const message = str(f.params.message).replace(/[.\s]+$/, "");
   p.because = reason && message ? ` (${reason}: ${message})` : reason || message ? ` (${reason || message})` : "";
   if (typeof f.params.days === "number") p.daysAgo = -f.params.days;
   if (f.ruleId === "check.partial") {
@@ -76,6 +77,10 @@ export function detailsKey(f: Finding): string {
       return Array.isArray(p.referencedBy) && p.referencedBy.length > 0 ? "detailsUsedBy" : "details";
     case "check.partial":
       return [p.projectLimit, p.podLimit, p.timedOut].includes(true) || (Array.isArray(p.gaps) && p.gaps.length > 0) ? "details" : "detailsUnknown";
+    // Пустой список не называется: «без request CPU: ;» читается как сбой.
+    case "container.noRequests":
+      if (Array.isArray(p.cpu) && p.cpu.length === 0) return "detailsMemory";
+      return Array.isArray(p.memory) && p.memory.length === 0 ? "detailsCpu" : "details";
     default:
       return "details";
   }
@@ -87,7 +92,12 @@ const missing = () => "—";
 export function findingTexts(f: Finding, t: TFunction) {
   const p = { ...findingParams(f, t), missingInterpolationHandler: missing };
   const base = `health.rules.${f.ruleId}`;
-  return { title: t(`${base}.title`, p), details: t(`${base}.${detailsKey(f)}`, p), fix: t(`${base}.fix`, p) };
+  return { title: capitalized(t(`${base}.title`, p)), details: t(`${base}.${detailsKey(f)}`, p), fix: t(`${base}.fix`, p) };
+}
+
+/** Заголовок начинается с объекта, а «под …», «нода …», «the cluster» пишутся со строчной. */
+function capitalized(s: string): string {
+  return s.charAt(0).toLocaleUpperCase() + s.slice(1);
 }
 
 /** Находки последней проверки: скрытые — только по запросу. */

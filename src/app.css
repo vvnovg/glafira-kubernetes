@@ -23,3 +23,11 @@ th.cap::first-letter { text-transform: uppercase; }
 /* Строка не обрезается: `min-width: max-content` растягивает её за край окна, и `.vlist` (overflow: auto) прокручивается вбок. */
 .log-line { position: absolute; left: 0; right: 0; min-width: max-content; padding: 0 8px; white-space: pre; }
 input.narrow { width: 70px; }
+/* Подсказка в пустом поле — курсивом и бледнее: её не путают ни с введённым значением, ни с подписью. */
+input::placeholder, textarea::placeholder { font-style: italic; color: var(--muted); opacity: 0.7; }
+/* Поле с подсказками (проекты в форме подключения): список под полем, поверх следующих строк. */
+.combo { position: relative; }
+.combo > input { width: 100%; box-sizing: border-box; }
+.combo-list { position: absolute; z-index: 10; left: 0; right: 0; top: calc(100% + 2px); margin: 0; padding: 2px 0; list-style: none; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; max-height: 200px; overflow: auto; box-shadow: 0 4px 12px rgb(0 0 0 / 20%); }
+.combo-list li { padding: 3px 8px; cursor: pointer; }
+.combo-list li[aria-selected="true"] { background: var(--bg-alt); }

@@ -120,7 +120,8 @@ pub fn check(s: &ClusterSnapshot, out: &mut Findings) {
                     "workload.rolloutStuck",
                     target(),
                     None,
-                    json!({ "reason": p.reason, "message": p.message }),
+                    // Причина всегда ProgressDeadlineExceeded и уже есть в тексте находки.
+                    json!({ "message": p.message }),
                 );
             }
             // Без прав на HPA одной реплике не поверить: HPA мог бы держать больше.

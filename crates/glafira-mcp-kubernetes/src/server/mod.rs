@@ -7,7 +7,10 @@ use std::time::Duration;
 
 use glafira_mcp_core::{AuditLog, BackendError, Endpoint, Hooks, McpServerHandle, Session};
 use rmcp::handler::server::router::tool::ToolRouter;
-use rmcp::model::{Implementation, InitializeRequestParams, InitializeResult, ServerCapabilities};
+use rmcp::model::{
+    CacheScope, DiscoverResult, Implementation, InitializeRequestParams, InitializeResult,
+    ListToolsResult, PaginatedRequestParams, ProtocolVersion, ResultType, ServerCapabilities,
+};
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, tool_handler};
 
@@ -148,5 +151,48 @@ impl ServerHandler for KubeServer {
         // Подтверждение запрашивается сразу, а не при первом вызове инструмента.
         self.session.initialized(request.client_info.clone());
         self.negotiate_initialize(&request)
+    }
+
+    // MCP 2026-07-28 без `initialize` (так подключается Claude Code): клиент называет себя в
+    // `_meta` каждого запроса. Подтверждение запрашивается уже на `server/discover` и на списке
+    // инструментов, а не после отказа первому вызову.
+    async fn discover(
+        &self,
+        context: RequestContext<RoleServer>,
+    ) -> Result<DiscoverResult, ErrorData> {
+        self.introduce(&context);
+        Ok(DiscoverResult::from_server_info(
+            self.supported_protocol_versions().into_owned(),
+            self.get_info(),
+        ))
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        self.introduce(&context);
+        // Дальше — как в `tool_handler` rmcp.
+        let hints = context
+            .protocol_version()
+            .is_some_and(|v| v >= ProtocolVersion::V_2026_07_28);
+        Ok(ListToolsResult {
+            result_type: Some(ResultType::COMPLETE),
+            tools: self.tool_router.list_all(),
+            meta: None,
+            next_cursor: None,
+            ttl_ms: hints.then_some(0),
+            cache_scope: hints.then_some(CacheScope::Public),
+        })
+    }
+}
+
+impl KubeServer {
+    /// Клиент из `_meta` запроса (или из `initialize`): известен — подтверждение запрашивается.
+    fn introduce(&self, context: &RequestContext<RoleServer>) {
+        if let Some(client) = context.client_info() {
+            self.session.initialized(client);
+        }
     }
 }

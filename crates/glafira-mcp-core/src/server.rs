@@ -335,7 +335,8 @@ impl Session {
         }
     }
 
-    /// `initialize`: клиент известен — подтверждение запрашивается сразу, а не при первом вызове.
+    /// `initialize` или запрос с клиентом в `_meta` (2026-07-28): клиент известен — подтверждение
+    /// запрашивается сразу, а не при первом вызове.
     pub fn initialized(&self, client: Implementation) {
         let view = self.identify(Some(client));
         let _ = self.shared.hooks.access(&view);

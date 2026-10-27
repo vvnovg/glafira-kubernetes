@@ -96,7 +96,9 @@ in kubeconfig). The mode without certificate verification is insecure; your orga
 
 Glafira works with your rights only. On connection it checks what you may read at the cluster level (projects, nodes,
 operators). If the cluster does not let you list projects, enter them in
-[[ui:connections.form.manualNamespaces]].
+[[ui:connections.form.manualNamespaces]]. The fields with lists of projects suggest the projects the tree has already
+shown and the projects from the connection's fields: start typing a name and pick it with the arrows and Enter or a
+click.
 
 ## Cluster overview {#overview}
 
