@@ -36,6 +36,7 @@ import type {
   SecretsInput,
   TestReport,
   TreeItemRef,
+  UpdateCheck,
   WatchEvent,
   WatchParams,
   WorkloadDetails,
@@ -66,6 +67,8 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
 
 export const api = {
   getAppInfo: () => call<AppInfo>("get_app_info"),
+  checkUpdate: () => call<UpdateCheck>("check_update"),
+  installUpdate: (force: boolean) => call<void>("install_update", { force }),
   getLanguageSettings: () => call<LanguageSettings>("get_language_settings"),
   setLanguage: (lang: string | null) => call<LanguageSettings>("set_language", { lang }),
   getPolicyStatus: () => call<PolicyStatus>("get_policy_status"),

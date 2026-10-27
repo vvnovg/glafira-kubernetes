@@ -10,6 +10,7 @@ vi.mock("./api/client", async (importOriginal) => {
       listConnections: vi.fn().mockResolvedValue([]),
       listFolders: vi.fn().mockResolvedValue([]),
       getMcpStatus: vi.fn().mockResolvedValue(mcpStatus()),
+      checkUpdate: vi.fn().mockResolvedValue({ status: "upToDate" }),
     },
   };
 });

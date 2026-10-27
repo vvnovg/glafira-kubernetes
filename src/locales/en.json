@@ -170,6 +170,19 @@
       "disabledByPolicy": "MCP is disabled by your organization",
       "noExe": "Cannot find the Glafira executable: {{error}}",
       "auditMissing": "The MCP log is not available yet: {{error}}"
+    },
+    "updates": {
+      "managed": "Updates are managed by your organization",
+      "notConfigured": "Updates are not configured in this build",
+      "badPolicyUrl": "Invalid update address in the policy: {{url}}",
+      "unavailable": "Updates are unavailable",
+      "noRelease": "The update server has no published versions (or it is temporarily unavailable)",
+      "checkFailed": "Failed to check for updates",
+      "downloadInterrupted": "The update download was interrupted — check your network and try again",
+      "badSignature": "The update signature failed verification — the update was not installed",
+      "installFailed": "Failed to install the update",
+      "sessionsActive": "LLM assistants connected over MCP: {{active}}. Updating will disconnect them.",
+      "none": "No updates available"
     }
   },
   "messages": {
@@ -525,7 +538,23 @@
     "policyError": "Organization policy: {{error}}",
     "dataDir": "Data:",
     "logDir": "Logs:",
-    "trademarks": "Kubernetes is a registered trademark of The Linux Foundation. OpenShift is a trademark of Red Hat, Inc. Platform V and DropApp are trademarks of their respective owners. This project is not affiliated with The Linux Foundation, Red Hat or SberTech."
+    "trademarks": "Kubernetes is a registered trademark of The Linux Foundation. OpenShift is a trademark of Red Hat, Inc. Platform V and DropApp are trademarks of their respective owners. This project is not affiliated with The Linux Foundation, Red Hat or SberTech.",
+    "updates": {
+      "title": "Updates",
+      "check": "Check for updates",
+      "upToDate": "You have the latest version",
+      "available": "Version {{version}} is available",
+      "notesAria": "What's new in version {{version}}",
+      "confirmAria": "Confirm update",
+      "stopAndUpdate": "Disconnect assistants and update",
+      "install": "Install and restart",
+      "installing": "Downloading and installing the update…"
+    },
+    "notice": {
+      "available": "Version {{version}} is available.",
+      "more": "Details",
+      "hideAria": "Dismiss notification"
+    }
   },
   "support": {
     "title": "Support the project",

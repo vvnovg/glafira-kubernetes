@@ -49,12 +49,21 @@ fn shutdown_mcp<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
+/// MCP перед `process::exit` в хуке updater на Windows: runtime там не дождаться, поэтому
+/// синхронно — только `mcp.json` и закрытие сессий.
+pub(crate) fn exit_mcp_now<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(mcp) = app.try_state::<Arc<crate::mcp::McpController>>() {
+        mcp.exit_now();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     crate::tls::ensure_crypto_provider();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             crate::logging::init(&app.path().app_log_dir()?);
             tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting");
@@ -96,6 +105,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::app::get_app_info,
+            commands::app::check_update,
+            commands::app::install_update,
             commands::connections::list_connections,
             commands::connections::save_connection,
             commands::connections::delete_connection,
