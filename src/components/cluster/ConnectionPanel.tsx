@@ -28,6 +28,11 @@ const API_GROUPS: [keyof ApiGroups, string][] = [
   ["gatewayApi", "Gateway API"],
 ];
 
+/** Имя вида `system:serviceaccount:team-a:glafira-dev` переносится после двоеточий, а не посреди слова. */
+function breakAfterColons(name: string) {
+  return name.split(":").flatMap((part, i) => (i === 0 ? [part] : [":", <wbr key={i} />, part]));
+}
+
 /** Вкладка подключения: подключается при открытии и показывает, кто вошёл, что за кластер и какие есть права. */
 export function ConnectionPanel({ connectionId }: { connectionId: string }) {
   const { t } = useTranslation();
@@ -123,7 +128,7 @@ function ConnectionSummary({ info, now, busy, onReconnect }: { info: ConnectionI
       <dl className="stats">
         <div>
           <dt>{t("cluster.connection.user")}</dt>
-          <dd>{info.user}</dd>
+          <dd>{breakAfterColons(info.user)}</dd>
         </div>
         <div>
           <dt>

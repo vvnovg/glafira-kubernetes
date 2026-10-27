@@ -1,6 +1,7 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import appCss from "../../app.css?raw";
 import { renderWithClient } from "../../test/render";
 
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
@@ -94,6 +95,23 @@ describe("ConnectionPanel", () => {
     expect(screen.getByText("✅ Список проектов")).toBeInTheDocument();
     expect(screen.getByText("— Ноды")).toBeInTheDocument();
     expect(screen.getByText("2 группы")).toBeInTheDocument();
+  });
+
+  it("длинное имя пользователя видно целиком: переносится по двоеточиям и в любом месте, а не уходит под соседнюю карточку", async () => {
+    const style = document.createElement("style");
+    style.textContent = appCss;
+    document.head.append(style);
+    try {
+      vi.mocked(api.listConnections).mockResolvedValue([profile({ method: "token" })]);
+      vi.mocked(api.connect).mockResolvedValue({ ...INFO, user: "system:serviceaccount:team-a:glafira-dev" });
+      renderWithClient(<ConnectionPanel connectionId="c1" />);
+      const name = await screen.findByText("system:serviceaccount:team-a:glafira-dev");
+      expect(name.tagName).toBe("DD");
+      expect(name.querySelectorAll("wbr")).toHaveLength(3);
+      expect(getComputedStyle(name).overflowWrap).toBe("anywhere");
+    } finally {
+      style.remove();
+    }
   });
 
   it("срок токена и предупреждение за час, кнопка нод при правах на ноды", async () => {
