@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderWithClient } from "../../test/render";
@@ -17,6 +17,7 @@ vi.mock("../../api/client", async (importOriginal) => {
       getPolicyStatus: vi.fn(),
       resolveExecCommand: vi.fn(),
       cancelConnectionTest: vi.fn(),
+      listProjects: vi.fn(),
     },
   };
 });
@@ -374,6 +375,19 @@ describe("ConnectionForm", () => {
       llmAccess: "metadata",
       llmNamespaces: ["team-a", "team-b"],
     });
+  });
+
+  it("поля проектов подсказывают проекты, которые уже прочитало дерево, без нового запроса", async () => {
+    const user = userEvent.setup();
+    const initial = { ...newProfile(), id: "c1", name: "dev", apiUrl: "https://api.dev:6443", favoriteNamespaces: ["team-a"], llmAccess: "metadata" as const, llmNamespaces: [] };
+    const { client } = renderWithClient(<ConnectionForm initial={initial} tabId="t" />);
+    act(() => client.setQueryData(["projects", "c1"], { items: [{ name: "default" }, { name: "team-b" }], truncated: false }));
+    await user.type(screen.getByLabelText("Проекты LLM"), "te");
+    expect(within(screen.getByRole("listbox")).getAllByRole("option").map((o) => o.textContent)).toEqual(["team-a", "team-b"]);
+    // В избранных уже team-a; недописанное «te» из другого поля подсказкой не становится.
+    await user.type(screen.getByLabelText("Избранные проекты"), ", ");
+    expect(within(screen.getByRole("listbox")).getAllByRole("option").map((o) => o.textContent)).toEqual(["default", "team-b"]);
+    expect(api.listProjects).not.toHaveBeenCalled();
   });
 
   it("ошибка сохранения показывается баннером", async () => {
