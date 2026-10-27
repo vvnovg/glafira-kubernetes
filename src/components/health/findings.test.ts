@@ -32,7 +32,22 @@ describe("findingTexts", () => {
       message: "back-off",
     });
     expect(findingTexts(f, t).details).toBe("Образ registry.invalid/x:1 не скачивается (ImagePullBackOff: back-off).");
-    expect(findingTexts(f, t).title).toBe("под team-a/pull: образ не скачивается");
+    // Заголовок — с заглавной, хотя объект «под …» пишется со строчной.
+    expect(findingTexts(f, t).title).toBe("Под team-a/pull: образ не скачивается");
+    const pod = finding("container.noRequests", "warning", { kind: "pod", namespace: "kube-system", name: "api" }, { cpu: ["x"], memory: [] });
+    expect(findingTexts(pod, i18n.getFixedT("en")).title).toBe("Pod kube-system/api: containers without requests");
+  });
+
+  it("does not double the final dot of a Kubernetes message or name an empty list", () => {
+    const stuck = finding("workload.rolloutStuck", "critical", web, { message: 'ReplicaSet "web-1" has timed out progressing.' });
+    expect(findingTexts(stuck, t).details).toBe(
+      'Progressing=False, ProgressDeadlineExceeded (ReplicaSet "web-1" has timed out progressing): новые поды не стали доступны вовремя.',
+    );
+    const requests = (cpu: string[], memory: string[]) =>
+      findingTexts(finding("container.noRequests", "warning", { kind: "pod", namespace: "kube-system", name: "api" }, { cpu, memory }), t).details;
+    expect(requests([], ["kube-apiserver"])).toBe("Работающие контейнеры без request памяти: kube-apiserver (с учётом значений по умолчанию из LimitRange).");
+    expect(requests(["proxy"], [])).toBe("Работающие контейнеры без request CPU: proxy (с учётом значений по умолчанию из LimitRange).");
+    expect(requests(["proxy"], ["proxy"])).toContain("без request CPU: proxy; без request памяти: proxy");
   });
 
   it("a missing parameter reads as a dash, not as a placeholder", () => {
@@ -91,6 +106,7 @@ describe("findingTexts", () => {
       "ingress.classMissing": [{}, { class: "nginx" }],
       "service.noEndpoints": [{}, { referencedBy: ["Ingress/a"] }],
       "check.partial": [{}, { timedOut: true }],
+      "container.noRequests": [{}, { cpu: [], memory: ["x"] }, { cpu: ["x"], memory: [] }],
     };
     for (const dict of [en as Dict, ru as Dict]) {
       const rules = dict.health.rules;

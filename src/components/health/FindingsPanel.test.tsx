@@ -80,7 +80,7 @@ describe("FindingsPanel", () => {
     expect(await screen.findByText("Тег latest")).toBeInTheDocument();
     expect(screen.getByText("объектов: 2")).toBeInTheDocument();
     expect(screen.getByText("Deployment team-a/web: образы с тегом latest")).toBeInTheDocument();
-    expect(screen.getByText("под team-a/crash: контейнеры перезапускаются по кругу")).toBeInTheDocument();
+    expect(screen.getByText("Под team-a/crash: контейнеры перезапускаются по кругу")).toBeInTheDocument();
     expect(screen.getByText(/Последняя проверка: 5 минут назад · claude-ai/)).toBeInTheDocument();
     expect(screen.getByText(/проверено частично/)).toBeInTheDocument();
   });

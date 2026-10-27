@@ -1046,6 +1046,8 @@
       "container.noRequests": {
         "title": "{{object}}: контейнеры без requests",
         "details": "Работающие контейнеры без request CPU: {{cpu}}; без request памяти: {{memory}} (с учётом значений по умолчанию из LimitRange).",
+        "detailsCpu": "Работающие контейнеры без request CPU: {{cpu}} (с учётом значений по умолчанию из LimitRange).",
+        "detailsMemory": "Работающие контейнеры без request памяти: {{memory}} (с учётом значений по умолчанию из LimitRange).",
         "fix": "Задайте requests около реального потребления: по ним планировщик размещает поды, а поды без requests вытесняются первыми."
       },
       "container.noMemoryLimit": {
