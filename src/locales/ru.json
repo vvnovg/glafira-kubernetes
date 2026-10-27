@@ -351,6 +351,7 @@
       "pasteToken": "Токен",
       "saveToken": "Сохранить токен",
       "tokenPage": "Получить токен на странице кластера",
+      "tokenPlaceholder": "Bearer-токен",
       "editConnection": "Изменить подключение"
     },
     "overview": {

@@ -78,6 +78,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(api.getClusterOverview).mockResolvedValue(OVERVIEW);
   vi.mocked(api.cancelOauthLogin).mockResolvedValue(true);
+  // Страницы токена нет (обычный Kubernetes); тесты OpenShift задают её сами.
+  vi.mocked(api.oauthTokenPage).mockRejectedValue({ code: "AUTH_FAILED", key: "errors.oauth.notAvailable", message: "x", retryable: false });
   useWorkspace.setState({ tabs: [], activeId: null });
 });
 

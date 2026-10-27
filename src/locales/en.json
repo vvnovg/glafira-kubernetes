@@ -349,6 +349,7 @@
       "pasteToken": "Token",
       "saveToken": "Save token",
       "tokenPage": "Get a token on the cluster page",
+      "tokenPlaceholder": "Bearer token",
       "editConnection": "Edit connection"
     },
     "overview": {
