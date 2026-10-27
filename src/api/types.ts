@@ -250,6 +250,11 @@ export interface AppInfo {
   logDir: string;
 }
 
+export type UpdateCheck =
+  | { status: "disabled"; reason: LocalizedText }
+  | { status: "upToDate" }
+  | { status: "available"; version: string; notes: string | null; notesI18n: Record<string, string>; date: string | null };
+
 export type LanguageReason = "policy" | "user" | "system" | "default";
 
 export interface LanguageSettings {

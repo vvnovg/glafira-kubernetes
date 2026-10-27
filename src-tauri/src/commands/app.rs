@@ -1,7 +1,16 @@
-use serde::Serialize;
-use tauri::{AppHandle, Manager};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use crate::error::AppResult;
+use serde::Serialize;
+use tauri::{AppHandle, Manager, State};
+use tauri_plugin_updater::UpdaterExt;
+use time::format_description::well_known::Rfc3339;
+
+use crate::error::{AppError, AppResult, ErrorCode};
+use crate::i18n::LocalizedText;
+use crate::mcp::McpController;
+use crate::policy::PolicyStatus;
+use crate::state::AppState;
 
 /// Версия и каталоги для «О программе».
 #[derive(Debug, Clone, Serialize)]
@@ -36,4 +45,496 @@ pub fn get_app_info(app: AppHandle) -> AppResult<AppInfo> {
         data_dir: dir(&app, "data"),
         log_dir: dir(&app, "log"),
     })
+}
+
+/// Заглушка открытого ключа updater в `tauri.conf.json`, пока владелец не создал ключ.
+/// Плагин проверяет ключ только при установке, поэтому сборку с заглушкой отсекаем сами:
+/// никаких запросов к серверу обновлений и понятная ошибка вместо ошибки подписи.
+const PUBKEY_PLACEHOLDER: &str = "REPLACE_WITH_UPDATER_PUBKEY";
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum UpdateCheck {
+    Disabled {
+        reason: LocalizedText,
+    },
+    UpToDate,
+    Available {
+        version: String,
+        notes: Option<String>,
+        /// Заметки на языках интерфейса (код языка → Markdown); у релизов до этого поля — пусто.
+        #[serde(rename = "notesI18n")]
+        notes_i18n: BTreeMap<String, String>,
+        date: Option<String>,
+    },
+}
+
+/// `notes_i18n` из latest.json — расширение формата Tauri: updater его пропускает, а приложение берёт из `raw_json`.
+/// Остаются только непустые строки: испорченное поле не мешает показать обычные `notes`.
+fn notes_i18n(raw: &serde_json::Value) -> BTreeMap<String, String> {
+    raw.get("notes_i18n")
+        .and_then(serde_json::Value::as_object)
+        .map(|m| {
+            m.iter()
+                .filter_map(|(code, v)| {
+                    let text = v.as_str().filter(|t| !t.trim().is_empty())?;
+                    Some((code.clone(), text.to_owned()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[derive(Debug)]
+enum UpdatePlan {
+    Disabled(LocalizedText),
+    /// None — адрес из tauri.conf.json, Some — зеркало из политики.
+    Check(Option<String>),
+}
+
+fn update_plan(policy: &PolicyStatus) -> UpdatePlan {
+    if !policy.updates_enabled {
+        return UpdatePlan::Disabled(ltext!(
+            "errors.updates.managed",
+            "Updates are managed by your organization"
+        ));
+    }
+    UpdatePlan::Check(policy.update_url.clone())
+}
+
+fn pubkey_configured(pubkey: Option<&str>) -> bool {
+    pubkey.is_some_and(|k| !k.trim().is_empty() && k.trim() != PUBKEY_PLACEHOLDER)
+}
+
+fn not_configured() -> LocalizedText {
+    ltext!(
+        "errors.updates.notConfigured",
+        "Updates are not configured in this build"
+    )
+}
+
+fn app_pubkey_configured(app: &AppHandle) -> bool {
+    let pubkey = app
+        .config()
+        .plugins
+        .0
+        .get("updater")
+        .and_then(|c| c.get("pubkey"))
+        .and_then(|k| k.as_str());
+    pubkey_configured(pubkey)
+}
+
+fn updater(app: &AppHandle, url: Option<String>) -> AppResult<tauri_plugin_updater::Updater> {
+    if !app_pubkey_configured(app) {
+        return Err(AppError::localized(
+            ErrorCode::InvalidInput,
+            not_configured(),
+        ));
+    }
+    // На Windows `download_and_install` запускает установщик и вызывает `process::exit(0)`,
+    // минуя `RunEvent::Exit`: без хука остался бы `mcp.json`, и шим пошёл бы по мёртвому адресу.
+    // Хук заменяет стандартный хук плагина, поэтому `cleanup_before_exit` вызываем сами.
+    // На macOS/Linux хук не используется: там после установки `app.restart()` проходит Exit.
+    let handle = app.clone();
+    let mut b = app.updater_builder().on_before_exit(move || {
+        crate::exit_mcp_now(&handle);
+        handle.cleanup_before_exit();
+    });
+    if let Some(u) = url {
+        let bad_url = || {
+            app_err!(
+                ErrorCode::InvalidInput,
+                "errors.updates.badPolicyUrl",
+                "Invalid update address in the policy: {{url}}",
+                url = u
+            )
+        };
+        let parsed = u.parse().map_err(|_| bad_url())?;
+        b = b
+            .endpoints(vec![parsed])
+            .map_err(|e| bad_url().with_details(e.to_string()))?;
+    }
+    b.build().map_err(|e| {
+        app_err!(
+            ErrorCode::Internal,
+            "errors.updates.unavailable",
+            "Updates are unavailable"
+        )
+        .with_details(e.to_string())
+    })
+}
+
+use tauri_plugin_updater::Error as UpdErr;
+
+/// Класс ошибки проверки обновлений.
+#[derive(Debug, PartialEq, Eq)]
+enum CheckErrorKind {
+    /// Сервер ответил не-2xx (плагин сводит это к `ReleaseNotFound`): версий ещё нет.
+    NoRelease,
+    Network,
+}
+
+fn classify_check_error(e: &UpdErr) -> CheckErrorKind {
+    match e {
+        UpdErr::ReleaseNotFound => CheckErrorKind::NoRelease,
+        _ => CheckErrorKind::Network,
+    }
+}
+
+fn net_err(e: UpdErr) -> AppError {
+    let details = e.to_string();
+    match classify_check_error(&e) {
+        CheckErrorKind::NoRelease => app_err!(
+            ErrorCode::NotFound,
+            "errors.updates.noRelease",
+            "The update server has no published versions (or it is temporarily unavailable)"
+        ),
+        CheckErrorKind::Network => app_err!(
+            ErrorCode::ConnectionFailed,
+            "errors.updates.checkFailed",
+            "Failed to check for updates"
+        ),
+    }
+    .with_details(details)
+}
+
+/// Класс ошибки скачивания/установки.
+#[derive(Debug, PartialEq, Eq)]
+enum DownloadErrorKind {
+    /// Сетевой сбой: скачивание можно повторить.
+    Transient,
+    /// Подпись не прошла проверку: повтор бессмыслен, ошибка сразу.
+    Signature,
+    Other,
+}
+
+fn classify_download_error(e: &UpdErr) -> DownloadErrorKind {
+    match e {
+        UpdErr::Reqwest(_) | UpdErr::Network(_) => DownloadErrorKind::Transient,
+        UpdErr::Minisign(_)
+        | UpdErr::Base64(_)
+        | UpdErr::SignatureUtf8(_)
+        | UpdErr::SignedVersionMismatch { .. }
+        | UpdErr::MissingSignedVersion => DownloadErrorKind::Signature,
+        _ => DownloadErrorKind::Other,
+    }
+}
+
+const DOWNLOAD_ATTEMPTS: u32 = 3;
+
+fn backoff(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_secs(u64::from(attempt))
+}
+
+fn download_failed(e: &UpdErr) -> AppError {
+    app_err!(
+        ErrorCode::ConnectionFailed,
+        "errors.updates.downloadInterrupted",
+        "The update download was interrupted — check your network and try again"
+    )
+    .with_details(e.to_string())
+}
+
+fn signature_failed(e: &UpdErr) -> AppError {
+    app_err!(
+        ErrorCode::Internal,
+        "errors.updates.badSignature",
+        "The update signature failed verification — the update was not installed"
+    )
+    .with_details(e.to_string())
+}
+
+fn install_failed(e: &impl std::fmt::Display) -> AppError {
+    app_err!(
+        ErrorCode::Internal,
+        "errors.updates.installFailed",
+        "Failed to install the update"
+    )
+    .with_details(e.to_string())
+}
+
+/// Скачивает пакет с повторами; повторяется только сетевая ошибка.
+async fn download_with_retry(update: &tauri_plugin_updater::Update) -> AppResult<Vec<u8>> {
+    let mut attempt = 1;
+    loop {
+        match update.download(|_, _| {}, || {}).await {
+            Ok(bytes) => return Ok(bytes),
+            Err(e) => match classify_download_error(&e) {
+                DownloadErrorKind::Signature => return Err(signature_failed(&e)),
+                DownloadErrorKind::Other => return Err(install_failed(&e)),
+                DownloadErrorKind::Transient if attempt >= DOWNLOAD_ATTEMPTS => {
+                    return Err(download_failed(&e));
+                }
+                DownloadErrorKind::Transient => {
+                    tracing::warn!(attempt, "update download failed, retrying");
+                    let pause = backoff(attempt);
+                    tauri::async_runtime::spawn_blocking(move || std::thread::sleep(pause))
+                        .await
+                        .ok();
+                    attempt += 1;
+                }
+            },
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn check_update(app: AppHandle, state: State<'_, AppState>) -> AppResult<UpdateCheck> {
+    // Политика проверяется до сборки updater: при запрете — ни одного запроса к серверу.
+    let url = match update_plan(&state.policy.status) {
+        UpdatePlan::Disabled(reason) => return Ok(UpdateCheck::Disabled { reason }),
+        UpdatePlan::Check(url) => url,
+    };
+    // Сборка без ключа updater (dev, dry-run) — штатное состояние, а не ошибка.
+    if !app_pubkey_configured(&app) {
+        return Ok(UpdateCheck::Disabled {
+            reason: not_configured(),
+        });
+    }
+    match updater(&app, url)?.check().await.map_err(net_err)? {
+        None => Ok(UpdateCheck::UpToDate),
+        Some(u) => Ok(UpdateCheck::Available {
+            version: u.version.clone(),
+            notes: u.body.clone(),
+            notes_i18n: notes_i18n(&u.raw_json),
+            date: u.date.and_then(|d| d.format(&Rfc3339).ok()),
+        }),
+    }
+}
+
+/// Без `force` при подключённых LLM-ассистентах установка требует подтверждения: перезапуск их отключит.
+fn confirm_sessions(active: usize, force: bool) -> AppResult<()> {
+    if active > 0 && !force {
+        return Err(app_err!(
+            ErrorCode::ConfirmationRequired,
+            "errors.updates.sessionsActive",
+            "LLM assistants connected over MCP: {{active}}. Updating will disconnect them.",
+            active = active
+        ));
+    }
+    Ok(())
+}
+
+/// Сессий MCP сейчас; контроллера нет (до `setup`) — ни одной.
+fn mcp_sessions(app: &AppHandle) -> usize {
+    app.try_state::<Arc<McpController>>()
+        .map_or(0, |mcp| mcp.status().sessions.len())
+}
+
+#[tauri::command]
+pub async fn install_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    force: bool,
+) -> AppResult<()> {
+    let url = match update_plan(&state.policy.status) {
+        UpdatePlan::Disabled(reason) => {
+            return Err(AppError::localized(ErrorCode::InvalidInput, reason));
+        }
+        UpdatePlan::Check(url) => url,
+    };
+    confirm_sessions(mcp_sessions(&app), force)?;
+    let Some(update) = updater(&app, url)?.check().await.map_err(net_err)? else {
+        return Err(app_err!(
+            ErrorCode::InvalidInput,
+            "errors.updates.none",
+            "No updates available"
+        ));
+    };
+    // Пока шла проверка по сети, мог подключиться ассистент: спрашиваем снова.
+    confirm_sessions(mcp_sessions(&app), force)?;
+    tracing::info!(version = %update.version, "installing update");
+    let bytes = download_with_retry(&update).await?;
+    // Установка синхронная (файлы, на Windows — запуск установщика): не блокируем рантайм.
+    let installer = update.clone();
+    tauri::async_runtime::spawn_blocking(move || installer.install(bytes))
+        .await
+        .map_err(|e| install_failed(&e))?
+        .map_err(|e| match classify_download_error(&e) {
+            DownloadErrorKind::Signature => signature_failed(&e),
+            _ => install_failed(&e),
+        })?;
+    // RunEvent::Exit останавливает MCP-сервер перед перезапуском.
+    app.restart();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn policy_disables_check_without_network() {
+        let st = PolicyStatus {
+            managed: true,
+            updates_enabled: false,
+            ..PolicyStatus::default()
+        };
+        match update_plan(&st) {
+            UpdatePlan::Disabled(reason) => assert_eq!(reason.key, "errors.updates.managed"),
+            p => panic!("ожидалось Disabled, получено {p:?}"),
+        }
+    }
+
+    #[test]
+    fn policy_url_overrides_endpoint() {
+        let st = PolicyStatus {
+            managed: true,
+            update_url: Some("https://mirror.corp/latest.json".into()),
+            ..PolicyStatus::default()
+        };
+        match update_plan(&st) {
+            UpdatePlan::Check(Some(url)) => assert_eq!(url, "https://mirror.corp/latest.json"),
+            p => panic!("ожидалось Check(Some), получено {p:?}"),
+        }
+        assert!(matches!(
+            update_plan(&PolicyStatus::default()),
+            UpdatePlan::Check(None)
+        ));
+    }
+
+    #[test]
+    fn update_check_json_shape() {
+        let v = serde_json::to_value(UpdateCheck::Available {
+            version: "0.3.0".into(),
+            notes: None,
+            notes_i18n: BTreeMap::from([("de".into(), "- Korrekturen".into())]),
+            date: None,
+        })
+        .unwrap();
+        assert_eq!(v["status"], "available");
+        assert_eq!(v["version"], "0.3.0");
+        assert!(v["notes"].is_null());
+        assert_eq!(v["notesI18n"]["de"], "- Korrekturen");
+        assert_eq!(
+            serde_json::to_value(UpdateCheck::UpToDate).unwrap()["status"],
+            "upToDate"
+        );
+        let d = serde_json::to_value(UpdateCheck::Disabled {
+            reason: not_configured(),
+        })
+        .unwrap();
+        assert_eq!(d["status"], "disabled");
+        assert_eq!(d["reason"]["key"], "errors.updates.notConfigured");
+        assert_eq!(
+            d["reason"]["text"],
+            "Updates are not configured in this build"
+        );
+    }
+
+    #[test]
+    fn notes_i18n_from_raw_json() {
+        let raw = serde_json::json!({
+            "version": "0.6.0",
+            "notes": "- fixes",
+            "notes_i18n": { "en": "- fixes", "de": "- Korrekturen", "ru": "  ", "fr": 1, "ja": null },
+            "platforms": {}
+        });
+        assert_eq!(
+            notes_i18n(&raw),
+            BTreeMap::from([
+                ("de".to_owned(), "- Korrekturen".to_owned()),
+                ("en".to_owned(), "- fixes".to_owned()),
+            ])
+        );
+        // latest.json без поля и испорченное поле — пустой набор, остаются обычные notes.
+        assert!(notes_i18n(&serde_json::json!({ "notes": "- x" })).is_empty());
+        assert!(notes_i18n(&serde_json::json!({ "notes_i18n": "- x" })).is_empty());
+    }
+
+    #[test]
+    fn updater_accepts_latest_json_with_notes_i18n() {
+        // Так latest.json читают и уже установленные версии: лишнее поле не ломает разбор, notes — как раньше.
+        let raw = serde_json::json!({
+            "version": "0.6.0",
+            "notes": "- fixes",
+            "notes_i18n": { "en": "- fixes", "de": "- Korrekturen" },
+            "pub_date": "2026-11-01T00:00:00Z",
+            "platforms": { "darwin-aarch64": { "signature": "S", "url": "https://x/a.app.tar.gz" } }
+        });
+        let release: tauri_plugin_updater::RemoteRelease = serde_json::from_value(raw).unwrap();
+        assert_eq!(release.notes.as_deref(), Some("- fixes"));
+        assert_eq!(release.version.to_string(), "0.6.0");
+    }
+
+    #[test]
+    fn active_sessions_require_confirmation_unless_forced() {
+        assert!(confirm_sessions(0, false).is_ok());
+        assert!(confirm_sessions(2, true).is_ok());
+        let e = confirm_sessions(1, false).unwrap_err();
+        assert_eq!(e.code, ErrorCode::ConfirmationRequired);
+        assert_eq!(e.key, "errors.updates.sessionsActive");
+        assert_eq!(e.params["active"], "1");
+    }
+
+    #[test]
+    fn placeholder_pubkey_is_not_configured() {
+        assert!(!pubkey_configured(None));
+        assert!(!pubkey_configured(Some("")));
+        assert!(!pubkey_configured(Some(PUBKEY_PLACEHOLDER)));
+        assert!(pubkey_configured(Some(
+            "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWdu"
+        )));
+    }
+
+    #[test]
+    fn check_error_classification() {
+        assert_eq!(
+            classify_check_error(&UpdErr::ReleaseNotFound),
+            CheckErrorKind::NoRelease
+        );
+        assert_eq!(
+            classify_check_error(&UpdErr::EmptyEndpoints),
+            CheckErrorKind::Network
+        );
+        let e = net_err(UpdErr::ReleaseNotFound);
+        assert_eq!(e.code, ErrorCode::NotFound);
+        assert_eq!(e.key, "errors.updates.noRelease");
+        assert_eq!(
+            net_err(UpdErr::Network("x".into())).code,
+            ErrorCode::ConnectionFailed
+        );
+    }
+
+    #[test]
+    fn download_error_classification() {
+        assert_eq!(
+            classify_download_error(&UpdErr::Network("status 502".into())),
+            DownloadErrorKind::Transient
+        );
+        for e in [
+            UpdErr::SignatureUtf8("s".into()),
+            UpdErr::MissingSignedVersion,
+            UpdErr::SignedVersionMismatch {
+                signed: "1".into(),
+                announced: "2".into(),
+            },
+        ] {
+            assert_eq!(classify_download_error(&e), DownloadErrorKind::Signature);
+        }
+        assert_eq!(
+            classify_download_error(&UpdErr::InvalidUpdaterFormat),
+            DownloadErrorKind::Other
+        );
+        let e = signature_failed(&UpdErr::MissingSignedVersion);
+        assert_eq!(e.code, ErrorCode::Internal);
+        assert_eq!(e.key, "errors.updates.badSignature");
+        let e = download_failed(&UpdErr::Network("x".into()));
+        assert_eq!(e.code, ErrorCode::ConnectionFailed);
+        assert_eq!(e.key, "errors.updates.downloadInterrupted");
+        assert_eq!(backoff(1).as_secs(), 1);
+        assert_eq!(backoff(2).as_secs(), 2);
+    }
+
+    #[test]
+    fn shipped_config_uses_known_pubkey_and_endpoint() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../../tauri.conf.json")).unwrap();
+        let up = &conf["plugins"]["updater"];
+        assert!(up["pubkey"].is_string());
+        assert_eq!(
+            up["endpoints"][0],
+            "https://github.com/vvnovg/glafira-kubernetes-releases/releases/latest/download/latest.json"
+        );
+        assert_eq!(conf["bundle"]["createUpdaterArtifacts"], true);
+    }
 }

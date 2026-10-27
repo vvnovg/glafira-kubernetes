@@ -170,6 +170,19 @@
       "disabledByPolicy": "MCP отключён вашей организацией",
       "noExe": "Не удалось найти исполняемый файл Glafira: {{error}}",
       "auditMissing": "Журнал MCP пока недоступен: {{error}}"
+    },
+    "updates": {
+      "managed": "Обновления управляются вашей организацией",
+      "notConfigured": "Обновления не настроены в этой сборке",
+      "badPolicyUrl": "Неверный адрес обновлений в политике: {{url}}",
+      "unavailable": "Обновления недоступны",
+      "noRelease": "На сервере обновлений нет опубликованных версий (или он временно недоступен)",
+      "checkFailed": "Не удалось проверить обновления",
+      "downloadInterrupted": "Загрузка обновления прервалась — проверьте сеть и повторите",
+      "badSignature": "Подпись обновления не прошла проверку — обновление не установлено",
+      "installFailed": "Не удалось установить обновление",
+      "sessionsActive": "Подключено LLM-ассистентов по MCP: {{active}}. Обновление их отключит.",
+      "none": "Обновлений нет"
     }
   },
   "messages": {
@@ -530,7 +543,23 @@
     "policyError": "Политика организации: {{error}}",
     "dataDir": "Данные:",
     "logDir": "Логи:",
-    "trademarks": "Kubernetes — зарегистрированный товарный знак The Linux Foundation. OpenShift — товарный знак Red Hat, Inc. Platform V и DropApp — товарные знаки их правообладателей. Проект не связан с The Linux Foundation, Red Hat и СберТех."
+    "trademarks": "Kubernetes — зарегистрированный товарный знак The Linux Foundation. OpenShift — товарный знак Red Hat, Inc. Platform V и DropApp — товарные знаки их правообладателей. Проект не связан с The Linux Foundation, Red Hat и СберТех.",
+    "updates": {
+      "title": "Обновления",
+      "check": "Проверить обновления",
+      "upToDate": "Установлена последняя версия",
+      "available": "Доступна версия {{version}}",
+      "notesAria": "Что нового в версии {{version}}",
+      "confirmAria": "Подтверждение обновления",
+      "stopAndUpdate": "Отключить ассистентов и обновить",
+      "install": "Установить и перезапустить",
+      "installing": "Загрузка и установка обновления…"
+    },
+    "notice": {
+      "available": "Доступна версия {{version}}.",
+      "more": "Подробнее",
+      "hideAria": "Скрыть уведомление"
+    }
   },
   "support": {
     "title": "Поддержать проект",

@@ -13,6 +13,7 @@ import { useHelpShortcut } from "../lib/useHelpShortcut";
 import { useHealthEvents } from "../lib/useHealth";
 import { useMcpEvents } from "../lib/useMcpStatus";
 import { ApprovalDialog } from "./mcp/ApprovalDialog";
+import { UpdateNotice } from "./about/UpdateNotice";
 
 function tabTitle(tab: Tab, byId: Map<string, ConnectionProfile>): string {
   const connId = "connectionId" in tab ? tab.connectionId : null;
@@ -58,6 +59,7 @@ export function Layout() {
       <Sidebar />
       <main className="workspace">
         <div className="env-stripe" style={{ background: activeConn ? ENV_COLORS[activeConn.environment] : "transparent" }} />
+        <UpdateNotice />
         <nav className="tabbar" role="tablist">
           {tabs.map((tab) => {
             const tConnId = "connectionId" in tab ? tab.connectionId : null;

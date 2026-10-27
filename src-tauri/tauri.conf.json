@@ -35,6 +35,7 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "createUpdaterArtifacts": true,
     "publisher": "Glafira for Kubernetes",
     "category": "DeveloperTool",
     "shortDescription": "Glafira for Kubernetes — desktop client for Kubernetes, OpenShift and Platform V DropApp",
@@ -49,6 +50,12 @@
         "upgradeCode": "c3a3f458-3ec5-4961-909a-d0ee6b19db8a",
         "language": ["en-US"]
       }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg4MDM0MUZBMTU4RkYyQTQKUldTazhvOFYra0VEaU5WL2w1YjNIWU1KWlNaU0VzNnhjUHB1eUVIYkZITGhqTWdDNDdXV2VGSHYK",
+      "endpoints": ["https://github.com/vvnovg/glafira-kubernetes-releases/releases/latest/download/latest.json"]
     }
   }
 }

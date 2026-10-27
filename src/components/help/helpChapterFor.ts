@@ -15,6 +15,8 @@ export function helpChapterFor(tab: TabSpec | null): ChapterId {
       return "pods-logs";
     case "findings":
       return "health-check";
+    case "about":
+      return "updates";
     default:
       return "getting-started";
   }

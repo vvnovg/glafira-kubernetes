@@ -33,3 +33,11 @@ input::placeholder, textarea::placeholder { font-style: italic; color: var(--mut
 .combo-list { position: absolute; z-index: 10; left: 0; right: 0; top: calc(100% + 2px); margin: 0; padding: 2px 0; list-style: none; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; max-height: 200px; overflow: auto; box-shadow: 0 4px 12px rgb(0 0 0 / 20%); }
 .combo-list li { padding: 3px 8px; cursor: pointer; }
 .combo-list li[aria-selected="true"] { background: var(--bg-alt); }
+/* Заметки к обновлению в «О программе» (Markdown из latest.json). */
+.release-notes { max-width: 720px; line-height: 1.5; }
+.release-notes > :first-child { margin-top: 0; }
+.release-notes > :last-child { margin-bottom: 0; }
+.release-notes ul, .release-notes ol { margin: 4px 0; padding-left: 20px; }
+.release-notes p { margin: 4px 0; }
+.release-notes code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: var(--bg-alt); border-radius: 3px; padding: 0 3px; }
+.release-notes a { color: var(--accent); }

@@ -76,8 +76,8 @@
 | `src/api/client.ts` | `src/api/client.ts` | `8bbd0bd` | адаптирован: команды Kubernetes |
 | `src/api/client.test.ts` | `src/api/client.test.ts` | `8bbd0bd` | адаптирован: команды Kubernetes |
 | `src/api/types.ts` | `src/api/types.ts` | `8bbd0bd` | адаптирован: типы Kubernetes |
-| `scripts/i18n-check.mjs` | `scripts/i18n-check.mjs` | `8bbd0bd` | адаптирован: главы руководства O1 |
-| `scripts/i18n-check.test.mjs` | `scripts/i18n-check.test.mjs` | `8bbd0bd` | как есть |
+| `scripts/i18n-check.mjs` | `scripts/i18n-check.mjs` | `8bbd0bd` | адаптирован: главы руководства O1–O2 и «Обновления»; проверка списков изменений — из `c5446fc` |
+| `scripts/i18n-check.test.mjs` | `scripts/i18n-check.test.mjs` | `8bbd0bd` | адаптирован: тесты списков изменений — из `c5446fc` |
 | `src/components/connections/tree/folderTree.ts` | `src/components/connections/tree/folderTree.ts` | `8bbd0bd` | как есть |
 | `src/components/connections/tree/folderTree.test.ts` | `src/components/connections/tree/folderTree.test.ts` | `8bbd0bd` | как есть |
 | `src/components/connections/ConnectionFormTab.tsx` | `src/components/connections/ConnectionFormTab.tsx` | `8bbd0bd` | как есть |
@@ -95,9 +95,9 @@
 | `src/components/help/helpChapterFor.test.ts` | `src/components/help/helpChapterFor.test.ts` | `8bbd0bd` | адаптирован: вкладки O1 |
 | `src/components/settings/SettingsPanel.tsx` | `src/components/settings/SettingsPanel.tsx` | `8bbd0bd` | адаптирован: без раздела MCP |
 | `src/components/settings/SettingsPanel.test.tsx` | `src/components/settings/SettingsPanel.test.tsx` | `8bbd0bd` | адаптирован: без MCP |
-| `src/components/about/AboutPanel.tsx` | `src/components/about/AboutPanel.tsx` | `8bbd0bd` | адаптирован: без обновлений и диагностики (O6), товарные знаки |
-| `src/components/about/AboutPanel.test.tsx` | `src/components/about/AboutPanel.test.tsx` | `8bbd0bd` | адаптирован: без обновлений и диагностики |
-| `src-tauri/src/commands/app.rs` | `src-tauri/src/commands/app.rs` | `8bbd0bd` | адаптирован: только get_app_info |
+| `src/components/about/AboutPanel.tsx` | `src/components/about/AboutPanel.tsx` | `8bbd0bd` | адаптирован: товарные знаки, без диагностики (O6); раздел обновлений — из `c5446fc`, подтверждение про MCP-ассистентов |
+| `src/components/about/AboutPanel.test.tsx` | `src/components/about/AboutPanel.test.tsx` | `8bbd0bd` | адаптирован: без диагностики; тесты обновлений — из `c5446fc`, языки en и ru |
+| `src-tauri/src/commands/app.rs` | `src-tauri/src/commands/app.rs` | `8bbd0bd` | адаптирован: без диагностики (O6); проверка и установка обновлений — из `c5446fc`, хук выхода и подтверждение — про MCP, не сессии Kafka |
 | `scripts/guide-publish.mjs` | `scripts/guide-publish.mjs` | `8bbd0bd` | адаптирован: заголовок |
 | `scripts/guide-publish.test.mjs` | `scripts/guide-publish.test.mjs` | `8bbd0bd` | адаптирован: языки en и ru |
 | `scripts/guide-publish.d.mts` | `scripts/guide-publish.d.mts` | `8bbd0bd` | как есть |
@@ -112,7 +112,7 @@
 | `src/components/TabContent.help.test.tsx` | `src/components/TabContent.help.test.tsx` | `8bbd0bd` | адаптирован: spy на console.error без возврата из beforeEach |
 | `src/lib/useAppMenu.ts` | `src/lib/useAppMenu.ts` | `8bbd0bd` | адаптирован: без пунктов решения проблем и диагностики (O6) |
 | `src/lib/useAppMenu.test.ts` | `src/lib/useAppMenu.test.ts` | `8bbd0bd` | адаптирован: пункты меню O1 |
-| `src/components/Layout.tsx` | `src/components/Layout.tsx` | `8bbd0bd` | адаптирован: вкладки O1, без MCP и обновлений, комментарий про подключения |
+| `src/components/Layout.tsx` | `src/components/Layout.tsx` | `8bbd0bd` | адаптирован: вкладки O1–O2, комментарий про подключения; уведомление об обновлении — из `c5446fc` |
 | `src/components/Layout.test.tsx` | `src/components/Layout.test.tsx` | `8bbd0bd` | адаптирован: профиль Kubernetes, вкладки O1 |
 | `src/components/Sidebar.tsx` | `src/components/Sidebar.tsx` | `8bbd0bd` | адаптирован: без индикатора MCP |
 | `src/components/Sidebar.test.tsx` | `src/components/Sidebar.test.tsx` | `8bbd0bd` | адаптирован: пункты подключения O1 |
@@ -172,3 +172,19 @@
 | `src/components/health/FindingsPanel.test.tsx` | `src/components/health/FindingsPanel.test.tsx` | `8bbd0bd` | адаптирован: правила Kubernetes, без предложений LLM |
 | `src/components/health/HealthBlock.tsx` | `src/components/health/HealthBlock.tsx` | `8bbd0bd` | адаптирован: без предложений LLM |
 | `src/components/health/HealthBlock.test.tsx` | `src/components/health/HealthBlock.test.tsx` | `8bbd0bd` | адаптирован: объекты Kubernetes, под и находки его workload'а |
+| `.github/workflows/release.yml` | `.github/workflows/release.yml` | `c5446fc` | адаптирован: репозиторий релизов, пакеты Linux без Kafka |
+| `scripts/check-release.mjs` | `scripts/check-release.mjs` | `c5446fc` | как есть |
+| `scripts/check-release.test.mjs` | `scripts/check-release.test.mjs` | `c5446fc` | как есть |
+| `scripts/changelog.mjs` | `scripts/changelog.mjs` | `c5446fc` | как есть |
+| `scripts/changelog.test.mjs` | `scripts/changelog.test.mjs` | `c5446fc` | как есть |
+| `scripts/make-latest-json.mjs` | `scripts/make-latest-json.mjs` | `c5446fc` | адаптирован: комментарий о заметках |
+| `scripts/make-latest-json.test.mjs` | `scripts/make-latest-json.test.mjs` | `c5446fc` | как есть |
+| `scripts/third-party.mjs` | `scripts/third-party.mjs` | `c5446fc` | адаптирован: без C-библиотек librdkafka, раздел C-библиотек — только если они есть |
+| `scripts/third-party.test.mjs` | `scripts/third-party.test.mjs` | `c5446fc` | адаптирован: пустой список C-библиотек |
+| `scripts/make-pkg.sh` | `scripts/make-pkg.sh` | `c5446fc` | как есть |
+| `src/components/about/UpdateNotice.tsx` | `src/components/about/UpdateNotice.tsx` | `c5446fc` | как есть |
+| `src/components/about/UpdateNotice.test.tsx` | `src/components/about/UpdateNotice.test.tsx` | `c5446fc` | как есть |
+| `src/components/about/ReleaseNotes.tsx` | `src/components/about/ReleaseNotes.tsx` | `c5446fc` | как есть |
+| `src/components/common/ChunkBoundary.tsx` | `src/components/common/ChunkBoundary.tsx` | `c5446fc` | как есть |
+| `src/components/common/ExternalLink.tsx` | `src/components/common/ExternalLink.tsx` | `c5446fc` | как есть |
+| `docs/releases-repo/SUPPORT.md` | `docs/releases-repo/SUPPORT.md` | `c5446fc` | адаптирован: название продукта |
