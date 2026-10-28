@@ -7,6 +7,15 @@ Kubernetes is a registered trademark of The Linux Foundation. OpenShift is a tra
 and DropApp are trademarks of their respective owners. This project is not affiliated with The Linux Foundation,
 Red Hat or SberTech.
 
+## Установка
+
+Установщики для macOS (`.dmg`, `.pkg`), Windows (`.msi`) и Linux (`.deb`, `.rpm`, `.AppImage`):
+https://github.com/vvnovg/glafira-kubernetes-releases/releases
+
+Сборки для macOS подписаны и нотаризованы. Сборки для Windows пока не подписаны: если SmartScreen блокирует
+установщик, выберите «Подробнее», затем «Выполнить в любом случае». Новые версии приложение находит само:
+«О программе» → «Обновления».
+
 Спецификация: `docs/superpowers/specs/2026-10-24-glafira-kubernetes-design.md`. Код, общий с Glafira for Apache Kafka,
 перечислен в `PORTED.md`.
 
