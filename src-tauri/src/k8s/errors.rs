@@ -358,7 +358,8 @@ mod tests {
     async fn real_connection_refused_is_connection_failed() {
         // Порт 1 на localhost закрыт: ошибка приходит от настоящего клиента kube.
         let mut c = kube::Config::new("https://127.0.0.1:1".parse().unwrap());
-        c.connect_timeout = Some(std::time::Duration::from_secs(2));
+        // С запасом: на Windows отказ приходит через ~2 с (система повторяет попытку соединения).
+        c.connect_timeout = Some(std::time::Duration::from_secs(10));
         let client = kube::Client::try_from(c).unwrap();
         let e = client.apiserver_version().await.unwrap_err();
         let app = from_kube(&e);
