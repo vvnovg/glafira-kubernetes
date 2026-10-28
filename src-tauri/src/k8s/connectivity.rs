@@ -699,7 +699,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(addr, format!("127.0.0.1:{port}"));
-        let e = tcp_probe("127.0.0.1", REFUSED_PORT, Duration::from_secs(2))
+        // Срок с запасом: на Windows отказ закрытого порта приходит не сразу — система повторяет
+        // попытку соединения около 2 с, и с двухсекундным сроком вместо отказа выходил таймаут.
+        let e = tcp_probe("127.0.0.1", REFUSED_PORT, Duration::from_secs(10))
             .await
             .unwrap_err();
         assert_eq!(e.code, ErrorCode::ConnectionFailed);
