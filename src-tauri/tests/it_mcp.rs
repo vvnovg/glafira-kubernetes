@@ -1,13 +1,16 @@
 //! MCP-шлюз на настоящем кластере (kind, `dev/kind/setup.sh`): контроллер приложения поднимает
 //! сервер, клиент rmcp подключается через `mcp.json` и рукопожатие и вызывает инструменты. LLM видит
-//! только проект team-a (`llmNamespaces`), значения Secret в ответы не попадают.
+//! только проект team-a (`llmNamespaces`), значения Secret в ответы не попадают. Метрики — от
+//! поддельного Prometheus стенда (`common::prometheus`), изменения — только предложения.
 //! Без `GO_IT_KUBECONFIG` тест пропускается.
 
 mod common;
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine;
+use common::prometheus::serve;
 use common::{import, kubeconfig_path};
 use glafira_kubernetes_lib::mcp::McpController;
 use glafira_kubernetes_lib::mcp::controller::ServerState;
@@ -60,6 +63,8 @@ async fn the_gateway_reads_the_stand_within_the_llm_scope() {
     let Some(path) = kubeconfig_path() else {
         return;
     };
+    // До первого обращения к метрикам: выбор источника живёт в подключении 5 минут.
+    serve(&path, Arc::new(Mutex::new(Vec::new()))).await;
     let (mut profile, secrets) = import(&path, "admin");
     profile.llm_access = LlmAccess::Metadata;
     profile.llm_namespaces = Some(vec![NS.into()]);
@@ -204,6 +209,67 @@ async fn the_gateway_reads_the_stand_within_the_llm_scope() {
     .await);
     assert_eq!(v["samples"], 6, "{v}");
     assert_eq!(v["initial"]["pods"].as_array().unwrap().len(), 1);
+
+    // Ресурсы: Prometheus за прокси API-сервера.
+    let busy = json!({"kind": "Deployment", "name": "busy"});
+    let v = ok(call(
+        &c,
+        "get_resource_usage",
+        json!({"connectionId": id, "namespace": NS, "workload": busy}),
+    )
+    .await);
+    assert_eq!(v["source"]["kind"], "prometheus", "{v}");
+    assert_eq!(v["containers"][0]["stats"]["cpuP95"], "12m", "{v}");
+    assert_eq!(v["containers"][0]["stats"]["throttlingMeanPercent"], 40.0);
+    let msg = err(&call(
+        &c,
+        "get_resource_usage",
+        json!({"connectionId": id, "namespace": NS, "workload": busy, "windowDays": 3}),
+    )
+    .await);
+    assert!(msg.starts_with("invalid_argument"), "{msg}");
+    let v = ok(call(
+        &c,
+        "recommend_resources",
+        json!({"connectionId": id, "namespace": NS, "workload": busy, "windowDays": 14}),
+    )
+    .await);
+    assert_eq!(v["confidence"], "high", "{v}");
+    assert_eq!(
+        v["containers"][0]["recommendedRequests"],
+        json!({"cpu": "20m", "memory": "32Mi"})
+    );
+
+    // Изменение — только предложение: Glafira проверяет его чтением кластера и хранит у себя.
+    let propose = json!({"connectionId": id, "severity": "warning", "title": "Raise the CPU limit",
+        "rationale": "40% of CPU periods are throttled", "relatedRuleId": "resources.cpuThrottled",
+        "change": {"kind": "setResources", "namespace": NS, "workload": busy,
+            "containers": [{"name": "app", "limits": {"cpu": "80m"}}]}});
+    let v = ok(call(&c, "propose_change", propose.clone()).await);
+    assert_eq!(
+        (&v["created"], &v["readOnly"]),
+        (&json!(true), &json!(false)),
+        "{v}"
+    );
+    let pid = v["proposalId"].clone();
+    let mut ghost = propose;
+    ghost["change"]["workload"]["name"] = "ghost".into();
+    // Ошибка чтения кластера — с кодом приложения, как у инструментов чтения.
+    let msg = err(&call(&c, "propose_change", ghost).await);
+    assert!(msg.starts_with("NOT_FOUND:"), "{msg}");
+    let v = ok(call(&c, "list_proposals", json!({"connectionId": id})).await);
+    assert_eq!(
+        (&v["items"][0]["id"], &v["items"][0]["status"]),
+        (&pid, &json!("open")),
+        "{v}"
+    );
+    let v = ok(call(
+        &c,
+        "withdraw_proposal",
+        json!({"connectionId": id, "proposalId": pid}),
+    )
+    .await);
+    assert_eq!(v["withdrawn"], true);
 
     let calls: Vec<Value> = ctl.audit_recent(50);
     assert!(

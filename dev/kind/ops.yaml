@@ -1,0 +1,38 @@
+# Объекты проекта team-a для изменений (tests/it_ops.rs): Deployment tuned меняют формы §9 — ресурсы,
+# реплики, перезапуск; HPA tuned-hpa — границы. HPA нацелен на Deployment, которого нет, — контроллер не
+# трогает реплики tuned. Образ __HELPER_IMAGE__ — помощник local-path-provisioner (fixtures.yaml).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tuned
+  namespace: team-a
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: tuned }
+  template:
+    metadata:
+      labels: { app: tuned }
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: app
+          image: __HELPER_IMAGE__
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c", "exec 3<> <(:); read -u 3"]
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 64Mi }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: tuned-hpa
+  namespace: team-a
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: idle }
+  minReplicas: 1
+  maxReplicas: 2
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 80 } }
