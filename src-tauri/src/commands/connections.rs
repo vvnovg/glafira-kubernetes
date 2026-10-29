@@ -8,9 +8,9 @@ use super::blocking;
 use crate::error::{AppError, AppResult};
 use crate::k8s::cluster::ConnectionInfo;
 use crate::k8s::connectivity::{TestReport, ensure_allowed};
-use crate::secrets::{CLIENT_KEY, OverlayStore, SecretStore, TOKEN, secret_key};
+use crate::secrets::{CLIENT_KEY, METRICS_TOKEN, OverlayStore, SecretStore, TOKEN, secret_key};
 use crate::state::AppState;
-use crate::storage::profile::{AuthConfig, ConnectionProfile, REDACTED};
+use crate::storage::profile::{AuthConfig, ConnectionProfile, MetricsAuth, REDACTED};
 
 /// Секреты из формы. Для каждого: нет или `null` — оставить сохранённый, `""` — удалить,
 /// иное — сохранить. `Debug` печатает вместо значений `***`.
@@ -21,6 +21,9 @@ pub struct SecretsInput {
     pub token: Option<String>,
     #[serde(default)]
     pub client_key: Option<String>,
+    /// Bearer-токен своего источника метрик.
+    #[serde(default)]
+    pub metrics_token: Option<String>,
 }
 
 /// Токен и приватный ключ не печатаются: структура может попасть в лог или сообщение об ошибке.
@@ -30,6 +33,7 @@ impl std::fmt::Debug for SecretsInput {
         f.debug_struct("SecretsInput")
             .field("token", &hide(&self.token))
             .field("client_key", &hide(&self.client_key))
+            .field("metrics_token", &hide(&self.metrics_token))
             .finish()
     }
 }
@@ -89,7 +93,7 @@ enum SecretOp {
 }
 
 /// Используемые профилем секреты — по данным формы, неиспользуемые — удаляются.
-fn secret_ops(profile: &ConnectionProfile, s: &SecretsInput) -> [(&'static str, SecretOp); 2] {
+fn secret_ops(profile: &ConnectionProfile, s: &SecretsInput) -> [(&'static str, SecretOp); 3] {
     let op = |used: bool, v: Option<&String>| match (used, v.map(|x| x.trim())) {
         (false, _) => SecretOp::Delete,
         (true, None) => SecretOp::Keep,
@@ -103,6 +107,16 @@ fn secret_ops(profile: &ConnectionProfile, s: &SecretsInput) -> [(&'static str, 
             op(
                 matches!(profile.auth, AuthConfig::ClientCert { .. }),
                 s.client_key.as_ref(),
+            ),
+        ),
+        (
+            METRICS_TOKEN,
+            op(
+                profile
+                    .metrics
+                    .endpoint()
+                    .is_some_and(|e| e.auth == MetricsAuth::Bearer),
+                s.metrics_token.as_ref(),
             ),
         ),
     ]
@@ -195,6 +209,7 @@ pub async fn test_connection(
     for (field, v) in [
         (TOKEN, &input.secrets.token),
         (CLIENT_KEY, &input.secrets.client_key),
+        (METRICS_TOKEN, &input.secrets.metrics_token),
     ] {
         if let Some(v) = v {
             overrides.insert(secret_key(&id, field), v.trim().to_string());
@@ -289,7 +304,9 @@ mod tests {
     use super::*;
     use crate::error::ErrorCode;
     use crate::secrets::MemoryStore;
-    use crate::storage::profile::{CaConfig, TEST_CERT_PEM, sample_profile};
+    use crate::storage::profile::{
+        CaConfig, MetricsCa, MetricsConfig, MetricsEndpoint, TEST_CERT_PEM, sample_profile,
+    };
 
     fn state(dir: &std::path::Path) -> AppState {
         AppState::new(dir, Arc::new(MemoryStore::default())).unwrap()
@@ -305,6 +322,7 @@ mod tests {
             secrets: SecretsInput {
                 token: token.map(String::from),
                 client_key: key.map(String::from),
+                metrics_token: None,
             },
             confirm_exec: false,
         }
@@ -320,10 +338,15 @@ mod tests {
         let s = |t: Option<&str>, k: Option<&str>| SecretsInput {
             token: t.map(String::from),
             client_key: k.map(String::from),
+            metrics_token: Some("m".into()),
         };
         assert_eq!(
             secret_ops(&token, &s(None, Some("k"))),
-            [(TOKEN, SecretOp::Keep), (CLIENT_KEY, SecretOp::Delete)]
+            [
+                (TOKEN, SecretOp::Keep),
+                (CLIENT_KEY, SecretOp::Delete),
+                (METRICS_TOKEN, SecretOp::Delete)
+            ]
         );
         assert_eq!(
             secret_ops(&token, &s(Some(" t "), None))[0],
@@ -341,8 +364,24 @@ mod tests {
             secret_ops(&cert, &s(Some("t"), Some("KEY"))),
             [
                 (TOKEN, SecretOp::Delete),
-                (CLIENT_KEY, SecretOp::Set("KEY".into()))
+                (CLIENT_KEY, SecretOp::Set("KEY".into())),
+                (METRICS_TOKEN, SecretOp::Delete)
             ]
+        );
+        // Токен метрик хранится, только пока у профиля свой источник с авторизацией bearer.
+        let mut bearer = sample_profile("a");
+        bearer.metrics = MetricsConfig::Prometheus(MetricsEndpoint {
+            url: "https://prometheus.example.com".into(),
+            auth: MetricsAuth::Bearer,
+            ca: MetricsCa::Connection,
+        });
+        assert_eq!(
+            secret_ops(&bearer, &s(None, None))[2],
+            (METRICS_TOKEN, SecretOp::Set("m".into()))
+        );
+        assert_eq!(
+            secret_ops(&bearer, &SecretsInput::default())[2],
+            (METRICS_TOKEN, SecretOp::Keep)
         );
     }
 
@@ -576,6 +615,7 @@ mod tests {
         let secrets = SecretsInput {
             token: Some("sha256~tok-123".into()),
             client_key: Some("KEY-456".into()),
+            metrics_token: Some("METRICS-789".into()),
         };
         let connection = ConnectionInput {
             profile: sample_profile("a"),
@@ -589,7 +629,9 @@ mod tests {
             format!("{connection:#?}"),
         ] {
             assert!(
-                !text.contains("tok-123") && !text.contains("KEY-456"),
+                !text.contains("tok-123")
+                    && !text.contains("KEY-456")
+                    && !text.contains("METRICS-789"),
                 "{text}"
             );
             assert!(text.contains("***"), "{text}");

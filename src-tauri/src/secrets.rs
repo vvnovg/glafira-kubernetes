@@ -15,8 +15,11 @@ pub const TOKEN: &str = "token";
 /// Ключ клиентского сертификата (PEM).
 pub const CLIENT_KEY: &str = "clientKey";
 
+/// Bearer-токен своего источника метрик (`MetricsAuth::Bearer`).
+pub const METRICS_TOKEN: &str = "metricsToken";
+
 /// Все секреты подключения в keychain (для удаления).
-pub const CONNECTION_SECRET_FIELDS: [&str; 2] = [TOKEN, CLIENT_KEY];
+pub const CONNECTION_SECRET_FIELDS: [&str; 3] = [TOKEN, CLIENT_KEY, METRICS_TOKEN];
 
 pub fn secret_key(connection_id: &str, field: &str) -> String {
     format!("{connection_id}/{field}")

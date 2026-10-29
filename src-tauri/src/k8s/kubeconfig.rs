@@ -425,6 +425,7 @@ pub fn import_context(
         order: 0,
         llm_access: Default::default(),
         llm_namespaces: None,
+        metrics: Default::default(),
         extra: Default::default(),
     };
     normalize_profile(&mut profile);

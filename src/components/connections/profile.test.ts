@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatNamespaces, newProfile, parseNamespaces, withAuthMethod, withCaMode, withProxyMode } from "./profile";
+import { formatNamespaces, newProfile, parseNamespaces, withAuthMethod, withCaMode, withMetricsMode, withProxyMode } from "./profile";
 
 describe("profile", () => {
   it("новый профиль: вход через браузер, системный CA и прокси, dev", () => {
@@ -30,5 +30,16 @@ describe("profile", () => {
     expect(parseNamespaces(" team-a, team-b\nteam-a  ops ,")).toEqual(["team-a", "team-b", "ops"]);
     expect(parseNamespaces("")).toEqual([]);
     expect(formatNamespaces(["a", "b"])).toBe("a, b");
+  });
+});
+
+describe("withMetricsMode", () => {
+  it("свой адрес не теряется при переключении", () => {
+    const thanos = withMetricsMode({ mode: "auto" }, "thanos");
+    expect(thanos).toEqual({ mode: "thanos", url: "", auth: "connection", ca: { mode: "connection" } });
+    const own = { mode: "thanos" as const, url: "https://t.example.com", auth: "bearer" as const, ca: { mode: "connection" as const } };
+    expect(withMetricsMode(own, "prometheus")).toEqual({ ...own, mode: "prometheus" });
+    expect(withMetricsMode(own, "auto")).toEqual({ mode: "auto" });
+    expect(withMetricsMode({ mode: "auto" }, "prometheus", own)).toEqual({ ...own, mode: "prometheus" });
   });
 });

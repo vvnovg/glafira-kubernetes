@@ -176,6 +176,70 @@ impl LlmAccess {
     }
 }
 
+/// Источник метрик подключения (спец. §5.1, §7.1). `Auto` — автопоиск платформы, затем
+/// `metrics.k8s.io`; свой URL явно выбранного источника другим не заменяется. Локальная
+/// настройка, как доступ LLM: экспорт её не пишет, импорт не переносит — чужой файл не направит
+/// токен подключения на свой адрес.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "camelCase")]
+pub enum MetricsConfig {
+    #[default]
+    Auto,
+    /// Свой Thanos Querier (например, tenancy-endpoint, открытый администраторами): запросы по
+    /// проекту идут с параметром `namespace`.
+    Thanos(MetricsEndpoint),
+    /// Свой Prometheus.
+    Prometheus(MetricsEndpoint),
+}
+
+impl MetricsConfig {
+    pub fn is_auto(&self) -> bool {
+        *self == MetricsConfig::Auto
+    }
+
+    pub fn endpoint(&self) -> Option<&MetricsEndpoint> {
+        match self {
+            MetricsConfig::Auto => None,
+            MetricsConfig::Thanos(e) | MetricsConfig::Prometheus(e) => Some(e),
+        }
+    }
+}
+
+/// Адрес своего источника метрик и как к нему ходить.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetricsEndpoint {
+    /// `https://thanos.example.com` — без `/api/v1`.
+    pub url: String,
+    #[serde(default)]
+    pub auth: MetricsAuth,
+    #[serde(default)]
+    pub ca: MetricsCa,
+}
+
+/// Авторизация источника метрик: токен подключения, свой bearer-токен (keychain, поле
+/// `metricsToken`) или без авторизации.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MetricsAuth {
+    #[default]
+    Connection,
+    Bearer,
+    None,
+}
+
+/// CA источника метрик: как у подключения или свой PEM; оба добавляются к системным корням
+/// (сертификат маршрута часто выпущен CA ingress).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "camelCase")]
+pub enum MetricsCa {
+    #[default]
+    Connection,
+    Pem {
+        pem: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionProfile {
@@ -216,6 +280,9 @@ pub struct ConnectionProfile {
     /// Проекты, которые видит LLM; `None` — все доступные пользователю. Локальное поле.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_namespaces: Option<Vec<String>>,
+    /// Источник метрик. Локальное поле.
+    #[serde(default, skip_serializing_if = "MetricsConfig::is_auto")]
+    pub metrics: MetricsConfig,
     /// Поля из более новой версии Glafira: сохраняются при записи как есть.
     /// `ConnectionStore::upsert` входящий `extra` не принимает: у существующего профиля
     /// остаётся сохранённый, новый получает пустой.
@@ -227,6 +294,9 @@ pub struct ConnectionProfile {
 /// списки проектов без пустых строк и повторов.
 pub fn normalize_profile(p: &mut ConnectionProfile) {
     p.api_url = p.api_url.trim().trim_end_matches('/').to_string();
+    if let MetricsConfig::Thanos(e) | MetricsConfig::Prometheus(e) = &mut p.metrics {
+        e.url = e.url.trim().trim_end_matches('/').to_string();
+    }
     p.tls_server_name = p
         .tls_server_name
         .take()
@@ -468,11 +538,58 @@ pub fn validate_profile(p: &ConnectionProfile) -> AppResult<()> {
             name = ns
         )));
     }
+    if let Some(e) = p.metrics.endpoint() {
+        validate_metrics(e)?;
+    }
     if p.request_timeout_ms < 1_000 || p.connect_timeout_ms < 1_000 {
         return Err(invalid(ltext!(
             "errors.connections.timeoutTooSmall",
             "Timeouts must be at least 1000 ms"
         )));
+    }
+    Ok(())
+}
+
+/// Свой источник метрик: адрес http(s) с хостом, без имени и пароля, без запроса; `http://` —
+/// только без авторизации (токен не уходит открытым текстом); CA — сертификаты PEM без ключа.
+fn validate_metrics(e: &MetricsEndpoint) -> AppResult<()> {
+    let bad = || {
+        invalid(ltext!(
+            "errors.connections.badMetricsUrl",
+            "Invalid metrics source address “{{url}}”: use https://host[:port][/path]",
+            url = redact_url(&e.url)
+        ))
+    };
+    let u = url::Url::parse(e.url.trim()).map_err(|_| bad())?;
+    if !matches!(u.scheme(), "http" | "https")
+        || u.host_str().is_none_or(str::is_empty)
+        || u.query().is_some()
+        || u.fragment().is_some()
+    {
+        return Err(bad());
+    }
+    if has_userinfo(&u) {
+        return Err(credentials_in_url(&u));
+    }
+    if u.scheme() == "http" && e.auth != MetricsAuth::None {
+        return Err(invalid(ltext!(
+            "errors.connections.metricsHttpsRequired",
+            "A metrics source with a token needs an https:// address"
+        )));
+    }
+    if let MetricsCa::Pem { pem } = &e.ca {
+        if pem_has_private_key(pem) {
+            return Err(invalid(ltext!(
+                "errors.connections.pemContainsKey",
+                "A certificate field contains a private key — put the key into the key field"
+            )));
+        }
+        if pem_certificates(pem).is_err() {
+            return Err(invalid(ltext!(
+                "errors.connections.caPemInvalid",
+                "The CA certificate must be in PEM format (-----BEGIN CERTIFICATE-----)"
+            )));
+        }
     }
     Ok(())
 }
@@ -558,6 +675,7 @@ pub fn sample_profile(id: &str) -> ConnectionProfile {
         order: 0,
         llm_access: LlmAccess::Off,
         llm_namespaces: None,
+        metrics: MetricsConfig::Auto,
         extra: Default::default(),
     }
 }
@@ -621,6 +739,126 @@ mod tests {
             validate_profile(&p).is_ok(),
             "пустой список — LLM не видит ни одного проекта"
         );
+    }
+
+    #[test]
+    fn metrics_source_is_auto_by_default_and_written_only_when_set() {
+        let v = serde_json::to_value(sample_profile("a")).unwrap();
+        assert!(v.get("metrics").is_none(), "{v}");
+        let mut v = v;
+        v["metrics"] = serde_json::json!({
+            "mode": "thanos", "url": " https://thanos.example.com/ ", "auth": "bearer",
+            "ca": {"mode": "pem", "pem": TEST_CERT_PEM}
+        });
+        let mut p: ConnectionProfile = serde_json::from_value(v).unwrap();
+        normalize_profile(&mut p);
+        let MetricsConfig::Thanos(e) = &p.metrics else {
+            panic!("{:?}", p.metrics)
+        };
+        assert_eq!(
+            (e.url.as_str(), e.auth),
+            ("https://thanos.example.com", MetricsAuth::Bearer)
+        );
+        assert!(validate_profile(&p).is_ok());
+        let back = serde_json::to_value(&p).unwrap();
+        assert_eq!(back["metrics"]["mode"], "thanos");
+        assert_eq!(back["metrics"]["ca"]["mode"], "pem");
+        let p: ConnectionProfile = serde_json::from_value(serde_json::json!({
+            "id": "a", "name": "a", "color": "#000", "environment": "dev", "readOnly": false,
+            "apiUrl": "https://api.example.com:6443", "auth": {"method": "token"},
+            "metrics": {"mode": "prometheus", "url": "https://prometheus.example.com"}
+        }))
+        .unwrap();
+        assert_eq!(
+            p.metrics.endpoint().map(|e| (e.auth, e.ca.clone())),
+            Some((MetricsAuth::Connection, MetricsCa::Connection)),
+            "авторизация и CA по умолчанию — как у подключения"
+        );
+    }
+
+    #[test]
+    fn metrics_source_address_is_checked() {
+        let with = |url: &str, auth: MetricsAuth, ca: MetricsCa| {
+            let mut p = sample_profile("a");
+            p.metrics = MetricsConfig::Prometheus(MetricsEndpoint {
+                url: url.into(),
+                auth,
+                ca,
+            });
+            validate_profile(&p).err().map(|e| e.key)
+        };
+        let conn = MetricsCa::Connection;
+        assert_eq!(
+            with(
+                "https://prom.example.com/prefix",
+                MetricsAuth::Connection,
+                conn.clone()
+            ),
+            None
+        );
+        assert_eq!(
+            with("http://localhost:9090", MetricsAuth::None, conn.clone()),
+            None
+        );
+        for (url, auth, key) in [
+            (
+                "http://prom.example.com",
+                MetricsAuth::Bearer,
+                "errors.connections.metricsHttpsRequired",
+            ),
+            (
+                "http://prom.example.com",
+                MetricsAuth::Connection,
+                "errors.connections.metricsHttpsRequired",
+            ),
+            (
+                "https://u:p@prom.example.com",
+                MetricsAuth::None,
+                "errors.connections.credentialsInUrl",
+            ),
+            (
+                "https://prom.example.com/?x=1",
+                MetricsAuth::None,
+                "errors.connections.badMetricsUrl",
+            ),
+            (
+                "ftp://prom.example.com",
+                MetricsAuth::None,
+                "errors.connections.badMetricsUrl",
+            ),
+            (
+                "prom.example.com",
+                MetricsAuth::None,
+                "errors.connections.badMetricsUrl",
+            ),
+        ] {
+            assert_eq!(with(url, auth, conn.clone()).as_deref(), Some(key), "{url}");
+        }
+        let pem = |pem: &str| MetricsCa::Pem { pem: pem.into() };
+        assert_eq!(
+            with("https://prom.example.com", MetricsAuth::None, pem("nope")).as_deref(),
+            Some("errors.connections.caPemInvalid")
+        );
+        let with_key = format!(
+            "{TEST_CERT_PEM}-----BEGIN PRIVATE KEY-----\nAA==\n-----END PRIVATE KEY-----\n"
+        );
+        assert_eq!(
+            with(
+                "https://prom.example.com",
+                MetricsAuth::None,
+                pem(&with_key)
+            )
+            .as_deref(),
+            Some("errors.connections.pemContainsKey")
+        );
+        let mut p = sample_profile("a");
+        p.metrics = MetricsConfig::Thanos(MetricsEndpoint {
+            url: "https://user:secret@thanos.example.com".into(),
+            auth: MetricsAuth::None,
+            ca: MetricsCa::Connection,
+        });
+        let e = validate_profile(&p).unwrap_err();
+        assert!(!e.message.contains("secret"), "{}", e.message);
     }
 
     #[test]

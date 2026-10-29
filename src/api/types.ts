@@ -85,7 +85,23 @@ export interface ConnectionProfile {
   llmAccess?: LlmAccess;
   /** Проекты для LLM; null или нет поля — все доступные. */
   llmNamespaces?: string[] | null;
+  /** Источник метрик; локальное поле: экспорт его не пишет. Нет поля — `auto`. */
+  metrics?: MetricsConfig;
 }
+
+/** Источник метрик (спец. §7.1): автопоиск или свой Thanos Querier / Prometheus. */
+export type MetricsConfig = { mode: "auto" } | ({ mode: "thanos" } & MetricsEndpoint) | ({ mode: "prometheus" } & MetricsEndpoint);
+export type MetricsMode = MetricsConfig["mode"];
+
+export interface MetricsEndpoint {
+  url: string;
+  auth: MetricsAuth;
+  ca: MetricsCa;
+}
+
+/** Токен подключения, свой bearer-токен (keychain) или без авторизации. */
+export type MetricsAuth = "connection" | "bearer" | "none";
+export type MetricsCa = { mode: "connection" } | { mode: "pem"; pem: string };
 
 /** Уровень доступа LLM: `logs` — этап O4. */
 export type LlmAccess = "off" | "metadata";
@@ -94,6 +110,7 @@ export type LlmAccess = "off" | "metadata";
 export interface SecretsInput {
   token?: string | null;
   clientKey?: string | null;
+  metricsToken?: string | null;
 }
 
 export interface ConnectionFolder {

@@ -72,7 +72,9 @@
       "execForbidden": "Connections with exec plugins are forbidden by your organization",
       "tokenNotUsed": "This connection does not sign in with a token",
       "pemContainsKey": "A certificate field contains a private key — put the key into the key field",
-      "credentialsInUrl": "Remove the user name and password from “{{url}}”: credentials do not belong in the address (a proxy with a password is set via the system HTTPS_PROXY)"
+      "credentialsInUrl": "Remove the user name and password from “{{url}}”: credentials do not belong in the address (a proxy with a password is set via the system HTTPS_PROXY)",
+      "badMetricsUrl": "Invalid metrics source address “{{url}}”: use https://host[:port][/path]",
+      "metricsHttpsRequired": "A metrics source with a token needs an https:// address"
     },
     "folders": {
       "notFound": "Folder {{id}} not found",
@@ -225,7 +227,9 @@
       "manualNamespaces": "If the cluster does not let you list projects, list the ones you work with here.",
       "test": "Checks step by step: address, TLS, sign-in, platform and projects. Unsaved fields are tested too.",
       "llmAccess": "What an LLM assistant connected over MCP may read. Metadata: objects, statuses, events, quotas — no secret, env or ConfigMap values. Off: the LLM does not see this connection.",
-      "llmScope": "Projects the LLM may read; an empty list means it sees no projects. The cluster itself and nodes stay visible if you can read them. The setting stays on this computer: export does not write it."
+      "llmScope": "Projects the LLM may read; an empty list means it sees no projects. The cluster itself and nodes stay visible if you can read them. The setting stays on this computer: export does not write it.",
+      "metrics": "Automatic: Thanos Querier on OpenShift, Prometheus through the API server elsewhere, then metrics.k8s.io. Own: a Thanos or Prometheus address. Not exported.",
+      "metricsAuth": "Connection token — the token of this connection. Own token — saved in the system secret store. A token is sent only over https."
     },
     "cluster": {
       "platform": "Detected from the API groups and the version: OpenShift, or Kubernetes with its distribution (EKS, GKE, AKS, Rancher, Deckhouse, k3s, RKE2).",
@@ -326,7 +330,27 @@
       "llmScope": "Projects for the LLM",
       "llmScopeAll": "All available",
       "llmScopeList": "Only these",
-      "llmNamespaces": "LLM projects"
+      "llmNamespaces": "LLM projects",
+      "metrics": "Metrics",
+      "metricsMode": {
+        "auto": "Automatic",
+        "thanos": "Own Thanos Querier",
+        "prometheus": "Own Prometheus"
+      },
+      "metricsUrl": "Source address",
+      "metricsAuth": "Source authorization",
+      "metricsAuthMode": {
+        "connection": "Connection token",
+        "bearer": "Own token",
+        "none": "No authorization"
+      },
+      "metricsToken": "Source token",
+      "metricsCa": "Source CA",
+      "metricsCaMode": {
+        "connection": "As the connection",
+        "pem": "Certificates (PEM)"
+      },
+      "metricsCaPem": "Source CA certificates (PEM)"
     }
   },
   "cluster": {

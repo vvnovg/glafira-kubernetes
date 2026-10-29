@@ -377,6 +377,37 @@ describe("ConnectionForm", () => {
     });
   });
 
+  it("источник метрик: свой Prometheus с токеном — адрес в профиле, токен секретом; «Автоматически» — без них", async () => {
+    vi.mocked(api.saveConnection).mockImplementation(async (p) => ({ ...p, id: "c1" }));
+    const user = userEvent.setup();
+    const initial = { ...newProfile(), id: "c1", name: "dev", apiUrl: "https://api.dev:6443" };
+    renderWithClient(<ConnectionForm initial={initial} tabId="t" />);
+    expect(screen.queryByLabelText("Адрес источника")).toBeNull();
+    await user.selectOptions(screen.getByLabelText("Метрики"), "prometheus");
+    await user.type(screen.getByLabelText("Адрес источника"), "https://prometheus.example.com");
+    await user.selectOptions(screen.getByLabelText("Авторизация источника"), "bearer");
+    await user.type(screen.getByLabelText("Токен источника"), "prom-token");
+    await user.selectOptions(screen.getByLabelText("CA источника"), "pem");
+    await user.type(screen.getByLabelText("Сертификаты CA источника (PEM)"), "PEM");
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(api.saveConnection).toHaveBeenCalledTimes(1));
+    const [saved, secrets] = vi.mocked(api.saveConnection).mock.calls[0];
+    expect(saved.metrics).toEqual({ mode: "prometheus", url: "https://prometheus.example.com", auth: "bearer", ca: { mode: "pem", pem: "PEM" } });
+    expect(secrets?.metricsToken).toBe("prom-token");
+
+    // Вернуться к «Автоматически» и обратно: введённый адрес не теряется.
+    await user.selectOptions(screen.getByLabelText("Метрики"), "auto");
+    expect(screen.queryByLabelText("Адрес источника")).toBeNull();
+    await user.selectOptions(screen.getByLabelText("Метрики"), "thanos");
+    expect(screen.getByLabelText("Адрес источника")).toHaveValue("https://prometheus.example.com");
+    await user.selectOptions(screen.getByLabelText("Метрики"), "auto");
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(api.saveConnection).toHaveBeenCalledTimes(2));
+    const [auto, autoSecrets] = vi.mocked(api.saveConnection).mock.calls[1];
+    expect(auto.metrics).toEqual({ mode: "auto" });
+    expect(autoSecrets).not.toHaveProperty("metricsToken");
+  });
+
   it("поля проектов подсказывают проекты, которые уже прочитало дерево, без нового запроса", async () => {
     const user = userEvent.setup();
     const initial = { ...newProfile(), id: "c1", name: "dev", apiUrl: "https://api.dev:6443", favoriteNamespaces: ["team-a"], llmAccess: "metadata" as const, llmNamespaces: [] };

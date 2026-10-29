@@ -150,9 +150,11 @@ pub fn build_export(
         .filter(|p| in_scope(p.folder_id.as_deref()))
         .map(|mut profile| {
             profile.extra.clear();
-            // Доступ LLM — локальное решение получателя (спец. §5.1): в файл не пишется.
+            // Доступ LLM и источник метрик — локальные решения получателя (спец. §5.1): в файл
+            // не пишутся.
             profile.llm_access = Default::default();
             profile.llm_namespaces = None;
+            profile.metrics = Default::default();
             strip_exec_for_export(&mut profile);
             strip_pem_keys_for_export(&mut profile);
             let needs_secret = needs_secret(secrets, &profile)?;
@@ -411,6 +413,7 @@ fn same_settings(local: &ConnectionProfile, incoming: &ConnectionProfile) -> boo
             order: 0,
             llm_access: Default::default(),
             llm_namespaces: None,
+            metrics: Default::default(),
             extra: Default::default(),
             ..p.clone()
         };
@@ -622,12 +625,13 @@ pub(crate) fn plan_import(
                 unchanged.push((TreeItemKind::Connection, profile.id.clone()));
                 continue;
             }
-            // Место в дереве, доступ LLM и неизвестные поля — локальные; пароли получателя не
-            // трогаются.
+            // Место в дереве, доступ LLM, источник метрик и неизвестные поля — локальные; пароли
+            // получателя не трогаются.
             profile.folder_id = slot.folder_id.clone();
             profile.order = slot.order;
             profile.llm_access = slot.llm_access;
             profile.llm_namespaces = slot.llm_namespaces.take();
+            profile.metrics = std::mem::take(&mut slot.metrics);
             profile.extra = std::mem::take(&mut slot.extra);
             // Секреты exec-плагина тоже локальные: файл их не несёт. Подтверждение остаётся,
             // только если строка запуска с этими секретами не изменилась (спец. §5.2).
@@ -678,9 +682,11 @@ pub(crate) fn plan_import(
             .unwrap_or(0);
         profile.folder_id = folder;
         profile.name = name;
-        // Файл не открывает кластер модели: доступ LLM нового подключения выключен.
+        // Файл не открывает кластер модели и не задаёт, куда ходить за метриками: доступ LLM
+        // нового подключения выключен, источник метрик — автоматический.
         profile.llm_access = Default::default();
         profile.llm_namespaces = None;
+        profile.metrics = Default::default();
         profile.extra = Default::default();
         if needs.token || needs.client_key {
             preview.needs_secrets += 1;
@@ -878,6 +884,51 @@ mod tests {
         let out = build_export(&s, &MemoryStore::default(), None, "1", "now").unwrap();
         assert!(out.connections[0].profile.extra.is_empty());
         assert!(!serde_json::to_string(&out).unwrap().contains("futureField"));
+    }
+
+    /// Источник метрик — локальная настройка: экспорт её не пишет, импорт не переносит (чужой
+    /// файл не направит токен подключения на свой адрес).
+    #[test]
+    fn metrics_source_is_never_exported_or_imported() {
+        use crate::storage::profile::{MetricsAuth, MetricsCa, MetricsConfig, MetricsEndpoint};
+        let (_d, s) = store();
+        let mut own = sample_profile("a");
+        own.metrics = MetricsConfig::Thanos(MetricsEndpoint {
+            url: "https://thanos.example.com".into(),
+            auth: MetricsAuth::Connection,
+            ca: MetricsCa::Connection,
+        });
+        s.upsert(own.clone()).unwrap();
+        let out = build_export(&s, &MemoryStore::default(), None, "1", "now").unwrap();
+        let json = serde_json::to_value(&out).unwrap();
+        assert!(json["connections"][0].get("metrics").is_none(), "{json}");
+
+        let data = StoreData {
+            connections: vec![own.clone()],
+            ..Default::default()
+        };
+        let evil = serde_json::json!({
+            "mode": "prometheus", "url": "https://evil.example.com", "auth": "connection"
+        });
+        let mut incoming_a = conn_json("a", "conn-a", None);
+        incoming_a["apiUrl"] = "https://api.other.example.com:6443".into();
+        incoming_a["metrics"] = evil.clone();
+        let mut incoming_b = conn_json("b", "conn-b", None);
+        incoming_b["metrics"] = evil;
+        let p = plan(
+            &data,
+            &file(vec![], vec![incoming_a, incoming_b]),
+            &opts(None),
+        );
+        assert_eq!(
+            conn(&p.next, "a").metrics,
+            own.metrics,
+            "своя настройка сохраняется"
+        );
+        assert!(
+            conn(&p.next, "b").metrics.is_auto(),
+            "новое подключение — автоматический источник"
+        );
     }
 
     /// Доступ LLM — локальное решение (спец. §5.1): экспорт его не пишет, импорт не переносит.
