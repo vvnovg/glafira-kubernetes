@@ -264,7 +264,8 @@ pub struct WorkloadResources {
     /// Суммы по работающим подам.
     pub requests: Amounts,
     pub limits: Amounts,
-    /// Потребление: p95 CPU и максимум памяти «худшего пода» по контейнерам × поды.
+    /// Потребление: p95 CPU и максимум памяти «худшего пода» по контейнерам × поды; без работающих
+    /// подов — неизвестно (`None`).
     pub usage: Amounts,
     /// Requests минус потребление.
     pub reserve: Amounts,
@@ -417,8 +418,12 @@ pub fn summarize(
             let mut risks = Vec::new();
             let mut excess = Vec::new();
             for (c, u) in containers.into_iter().flatten() {
-                usage_sum.cpu = add(usage_sum.cpu, u.cpu_p95.map(|v| v * n));
-                usage_sum.memory = add(usage_sum.memory, u.memory_max.map(|v| v * n));
+                // Без работающих подов умножать потребление худшего пода не на что: сумма неизвестна
+                // (`None`), а не 0 — иначе «0 / 0Mi» выглядело бы как замер.
+                if !mine.is_empty() {
+                    usage_sum.cpu = add(usage_sum.cpu, u.cpu_p95.map(|v| v * n));
+                    usage_sum.memory = add(usage_sum.memory, u.memory_max.map(|v| v * n));
+                }
                 let (req, lim) = per_pod.get(c).copied().unwrap_or_default();
                 let (r, e) = assess(c, u, req, lim);
                 risks.extend(r);
@@ -759,7 +764,11 @@ pub(crate) mod tests {
             report.pods, 0,
             "завершённый под Job не считается работающим"
         );
-        assert_eq!(report.usage.cpu, Some(0.0));
+        assert_eq!(
+            report.usage,
+            Amounts::default(),
+            "нет работающих подов — потребление неизвестно, а не 0"
+        );
         assert!(!report.actionable());
         assert_eq!(u.quotas[0].resource, "requests.cpu");
         assert!(!u.truncated);

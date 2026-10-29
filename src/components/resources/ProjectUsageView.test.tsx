@@ -52,11 +52,14 @@ const thanosForbidden: MetricsRejected = {
 };
 
 let send: (e: ProjectUsageEvent) => void = () => {};
+let started = 0;
 beforeEach(() => {
+  started = 0;
   vi.mocked(api.startProjectUsage).mockReset();
+  // Каждый запуск получает свой id («s1», «s2», …): тест видит, какую именно сессию остановили.
   vi.mocked(api.startProjectUsage).mockImplementation(async (_c, _n, _d, _r, onEvent) => {
     send = onEvent;
-    return "s1";
+    return `s${++started}`;
   });
   vi.mocked(api.stopSession).mockClear();
   useWorkspace.setState({ tabs: [], activeId: null });
@@ -86,8 +89,88 @@ describe("ProjectUsageView", () => {
     expect(useWorkspace.getState().tabs[0]).toMatchObject({ kind: "workload", workloadKind: "Deployment", name: "hot" });
     await user.click(screen.getByRole("button", { name: "Обновить" }));
     expect(api.startProjectUsage).toHaveBeenLastCalledWith("c1", "team-a", 7, true, expect.any(Function));
+    // Новый запуск останавливает прежнюю сессию, а не свою.
+    expect(api.stopSession).toHaveBeenCalledTimes(1);
+    expect(api.stopSession).toHaveBeenLastCalledWith("s1");
     unmount();
-    expect(api.stopSession).toHaveBeenCalledWith("s1");
+    expect(api.stopSession).toHaveBeenCalledTimes(2);
+    expect(api.stopSession).toHaveBeenLastCalledWith("s2");
+  });
+
+  it("«Обновить» собирает мимо кэша один раз: смена окна после него снова берёт кэш", async () => {
+    const user = userEvent.setup();
+    renderWithClient(<ProjectUsageView connectionId="c1" namespace="team-a" />);
+    await vi.waitFor(() => expect(api.startProjectUsage).toHaveBeenCalledTimes(1));
+    act(() => send({ kind: "done", usage: usage([workload("web")]) }));
+    await user.click(await screen.findByRole("button", { name: "Обновить" }));
+    expect(api.startProjectUsage).toHaveBeenLastCalledWith("c1", "team-a", 7, true, expect.any(Function));
+    act(() => send({ kind: "done", usage: usage([workload("web")]) }));
+    await user.selectOptions(await screen.findByRole("combobox", { name: /Окно/ }), "14");
+    expect(api.startProjectUsage).toHaveBeenCalledTimes(3);
+    expect(api.startProjectUsage).toHaveBeenLastCalledWith("c1", "team-a", 14, false, expect.any(Function));
+  });
+
+  it("закрытие до ответа запуска: пришедшую позже сессию всё равно останавливают, поздние события ничего не меняют", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let answer: (id: string) => void = () => {};
+    vi.mocked(api.startProjectUsage).mockImplementationOnce((_c, _n, _d, _r, onEvent) => {
+      send = onEvent;
+      return new Promise<string>((resolve) => (answer = resolve));
+    });
+    const { unmount, container } = renderWithClient(<ProjectUsageView connectionId="c1" namespace="team-a" />);
+    expect(api.startProjectUsage).toHaveBeenCalledTimes(1);
+    unmount();
+    expect(api.stopSession).not.toHaveBeenCalled();
+    answer("late");
+    await vi.waitFor(() => expect(api.stopSession).toHaveBeenCalledWith("late"));
+    expect(api.stopSession).toHaveBeenCalledTimes(1);
+    send({ kind: "done", usage: usage([workload("web")]) });
+    expect(container).toBeEmptyDOMElement();
+    expect(errors).not.toHaveBeenCalled();
+    errors.mockRestore();
+  });
+
+  it("событие остановленной сессии не меняет экран новой", async () => {
+    const user = userEvent.setup();
+    renderWithClient(<ProjectUsageView connectionId="c1" namespace="team-a" />);
+    await vi.waitFor(() => expect(api.startProjectUsage).toHaveBeenCalledTimes(1));
+    const first = send;
+    await user.selectOptions(screen.getByRole("combobox", { name: /Окно/ }), "14");
+    await vi.waitFor(() => expect(api.startProjectUsage).toHaveBeenCalledTimes(2));
+    act(() => first({ kind: "done", usage: usage([workload("stale")]) }));
+    expect(screen.queryByText("stale")).not.toBeInTheDocument();
+    expect(screen.getByText(/Собираю потребление проекта/)).toBeInTheDocument();
+  });
+
+  it("workload без работающих подов: потребление и requests неизвестны — «—», а не «0»", async () => {
+    renderWithClient(<ProjectUsageView connectionId="c1" namespace="team-a" />);
+    await vi.waitFor(() => expect(api.startProjectUsage).toHaveBeenCalled());
+    const unknown = { cpu: null, memory: null };
+    act(() =>
+      send({
+        kind: "done",
+        usage: usage([workload("idle", { pods: 0, requests: unknown, limits: unknown, usage: unknown, reserve: unknown, risks: [{ code: "oom", container: "app", count: 1 }] })]),
+      }),
+    );
+    const row = (await screen.findByRole("button", { name: "idle" })).closest("tr")!;
+    const cells = within(row).getAllByRole("cell");
+    expect(cells.slice(2, 6).map((c) => c.textContent)).toEqual(["— / —", "— / —", "— / —", "— / —"]);
+    expect(row).not.toHaveTextContent(/0Mi|0m/);
+    expect(within(row).getByText("app: OOM 1")).toBeInTheDocument();
+  });
+
+  it("пустая таблица: нет workloads — одно, фильтр скрыл все — другое", async () => {
+    const user = userEvent.setup();
+    renderWithClient(<ProjectUsageView connectionId="c1" namespace="team-a" />);
+    await vi.waitFor(() => expect(api.startProjectUsage).toHaveBeenCalled());
+    act(() => send({ kind: "done", usage: usage([workload("web")]) }));
+    await user.click(await screen.findByRole("checkbox", { name: "Только с рекомендациями" }));
+    expect(screen.getByText("Под фильтры ничего не подходит.")).toBeInTheDocument();
+    expect(screen.queryByText("Workloads нет")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Обновить" }));
+    act(() => send({ kind: "done", usage: usage([]) }));
+    expect(await screen.findByText("Workloads нет")).toBeInTheDocument();
+    expect(screen.queryByText("Под фильтры ничего не подходит.")).not.toBeInTheDocument();
   });
 
   it("сортировка по резерву, «только с рекомендациями», не больше 100 строк", () => {
@@ -95,6 +178,10 @@ describe("ProjectUsageView", () => {
     expect(projectRows(list, "reserve", false, "").map((w) => w.name)).toEqual(["b", "a"]);
     expect(projectRows(list, "risk", true, "").map((w) => w.name)).toEqual(["b"]);
     expect(projectRows(list, "risk", false, "A").map((w) => w.name)).toEqual(["a"]);
+    // Неизвестный резерв — в конце, а не как 0: после известного даже нулевого и отрицательного.
+    const unknown = workload("unknown", { reserve: { cpu: null, memory: null } });
+    const over = workload("over", { reserve: { cpu: -0.5, memory: 0 } });
+    expect(projectRows([unknown, ...list, over], "reserve", false, "").map((w) => w.name)).toEqual(["b", "a", "over", "unknown"]);
   });
 
   it("причина, по которой источник отвергнут, видна всегда и переведена", async () => {

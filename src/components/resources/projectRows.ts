@@ -30,12 +30,18 @@ export const actionable = (w: WorkloadResources) => w.risks.length > 0 || w.exce
 
 /**
  * Строки таблицы: фильтр «только с рекомендациями» и по имени, сортировка «по риску» (больше рисков — выше, затем
- * избыток) или «по резерву» (больший резерв CPU, затем памяти — выше); имя — при равенстве.
+ * избыток) или «по резерву» (больший резерв CPU, затем памяти — выше, неизвестный — в конце); имя — при равенстве.
  */
 export function projectRows(list: WorkloadResources[], sort: Sort, onlyActionable: boolean, query: string): WorkloadResources[] {
   const q = query.trim().toLowerCase();
   const rows = list.filter((w) => (!onlyActionable || actionable(w)) && (q === "" || w.name.toLowerCase().includes(q)));
   const byName = (a: WorkloadResources, b: WorkloadResources) => a.name.localeCompare(b.name);
   if (sort === "risk") return rows.sort((a, b) => b.risks.length - a.risks.length || b.excess.length - a.excess.length || byName(a, b));
-  return rows.sort((a, b) => (b.reserve.cpu ?? 0) - (a.reserve.cpu ?? 0) || (b.reserve.memory ?? 0) - (a.reserve.memory ?? 0) || byName(a, b));
+  return rows.sort((a, b) => largerFirst(a.reserve.cpu, b.reserve.cpu) || largerFirst(a.reserve.memory, b.reserve.memory) || byName(a, b));
+}
+
+/** Больший — выше; неизвестное значение (`null`) — после всех известных, а не как 0. */
+function largerFirst(a: number | null, b: number | null): number {
+  if (a === null || b === null) return a === b ? 0 : a === null ? 1 : -1;
+  return b - a;
 }

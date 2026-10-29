@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
 import type { AppError, ProjectUsage } from "../../api/types";
@@ -17,16 +17,21 @@ type State = { status: "loading" } | { status: "done"; usage: ProjectUsage } | {
 
 /**
  * Сбор по проекту — фоновая сессия `get_project_usage` (дедлайн 45 с, кэш 5 минут в Rust); закрытие вкладки или
- * новый запуск останавливает прежнюю. `nonce` — «Обновить»: собрать заново, мимо кэша.
+ * новый запуск останавливает прежнюю. `nonce` — «Обновить» и «Повторить»: собрать заново, мимо кэша и с новым выбором
+ * источника. Это одноразово: следующая смена окна снова берёт кэш.
  */
 function useProjectUsage(connectionId: string, namespace: string, days: number, nonce: number): State {
   const [state, setState] = useState<State>({ status: "loading" });
+  // Номер запроса, который уже собрал мимо кэша: новый номер — один запуск с `refresh`.
+  const refreshed = useRef(nonce);
   useEffect(() => {
     let stopped = false;
     let sessionId: string | null = null;
+    const refresh = nonce !== refreshed.current;
+    refreshed.current = nonce;
     setState({ status: "loading" });
     api
-      .startProjectUsage(connectionId, namespace, days, nonce > 0, (e) => {
+      .startProjectUsage(connectionId, namespace, days, refresh, (e) => {
         if (stopped) return;
         setState(e.kind === "done" ? { status: "done", usage: e.usage } : { status: "failed", error: e.error, at: Date.now() });
       })
@@ -96,7 +101,7 @@ export function ProjectUsageView({ connectionId, namespace }: { connectionId: st
             </p>
           )}
           {rows.length === 0 ? (
-            <p className="empty">{t("resources.noWorkloads")}</p>
+            <p className="empty">{u.workloads.length > 0 ? t("health.nothingMatches") : t("resources.noWorkloads")}</p>
           ) : (
             <table className="resource-table">
               <thead>
