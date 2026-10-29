@@ -308,7 +308,7 @@ pub fn check_limits(
     what: &str,
 ) -> AppResult<()> {
     if let (Some(r), Some(l)) = (request, limit)
-        && l < r
+        && quantity_lt(l, r)
     {
         return Err(invalid(crate::ltext!(
             "errors.change.limitBelowRequest",
@@ -333,14 +333,31 @@ pub fn check_bounds(min: Option<i32>, max: i32) -> AppResult<()> {
     )))
 }
 
-/// Одинаковые quantity: `500m` и `0.5` — одно и то же.
+/// Quantity равны с поправкой на округление `f64`: `700m` разбирается в `0.7000000000000001`,
+/// а `0.7` — в `0.7`, и точное сравнение считало бы их разными.
+pub fn quantity_eq(a: f64, b: f64) -> bool {
+    (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0)
+}
+
+/// `a` меньше `b` на самом деле, а не из-за округления `f64`. Все сравнения quantity в модуле
+/// `change` идут через `quantity_eq` и `quantity_lt`, а не через `==` и `<`.
+pub fn quantity_lt(a: f64, b: f64) -> bool {
+    a < b && !quantity_eq(a, b)
+}
+
+/// Одинаковые quantity-строки: `500m` и `0.5` — одно и то же; не разобравшиеся — как текст.
+pub fn same_quantity_text(a: &str, b: &str) -> bool {
+    match (parse_quantity(a), parse_quantity(b)) {
+        (Some(x), Some(y)) => quantity_eq(x, y),
+        _ => a == b,
+    }
+}
+
+/// Одинаковые значения поля: нет поля, `null` или quantity (по значению, а не по записи).
 fn same_quantity(a: &Option<Option<String>>, b: &Option<Option<String>>) -> bool {
     match (a, b) {
         (None, None) | (Some(None), Some(None)) => true,
-        (Some(Some(x)), Some(Some(y))) => match (parse_quantity(x), parse_quantity(y)) {
-            (Some(x), Some(y)) => (x - y).abs() <= 1e-9 * x.abs().max(1.0),
-            _ => x == y,
-        },
+        (Some(Some(x)), Some(Some(y))) => same_quantity_text(x, y),
         _ => false,
     }
 }
@@ -597,5 +614,47 @@ mod tests {
             workload: web(),
         };
         assert!(applied_as_proposed(&restart, &restart.clone()));
+    }
+
+    #[test]
+    fn quantities_in_another_notation_are_equal_in_limits_and_comparisons() {
+        // `700m` как f64 — 0.7000000000000001, а `0.7` — 0.7: точное сравнение их различает.
+        let key = |c: Change| validate_form(&c).err().map(|e| e.key);
+        for (request, limit) in [("700m", "0.7"), ("0.7", "700m"), ("0.7", "0.7")] {
+            assert_eq!(
+                key(set(
+                    json!([{"name": "app", "requests": {"cpu": request}, "limits": {"cpu": limit}}])
+                )),
+                None,
+                "{request} / {limit}"
+            );
+        }
+        assert_eq!(
+            key(set(
+                json!([{"name": "app", "requests": {"memory": "1Gi"}, "limits": {"memory": "1024Mi"}}])
+            )),
+            None
+        );
+        // Настоящий limit ниже request по-прежнему ошибка.
+        for (request, limit) in [("701m", "0.7"), ("0.71", "700m")] {
+            assert_eq!(
+                key(set(
+                    json!([{"name": "app", "requests": {"cpu": request}, "limits": {"cpu": limit}}])
+                ))
+                .as_deref(),
+                Some("errors.change.limitBelowRequest"),
+                "{request} / {limit}"
+            );
+        }
+        let (a, b) = (
+            parse_quantity("700m").unwrap(),
+            parse_quantity("0.7").unwrap(),
+        );
+        assert!(quantity_eq(a, b) && quantity_eq(b, a));
+        assert!(!quantity_lt(a, b) && !quantity_lt(b, a));
+        assert!(quantity_lt(0.7, 0.701) && !quantity_lt(0.701, 0.7));
+        assert!(same_quantity_text("700m", "0.7"));
+        assert!(!same_quantity_text("700m", "701m"));
+        assert!(same_quantity_text("lots", "lots") && !same_quantity_text("lots", "more"));
     }
 }

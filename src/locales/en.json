@@ -1237,5 +1237,15 @@
         "fix": "Lower the requests closer to the usage: the reserved capacity is unavailable to other pods and counts against the quota. The Resources tab shows a recommendation."
       }
     }
+  },
+  "change": {
+    "warning": {
+      "unverified": "Could not read {{what}}: the change was not checked against this data"
+    },
+    "unverifiedWhat": {
+      "hpa": "the HPA of this workload",
+      "limitRange": "the LimitRange of the project",
+      "quota": "the quotas of the project"
+    }
   }
 }

@@ -10,10 +10,12 @@ use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use kube::api::ListParams;
 use serde::Serialize;
 
-use super::{Change, ContainerResources, check_bounds, check_limits};
-use crate::error::AppResult;
+use super::{
+    Change, ContainerResources, check_bounds, check_limits, quantity_lt, same_quantity_text,
+};
+use crate::error::{AppResult, ErrorCode};
 use crate::k8s::quantity::parse_quantity;
-use crate::k8s::read::ReadClient;
+use crate::k8s::read::{Listed, ReadClient};
 use crate::k8s::workloads::{WorkloadSpec, get_spec};
 use crate::resources::constraints::{limit_range_bounds, quota_rooms};
 use crate::resources::current::Amounts;
@@ -59,6 +61,16 @@ pub struct HpaNow {
     pub generation: Option<i64>,
 }
 
+/// Что при проверке изменения не удалось прочитать (ответ не 404): HPA, `LimitRange` или квоты
+/// проекта. Пустой результат вместо них выглядел бы как «нет ограничений».
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Constraint {
+    Hpa,
+    LimitRange,
+    Quota,
+}
+
 /// Workload изменения сейчас: шаблон, HPA и ограничения проекта.
 #[derive(Debug, Clone)]
 pub struct WorkloadFacts {
@@ -69,6 +81,8 @@ pub struct WorkloadFacts {
     pub restarted_at: Option<String>,
     pub limit_range: Option<LimitRangeBounds>,
     pub quotas: Vec<QuotaRoom>,
+    /// Списки, которые не прочитались: «нет HPA / LimitRange / квоты» про них сказать нельзя.
+    pub unverified: Vec<Constraint>,
 }
 
 /// Объект изменения в кластере сейчас.
@@ -139,6 +153,23 @@ fn hpa_now(h: &HorizontalPodAutoscaler) -> Option<HpaNow> {
     })
 }
 
+/// Объекты списка. 404 (такого API в кластере нет) — «таких объектов нет»; любая другая
+/// ошибка (403, таймаут) — «не проверено»: `what` попадает в `unverified`, а не в «нет».
+fn listed<K>(
+    list: AppResult<Listed<K>>,
+    what: Constraint,
+    unverified: &mut Vec<Constraint>,
+) -> Vec<K> {
+    match list {
+        Ok(l) => l.items,
+        Err(e) if e.code == ErrorCode::NotFound => Vec::new(),
+        Err(_) => {
+            unverified.push(what);
+            Vec::new()
+        }
+    }
+}
+
 /// Читает объект изменения и то, против чего его проверяют. Объекта нет — `NOT_FOUND`.
 pub async fn read_facts(r: &ReadClient, change: &Change) -> AppResult<Facts> {
     let ns = change.namespace();
@@ -154,17 +185,18 @@ pub async fn read_facts(r: &ReadClient, change: &Change) -> AppResult<Facts> {
                 r.list::<ResourceQuota>(Some(ns), &all),
             );
             let kind = format!("{:?}", workload.kind);
-            let hpa = hpas.ok().and_then(|l| {
-                l.items
-                    .iter()
-                    .find(|h| {
-                        h.spec.as_ref().is_some_and(|s| {
-                            s.scale_target_ref.kind == kind
-                                && s.scale_target_ref.name == workload.name
-                        })
+            let mut unverified = Vec::new();
+            let hpa = listed(hpas, Constraint::Hpa, &mut unverified)
+                .iter()
+                .find(|h| {
+                    h.spec.as_ref().is_some_and(|s| {
+                        s.scale_target_ref.kind == kind && s.scale_target_ref.name == workload.name
                     })
-                    .and_then(hpa_now)
-            });
+                })
+                .and_then(hpa_now);
+            let limit_range =
+                limit_range_bounds(&listed(lrs, Constraint::LimitRange, &mut unverified));
+            let quotas = quota_rooms(&listed(quotas, Constraint::Quota, &mut unverified));
             let template = spec.template.as_ref();
             let pod_spec = template.and_then(|t| t.spec.as_ref());
             let containers = pod_spec
@@ -187,8 +219,9 @@ pub async fn read_facts(r: &ReadClient, change: &Change) -> AppResult<Facts> {
                 containers,
                 hpa,
                 restarted_at,
-                limit_range: lrs.ok().and_then(|l| limit_range_bounds(&l.items)),
-                quotas: quotas.map(|l| quota_rooms(&l.items)).unwrap_or_default(),
+                limit_range,
+                quotas,
+                unverified,
             })))
         }
         Change::SetHpaBounds { hpa, .. } => {
@@ -238,6 +271,9 @@ pub enum Warning {
     },
     /// Под без контроллера: после удаления его никто не создаст заново.
     Orphan,
+    /// Не удалось прочитать HPA, `LimitRange` или квоты проекта (не 404): изменение против них
+    /// не проверено, а не проверено и чисто.
+    Unverified { what: Constraint },
 }
 
 fn not_in_template(container: &str) -> crate::error::AppError {
@@ -308,7 +344,7 @@ pub fn check(change: &Change, facts: &Facts) -> AppResult<Vec<Warning>> {
                     ] {
                         let pick = |a: Amounts| if cpu { a.cpu } else { a.memory };
                         let Some(v) = v else { continue };
-                        if let Some(m) = pick(lr.min).filter(|m| v < *m) {
+                        if let Some(m) = pick(lr.min).filter(|m| quantity_lt(v, *m)) {
                             out.push(Warning::LimitRange {
                                 container: c.name.clone(),
                                 field,
@@ -316,7 +352,7 @@ pub fn check(change: &Change, facts: &Facts) -> AppResult<Vec<Warning>> {
                                 limit: m,
                             });
                         }
-                        if let Some(m) = pick(lr.max).filter(|m| v > *m) {
+                        if let Some(m) = pick(lr.max).filter(|m| quantity_lt(*m, v)) {
                             out.push(Warning::LimitRange {
                                 container: c.name.clone(),
                                 field,
@@ -346,7 +382,8 @@ pub fn check(change: &Change, facts: &Facts) -> AppResult<Vec<Warning>> {
                     add(&mut delta.3, lim, Amounts::default());
                 }
             }
-            // Квота: прирост за все реплики плюс поды выкладки с новыми значениями.
+            // Квота: прирост за все реплики плюс поды выкладки с новыми значениями. Уменьшение
+            // квоту не освобождает, пока старые поды живы: поды выкладки занимают её сверх занятого.
             let replicas = f64::from(spec.row.desired.unwrap_or(1).max(0));
             let surge = f64::from(spec.surge.max(0));
             for q in quotas {
@@ -357,9 +394,9 @@ pub fn check(change: &Change, facts: &Facts) -> AppResult<Vec<Warning>> {
                     "limits.memory" => (delta.1.memory, delta.3.memory),
                     _ => continue,
                 };
-                let needed = d.unwrap_or(0.0) * replicas + new.unwrap_or(0.0) * surge;
+                let needed = d.unwrap_or(0.0).max(0.0) * replicas + new.unwrap_or(0.0) * surge;
                 let free = q.hard - q.used;
-                if needed > free + 1e-9 && needed > 0.0 {
+                if quantity_lt(free, needed) && needed > 0.0 {
                     out.push(Warning::Quota {
                         quota: q.quota.clone(),
                         resource: q.resource.clone(),
@@ -368,11 +405,24 @@ pub fn check(change: &Change, facts: &Facts) -> AppResult<Vec<Warning>> {
                     });
                 }
             }
+            // HPA на проверку ресурсов не влияет; LimitRange и квоты, которые не прочитались, —
+            // предупреждение, а не молчание.
+            out.extend(
+                w.unverified
+                    .iter()
+                    .filter(|c| **c != Constraint::Hpa)
+                    .map(|&what| Warning::Unverified { what }),
+            );
         }
         (Change::Scale { replicas, .. }, Facts::Workload(w)) => {
             if let Some(h) = &w.hpa {
                 out.push(Warning::HpaManaged {
                     hpa: h.name.clone(),
+                });
+            }
+            if w.unverified.contains(&Constraint::Hpa) {
+                out.push(Warning::Unverified {
+                    what: Constraint::Hpa,
                 });
             }
             if *replicas == 0 {
@@ -448,7 +498,7 @@ pub fn diff(change: &Change, facts: &Facts, now_rfc3339: &str) -> Vec<FieldChang
                 ] {
                     let Some(new) = change else { continue };
                     let same = match (new, current) {
-                        (Some(a), Some(b)) => parse_quantity(a) == parse_quantity(b),
+                        (Some(a), Some(b)) => same_quantity_text(a, b),
                         (None, None) => true,
                         _ => false,
                     };
@@ -736,5 +786,184 @@ mod tests {
             read_facts(&r, &missing).await.unwrap_err().code,
             crate::error::ErrorCode::NotFound
         );
+    }
+
+    const HPAS: &str = "/apis/autoscaling/v2/namespaces/team-a/horizontalpodautoscalers";
+    const LIMIT_RANGES: &str = "/api/v1/namespaces/team-a/limitranges";
+    const QUOTAS: &str = "/api/v1/namespaces/team-a/resourcequotas";
+
+    /// Клиент с ответами `cluster`, где пути из `over` подменены.
+    fn reader_over(
+        over: impl Fn(&str) -> Option<(u16, serde_json::Value)> + Send + 'static,
+    ) -> ReadClient {
+        let (client, _) = mock_client(move |s| over(s.path()).unwrap_or_else(|| cluster(s)));
+        ReadClient::new(client, Duration::from_secs(5))
+    }
+
+    fn items_of(kind: &str, items: serde_json::Value) -> (u16, serde_json::Value) {
+        (
+            200,
+            json!({"apiVersion": "v1", "kind": kind, "metadata": {}, "items": items}),
+        )
+    }
+
+    fn deployment(containers: serde_json::Value) -> (u16, serde_json::Value) {
+        (
+            200,
+            json!({"apiVersion": "apps/v1", "kind": "Deployment",
+                "metadata": {"name": "web", "namespace": "team-a", "resourceVersion": "11", "generation": 2},
+                "spec": {"replicas": 2, "selector": {"matchLabels": {"app": "web"}},
+                    "template": {"metadata": {"labels": {"app": "web"}},
+                        "spec": {"containers": containers}}}}),
+        )
+    }
+
+    #[tokio::test]
+    async fn quantities_in_another_notation_are_equal_in_the_check_and_the_diff() {
+        // `700m` как f64 — 0.7000000000000001, а `0.7` — 0.7: точное сравнение их различает.
+        let r = reader_over(|p| match p {
+            "/apis/apps/v1/namespaces/team-a/deployments/web" => Some(deployment(json!([
+                {"name": "app", "image": "web:1",
+                 "resources": {"requests": {"cpu": "700m"}, "limits": {"cpu": "0.7"}}}
+            ]))),
+            LIMIT_RANGES => Some(items_of(
+                "LimitRangeList",
+                json!([{"metadata": {"name": "lr"}, "spec": {"limits": [
+                    {"type": "Container", "min": {"cpu": "700m"}, "max": {"cpu": "0.7"}}]}}]),
+            )),
+            _ => None,
+        });
+        // В кластере request 700m и limit 0.7 равны: изменение памяти не упирается в CPU.
+        let memory = set(json!([{"name": "app", "requests": {"memory": "64Mi"}}]));
+        let f = read_facts(&r, &memory).await.unwrap();
+        assert!(check(&memory, &f).unwrap().is_empty());
+        // Новый request «700m» при limit «0.7» не выше limit.
+        let same = set(json!([{"name": "app", "requests": {"cpu": "700m"}}]));
+        assert!(check(&same, &f).unwrap().is_empty());
+        // Настоящий limit ниже request по-прежнему ошибка.
+        let above = set(json!([{"name": "app", "requests": {"cpu": "701m"}}]));
+        assert_eq!(
+            check(&above, &f).unwrap_err().key,
+            "errors.change.limitBelowRequest"
+        );
+        // Те же значения в другой записи — не изменение: ни в «было → станет», ни в границах
+        // LimitRange (min 700m, max 0.7).
+        let reworded =
+            set(json!([{"name": "app", "requests": {"cpu": "0.7"}, "limits": {"cpu": "700m"}}]));
+        assert!(diff(&reworded, &f, "now").is_empty());
+        assert!(check(&reworded, &f).unwrap().is_empty());
+        assert_eq!(
+            diff(
+                &set(json!([{"name": "app", "limits": {"cpu": "701m"}}])),
+                &f,
+                "now"
+            )
+            .len(),
+            1
+        );
+    }
+
+    async fn warnings_when(path: &'static str, code: u16, change: &Change) -> Vec<Warning> {
+        let r = reader_over(move |p| {
+            (p == path).then(|| status(code, "Failure", "the list cannot be read"))
+        });
+        let f = read_facts(&r, change).await.unwrap();
+        check(change, &f).unwrap()
+    }
+
+    #[tokio::test]
+    async fn lists_that_cannot_be_read_are_unverified_and_a_missing_api_is_not() {
+        let scale = Change::Scale {
+            namespace: "team-a".into(),
+            workload: web(),
+            replicas: 3,
+        };
+        // Request ниже min LimitRange из `cluster`: с LimitRange был бы Warning::LimitRange.
+        let cpu = set(json!([{"name": "app", "requests": {"cpu": "50m"}}]));
+        // Request памяти растёт и не помещается в квоту из `cluster`: с квотой был бы Quota.
+        let memory = set(json!([{"name": "app", "requests": {"memory": "1Gi"}}]));
+        let restart = Change::RolloutRestart {
+            namespace: "team-a".into(),
+            workload: web(),
+        };
+        for (path, change, what) in [
+            (HPAS, &scale, Constraint::Hpa),
+            (LIMIT_RANGES, &cpu, Constraint::LimitRange),
+            (QUOTAS, &memory, Constraint::Quota),
+        ] {
+            // 403 и сбой сервера: не проверено; HpaManaged и прочее из прочитанного не появляется.
+            for code in [403, 500] {
+                assert_eq!(
+                    warnings_when(path, code, change).await,
+                    [Warning::Unverified { what }],
+                    "{path} {code}"
+                );
+            }
+            // 404: API в кластере нет — таких объектов нет, предупреждения тоже.
+            assert!(
+                warnings_when(path, 404, change).await.is_empty(),
+                "{path} 404"
+            );
+        }
+        // Что не прочиталось, но изменением не используется, о предупреждении не просит.
+        let no_unverified =
+            |w: Vec<Warning>| !w.iter().any(|w| matches!(w, Warning::Unverified { .. }));
+        assert!(no_unverified(warnings_when(HPAS, 403, &cpu).await));
+        assert!(no_unverified(warnings_when(QUOTAS, 403, &scale).await));
+        assert!(no_unverified(
+            warnings_when(LIMIT_RANGES, 403, &scale).await
+        ));
+        assert!(no_unverified(warnings_when(HPAS, 403, &restart).await));
+        // Прочитанное остаётся: HPA есть — HpaManaged, а LimitRange не прочитался отдельно.
+        assert_eq!(
+            warnings_when(LIMIT_RANGES, 403, &scale).await,
+            [Warning::HpaManaged {
+                hpa: "web-hpa".into()
+            }]
+        );
+        assert_eq!(
+            serde_json::to_value(Warning::Unverified {
+                what: Constraint::LimitRange
+            })
+            .unwrap(),
+            json!({"code": "unverified", "what": "limitRange"})
+        );
+    }
+
+    fn reader_with_quota_used(used: &'static str) -> ReadClient {
+        reader_over(move |p| {
+            (p == QUOTAS).then(|| {
+                items_of(
+                    "ResourceQuotaList",
+                    json!([{"metadata": {"name": "compute"}, "status": {
+                        "hard": {"requests.memory": "4Gi"}, "used": {"requests.memory": used}}}]),
+                )
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn a_decrease_still_needs_quota_room_for_the_rollout_surge() {
+        // Request памяти 512Mi → 256Mi у 2 реплик с одним подом выкладки.
+        let shrink = set(json!([{"name": "app", "requests": {"memory": "256Mi"}}]));
+        // Квота занята полностью: старые поды держат её, пока под выкладки не готов, — нужно
+        // 1 × 256Mi, а не (256Mi − 512Mi) × 2 + 256Mi < 0.
+        let r = reader_with_quota_used("4Gi");
+        let f = read_facts(&r, &shrink).await.unwrap();
+        assert_eq!(
+            check(&shrink, &f).unwrap(),
+            [Warning::Quota {
+                quota: "compute".into(),
+                resource: "requests.memory".into(),
+                needed: 256.0 * MI,
+                free: 0.0
+            }]
+        );
+        // Свободно ровно под выкладку (256Mi) и с запасом: предупреждения нет.
+        for used in ["3840Mi", "3Gi"] {
+            let r = reader_with_quota_used(used);
+            let f = read_facts(&r, &shrink).await.unwrap();
+            assert!(check(&shrink, &f).unwrap().is_empty(), "{used}");
+        }
     }
 }
