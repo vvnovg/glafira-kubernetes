@@ -377,6 +377,41 @@ describe("ConnectionForm", () => {
     });
   });
 
+  it("шаг «Метрики»: выбранный источник и причины, по которым не подошли остальные", async () => {
+    vi.mocked(api.testConnection).mockResolvedValue({
+      ok: true,
+      steps: [
+        {
+          name: "metrics",
+          ok: true,
+          message: msg("messages.connectionTest.metricsHistory", "History", { source: "Prometheus monitoring/prometheus-operated:9090" }),
+          notes: [msg("messages.metrics.proxyForbidden", "forbidden", { source: "Prometheus monitoring/prometheus-k8s:9090" })],
+        },
+      ],
+    });
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionForm initial={{ ...newProfile(), name: "dev", apiUrl: "https://api.dev:6443" }} tabId="t" />);
+    await user.click(screen.getByRole("button", { name: "Проверить подключение" }));
+    expect(await screen.findByText("Метрики:")).toBeInTheDocument();
+    expect(screen.getByText("История потребления: Prometheus monitoring/prometheus-operated:9090")).toBeInTheDocument();
+    expect(
+      screen.getByText("Prometheus monitoring/prometheus-k8s:9090: нет прав на источник (через API-сервер — get services/proxy)"),
+    ).toBeInTheDocument();
+  });
+
+  it("шаг «Метрики» без источника — предупреждение, а не ошибка", async () => {
+    vi.mocked(api.testConnection).mockResolvedValue({
+      ok: true,
+      steps: [{ name: "metrics", ok: false, message: msg("errors.metrics.unavailable", "No metrics source is available") }],
+    });
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionForm initial={{ ...newProfile(), name: "dev", apiUrl: "https://api.dev:6443" }} tabId="t" />);
+    await user.click(screen.getByRole("button", { name: "Проверить подключение" }));
+    const step = (await screen.findByText("Метрики:")).closest("li");
+    expect(step).toHaveTextContent("⚠️");
+    expect(step).not.toHaveTextContent("❌");
+  });
+
   it("источник метрик: свой Prometheus с токеном — адрес в профиле, токен секретом; «Автоматически» — без них", async () => {
     vi.mocked(api.saveConnection).mockImplementation(async (p) => ({ ...p, id: "c1" }));
     const user = userEvent.setup();

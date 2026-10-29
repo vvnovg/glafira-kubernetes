@@ -605,8 +605,15 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
         <ul className="steps">
           {report.steps.map((s) => (
             <li key={s.name}>
-              {s.ok ? "✅" : "❌"} <strong>{t(`connections.form.step.${s.name}`)}:</strong> <span>{tr(s.message)}</span>
+              {s.ok ? "✅" : s.name === "metrics" ? "⚠️" : "❌"} <strong>{t(`connections.form.step.${s.name}`)}:</strong> <span>{tr(s.message)}</span>
               {s.error?.details && <pre className="muted">{s.error.details}</pre>}
+              {s.notes && s.notes.length > 0 && (
+                <ul className="muted">
+                  {s.notes.map((n, i) => (
+                    <li key={i}>{tr(n)}</li>
+                  ))}
+                </ul>
+              )}
             </li>
           ))}
         </ul>

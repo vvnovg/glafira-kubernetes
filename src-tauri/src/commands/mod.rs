@@ -8,6 +8,7 @@ pub mod kubeconfig;
 pub mod mcp;
 pub mod objects;
 pub mod projects;
+pub mod resources;
 pub mod sessions;
 pub mod settings;
 

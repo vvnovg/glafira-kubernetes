@@ -154,6 +154,7 @@ pub fn run() {
             commands::objects::list_pvcs,
             commands::objects::get_quotas,
             commands::objects::get_yaml,
+            commands::resources::get_metrics_source_status,
             commands::health::run_health_check,
             commands::health::get_health,
             commands::health::set_finding_ignored,

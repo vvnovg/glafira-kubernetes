@@ -12,6 +12,7 @@ export type ErrorCode =
   | "INVALID_INPUT"
   | "READ_ONLY"
   | "CONFIRMATION_REQUIRED"
+  | "METRICS_UNAVAILABLE"
   | "INTERNAL";
 
 /** Текст из Rust: ключ словаря, параметры и английский текст (запасной вариант). */
@@ -157,13 +158,15 @@ export interface TreeItemRef {
   id: string;
 }
 
-export type TestStepName = "config" | "tcp" | "exec" | "tls" | "auth" | "discovery" | "projects";
+export type TestStepName = "config" | "tcp" | "exec" | "tls" | "auth" | "discovery" | "projects" | "metrics";
 
 export interface TestStep {
   name: TestStepName;
   ok: boolean;
   message: LocalizedText;
   error?: AppError;
+  /** Пояснения под шагом: у «Метрик» — отвергнутые источники и причины. */
+  notes?: LocalizedText[];
 }
 
 export interface TestReport {
@@ -1006,4 +1009,35 @@ export interface HealthView {
   lastCheck: CheckRun | null;
   ignored: string[];
   annotations: Annotation[];
+}
+
+/** Источник метрик (спец. §7.1). */
+export type MetricsSourceKind = "thanos" | "prometheus" | "metricsServer";
+
+export interface MetricsSourceInfo {
+  kind: MetricsSourceKind;
+  /** `auto` — найден автопоиском, `profile` — свой из настроек подключения. */
+  origin: "auto" | "profile";
+  /** Маршрут или сервис кластера, у своего источника — адрес. */
+  location: string;
+  history: boolean;
+}
+
+export type MetricsRejectReason = "forbidden" | "notFound" | "unavailable" | "timeout" | "badResponse" | "tokenMissing";
+
+export interface MetricsRejected {
+  source: MetricsSourceInfo;
+  reason: MetricsRejectReason;
+  message: LocalizedText;
+  error: AppError;
+}
+
+/** Какой источник выбран и почему отвергнуты остальные. */
+export interface MetricsSourceStatus {
+  mode: MetricsMode;
+  selected: MetricsSourceInfo | null;
+  rejected: MetricsRejected[];
+  /** Группа metrics.k8s.io есть: без истории — текущие значения (только в режиме auto). */
+  podMetrics: boolean;
+  checkedAtMs: number;
 }

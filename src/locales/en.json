@@ -185,6 +185,12 @@
       "installFailed": "Failed to install the update",
       "sessionsActive": "LLM assistants connected over MCP: {{active}}. Updating will disconnect them.",
       "none": "No updates available"
+    },
+    "metrics": {
+      "badResponse": "The metrics source returned an unexpected response",
+      "httpStatus": "The metrics source {{url}} answered with code {{status}}",
+      "tokenMissing": "The metrics source token is not saved",
+      "unavailable": "No metrics source is available"
     }
   },
   "messages": {
@@ -201,12 +207,25 @@
       "discoveryGroups": "{{platform}} · API server {{version}} · found: {{groups}}",
       "projectsOk": "Available projects: {{count}}",
       "projectsManual": "The cluster does not list projects for you; projects from the profile: {{count}}",
-      "authOkGroups": "Signed in as {{user}}, groups: {{groups}}"
+      "authOkGroups": "Signed in as {{user}}, groups: {{groups}}",
+      "metricsHistory": "History of resource usage: {{source}}",
+      "metricsCurrent": "No history source: only current values from metrics.k8s.io"
     },
     "import": {
       "addressChanged": "“{{name}}”: the API address changes from {{from}} to {{to}}. The saved credentials (token, key or confirmed exec plugin) will be sent to the new address.",
       "proxyChanged": "“{{name}}”: the proxy settings change. The saved credentials (token, key or confirmed exec plugin) will go through the new proxy.",
       "tlsChanged": "“{{name}}”: the certificate verification settings (CA or TLS server name) change. The saved credentials (token, key or confirmed exec plugin) will be used with the new settings."
+    },
+    "metrics": {
+      "thanosForbidden": "{{source}}: no rights to cluster monitoring (the cluster-monitoring-view role or similar is needed)",
+      "podMetricsForbidden": "{{source}}: no rights to read pod metrics",
+      "proxyForbidden": "{{source}}: no rights to the source (through the API server — get services/proxy)",
+      "podMetricsMissing": "{{source}}: not installed in the cluster",
+      "notFound": "{{source}}: not found",
+      "unavailable": "{{source}}: does not respond",
+      "timeout": "{{source}}: did not respond in time",
+      "badResponse": "{{source}}: answered, but not as Prometheus",
+      "tokenMissing": "{{source}}: the token is not saved — enter it in the connection settings"
     }
   },
   "hints": {
@@ -322,7 +341,8 @@
         "tls": "TLS",
         "auth": "Sign-in",
         "discovery": "Platform",
-        "projects": "Projects"
+        "projects": "Projects",
+        "metrics": "Metrics"
       },
       "llmAccess": "LLM access (MCP)",
       "llmAccessOff": "Off",

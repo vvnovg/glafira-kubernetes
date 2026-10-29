@@ -183,6 +183,21 @@ fn bad_name(name: &str) -> AppError {
     )
 }
 
+/// Сервис Prometheus в кластере, к которому ходят через прокси API-сервера (спец. §7.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceProxy {
+    pub namespace: String,
+    pub name: String,
+    pub port: u16,
+}
+
+impl ServiceProxy {
+    /// `monitoring/prometheus-k8s:9090` — для интерфейса.
+    pub fn label(&self) -> String {
+        format!("{}/{}:{}", self.namespace, self.name, self.port)
+    }
+}
+
 /// Клиент только для чтения поверх `kube::Client` подключения.
 #[derive(Clone)]
 pub struct ReadClient {
@@ -355,6 +370,34 @@ impl ReadClient {
     pub async fn get_text(&self, path_and_query: &str) -> AppResult<String> {
         check_path(path_and_query)?;
         let request = http::Request::get(path_and_query)
+            .body(Vec::new())
+            .map_err(|e| crate::error::AppError::internal_with(e.to_string()))?;
+        self.call(self.client.request_text(request)).await
+    }
+
+    /// GET к Prometheus через прокси сервиса API-сервера
+    /// (`/api/v1/namespaces/<ns>/services/http:<сервис>:<порт>/proxy/api/v1/query…`, спец. §7.1).
+    /// Только два пути API Prometheus (`PromApi`): других запросов к сервисам кластера
+    /// `ReadClient` не делает. Нужно право `get services/proxy` в проекте сервиса.
+    pub async fn prometheus(
+        &self,
+        svc: &ServiceProxy,
+        api: crate::metrics::prometheus::PromApi,
+        params: &[(String, String)],
+    ) -> AppResult<String> {
+        check_namespace(&svc.namespace)?;
+        check_name(&svc.name)?;
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(params)
+            .finish();
+        let path = format!(
+            "/api/v1/namespaces/{}/services/http:{}:{}/proxy{}?{query}",
+            svc.namespace,
+            svc.name,
+            svc.port,
+            api.path()
+        );
+        let request = http::Request::get(path)
             .body(Vec::new())
             .map_err(|e| crate::error::AppError::internal_with(e.to_string()))?;
         self.call(self.client.request_text(request)).await

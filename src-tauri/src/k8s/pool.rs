@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use tokio::sync::oneshot;
 
 use crate::error::{AppError, AppResult};
@@ -25,6 +25,11 @@ pub struct Connected {
     pub timeout: Duration,
     /// Когда истекают учётные данные exec-плагина (`expirationTimestamp`).
     pub expires_at: Option<SystemTime>,
+    /// Токен подключения (вход по токену, через браузер или токен exec-плагина): его получают
+    /// Thanos Querier OpenShift и свой источник метрик с авторизацией «токен подключения».
+    bearer: Option<SecretString>,
+    /// Выбранный источник метрик (спец. §7.1): живёт, пока живёт клиент.
+    pub metrics: crate::metrics::select::MetricsCache,
 }
 
 impl Connected {
@@ -39,7 +44,20 @@ impl Connected {
             info,
             timeout,
             expires_at,
+            bearer: None,
+            metrics: Default::default(),
         }
+    }
+
+    /// С токеном подключения для источника метрик.
+    pub fn with_bearer(mut self, token: Option<SecretString>) -> Self {
+        self.bearer = token;
+        self
+    }
+
+    /// Токен подключения для источника метрик (`metrics::select`).
+    pub fn bearer(&self) -> Option<&SecretString> {
+        self.bearer.as_ref()
     }
 
     /// Клиент `kube` подключения — только для интеграционных тестов (запросы мимо `ReadClient`:
@@ -199,6 +217,8 @@ pub async fn open(
         expires_at = cred.expires_at;
         apply_exec_credential(&mut config, &cred);
     }
+    // Токен для источника метрик — после учётных данных exec-плагина: у плагина он свой.
+    let bearer = config.auth_info.token.clone();
     let client = kube::Client::try_from(config).map_err(|e| from_kube(&e))?;
     let mut info = probe(&client, timeout).await?;
     if let Some(token) = &token {
@@ -209,7 +229,7 @@ pub async fn open(
             )
             .await;
     }
-    Ok(Connected::new(client, info, timeout, expires_at))
+    Ok(Connected::new(client, info, timeout, expires_at).with_bearer(bearer))
 }
 
 /// Подключение для тестов: клиент — мок API-сервера с ответами `handler`, платформа — Kubernetes
@@ -232,6 +252,8 @@ pub(crate) fn test_connected(
         },
         timeout: Duration::from_secs(1),
         expires_at: None,
+        bearer: None,
+        metrics: Default::default(),
     })
 }
 
@@ -327,12 +349,12 @@ mod tests {
     async fn exec_credentials_expire_a_minute_early() {
         let (client, _) = crate::k8s::testing::mock_client(|_| (200, serde_json::json!({})));
         let now = SystemTime::now();
-        let mut c = Connected {
+        let mut c = Connected::new(
             client,
-            info: connected().info.clone(),
-            timeout: Duration::from_secs(1),
-            expires_at: None,
-        };
+            connected().info.clone(),
+            Duration::from_secs(1),
+            None,
+        );
         assert!(!c.expiring(now), "токен без срока");
         c.expires_at = Some(now + Duration::from_secs(30));
         assert!(c.expiring(now));

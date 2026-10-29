@@ -31,7 +31,7 @@ async fn admin_certificate_passes_every_step() {
     let r = test(&profile, secrets.clone()).await;
     assert!(r.ok, "{:#?}", r.steps);
     assert_eq!(
-        steps(&r),
+        steps(&r)[..6],
         [
             ("config", true),
             ("tcp", true),
@@ -41,6 +41,9 @@ async fn admin_certificate_passes_every_step() {
             ("projects", true)
         ]
     );
+    // «Метрики» — предупреждение: источника на стенде может не быть, итог проверки успешен и без
+    // него.
+    assert_eq!(r.steps[6].name, "metrics");
     assert_eq!(
         r.steps[3].message.key, "messages.connectionTest.authOkGroups",
         "у администратора kind есть группы"

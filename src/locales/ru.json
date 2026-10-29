@@ -185,6 +185,12 @@
       "installFailed": "Не удалось установить обновление",
       "sessionsActive": "Подключено LLM-ассистентов по MCP: {{active}}. Обновление их отключит.",
       "none": "Обновлений нет"
+    },
+    "metrics": {
+      "badResponse": "Источник метрик вернул неожиданный ответ",
+      "httpStatus": "Источник метрик {{url}} ответил кодом {{status}}",
+      "tokenMissing": "Токен источника метрик не сохранён",
+      "unavailable": "Ни один источник метрик не доступен"
     }
   },
   "messages": {
@@ -201,12 +207,25 @@
       "discoveryGroups": "{{platform}} · API-сервер {{version}} · найдены: {{groups}}",
       "projectsOk": "Доступных проектов: {{count}}",
       "projectsManual": "Кластер не отдаёт вам список проектов; проектов в профиле: {{count}}",
-      "authOkGroups": "Вход выполнен: {{user}}, группы: {{groups}}"
+      "authOkGroups": "Вход выполнен: {{user}}, группы: {{groups}}",
+      "metricsHistory": "История потребления: {{source}}",
+      "metricsCurrent": "Источника истории нет: только текущие значения из metrics.k8s.io"
     },
     "import": {
       "addressChanged": "«{{name}}»: адрес API меняется с {{from}} на {{to}}. Сохранённые учётные данные (токен, ключ или подтверждённый exec-плагин) будут отправлены на новый адрес.",
       "proxyChanged": "«{{name}}»: меняются настройки прокси. Сохранённые учётные данные (токен, ключ или подтверждённый exec-плагин) пойдут через новый прокси.",
       "tlsChanged": "«{{name}}»: меняются настройки проверки сертификата (CA или имя сервера TLS). Сохранённые учётные данные (токен, ключ или подтверждённый exec-плагин) будут использоваться с новыми настройками."
+    },
+    "metrics": {
+      "thanosForbidden": "{{source}}: нет прав на мониторинг кластера (нужна роль cluster-monitoring-view или аналог)",
+      "podMetricsForbidden": "{{source}}: нет прав на метрики подов",
+      "proxyForbidden": "{{source}}: нет прав на источник (через API-сервер — get services/proxy)",
+      "podMetricsMissing": "{{source}}: не установлен в кластере",
+      "notFound": "{{source}}: не найден",
+      "unavailable": "{{source}}: не отвечает",
+      "timeout": "{{source}}: не ответил вовремя",
+      "badResponse": "{{source}}: ответил, но не как Prometheus",
+      "tokenMissing": "{{source}}: токен не сохранён — введите его в настройках подключения"
     }
   },
   "hints": {
@@ -322,7 +341,8 @@
         "tls": "TLS",
         "auth": "Вход",
         "discovery": "Платформа",
-        "projects": "Проекты"
+        "projects": "Проекты",
+        "metrics": "Метрики"
       },
       "llmAccess": "Доступ LLM (MCP)",
       "llmAccessOff": "Выключен",

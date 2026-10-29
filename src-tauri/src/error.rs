@@ -19,6 +19,8 @@ pub enum ErrorCode {
     InvalidInput,
     ReadOnly,
     ConfirmationRequired,
+    /// Ни один источник метрик не подошёл (спец. §7.1).
+    MetricsUnavailable,
     Internal,
 }
 

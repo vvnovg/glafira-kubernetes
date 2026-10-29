@@ -22,6 +22,7 @@ import type {
   McpAuditEntry,
   McpClientConfigs,
   McpStatus,
+  MetricsSourceStatus,
   NamespaceAccess,
   NetworkView,
   NodeDetails,
@@ -139,6 +140,10 @@ export const api = {
   getQuotas: (connectionId: string, namespace: string) => call<QuotasView>("get_quotas", { connectionId, namespace }),
   getYaml: (connectionId: string, namespace: string, kind: YamlKind, name: string) =>
     call<string>("get_yaml", { connectionId, namespace, kind, name }),
+
+  /** Источник метрик подключения: выбранный и отвергнутые; `refresh` — выбрать заново. */
+  getMetricsSourceStatus: (connectionId: string, refresh = false) =>
+    call<MetricsSourceStatus>("get_metrics_source_status", { connectionId, refresh }),
 
   /** Watch списка проекта; события приходят в `onEvent`. Возвращает id сессии для `stopSession`. */
   startWatch: (params: WatchParams, onEvent: (e: WatchEvent) => void) => {
