@@ -10,6 +10,7 @@ pub mod k8s;
 pub mod logging;
 pub mod logs;
 pub mod mcp;
+pub mod metrics;
 pub mod platform;
 pub mod policy;
 pub mod product;
