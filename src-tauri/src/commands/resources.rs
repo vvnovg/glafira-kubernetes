@@ -6,6 +6,7 @@ use tauri::State;
 use crate::error::AppResult;
 use crate::k8s::workloads::WorkloadKind;
 use crate::metrics::select::SourceStatus;
+use crate::resources::Analysis;
 use crate::resources::usage::{PodUsage, WorkloadUsage};
 use crate::state::AppState;
 
@@ -75,6 +76,37 @@ pub async fn get_pod_usage(
         .read_in(&connection_id, &namespace, |c| async move {
             let sel = crate::metrics::select::for_connection(&st, &id, &c, false).await?;
             crate::resources::usage::pod_usage(&c.reader(), &sel, &ns, &pod, now_s()).await
+        })
+        .await
+}
+
+/// Статистика workload'а и рекомендация requests и limits (вкладка «Ресурсы» workload'а).
+#[tauri::command]
+pub async fn recommend_resources(
+    state: State<'_, AppState>,
+    connection_id: String,
+    namespace: String,
+    kind: WorkloadKind,
+    name: String,
+    window_days: u32,
+) -> AppResult<Analysis> {
+    let st = state.inner().clone();
+    let (id, ns) = (connection_id.clone(), namespace.clone());
+    state
+        .read_in(&connection_id, &namespace, |c| async move {
+            let sel = crate::metrics::select::for_connection(&st, &id, &c, false).await?;
+            let nodes = c.info.capabilities.list_nodes;
+            crate::resources::analyze(
+                &c.reader(),
+                &sel,
+                &ns,
+                kind,
+                &name,
+                window_days,
+                now_s(),
+                nodes,
+            )
+            .await
         })
         .await
 }
