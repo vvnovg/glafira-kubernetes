@@ -444,7 +444,8 @@ pub fn recommend(u: &WorkloadUsage, c: &Constraints) -> Recommendation {
         },
     };
     let mut violations = Vec::new();
-    // Квота: прирост за все реплики плюс поды выкладки с новыми значениями.
+    // Квота: прирост за все реплики плюс поды выкладки с новыми значениями. Уменьшение
+    // квоту не освобождает, пока старые поды живы: поды выкладки занимают её сверх занятого.
     for q in &c.quotas {
         let pick: &dyn Fn(&Values) -> Option<f64> = match q.resource.as_str() {
             "requests.cpu" | "cpu" => &|v| v.requests.cpu,
@@ -458,7 +459,7 @@ pub fn recommend(u: &WorkloadUsage, c: &Constraints) -> Recommendation {
             .iter()
             .map(|x| pick(&x.current).unwrap_or(0.0))
             .sum();
-        let needed = (new - old) * replicas + new * surge;
+        let needed = (new - old).max(0.0) * replicas + new * surge;
         let free = q.hard - q.used;
         if needed > free + 1e-9 {
             violations.push(Violation::Quota {
@@ -507,7 +508,8 @@ pub fn recommend(u: &WorkloadUsage, c: &Constraints) -> Recommendation {
                 hpa: h.hpa.clone(),
                 resource: h.resource.clone(),
                 target: h.target,
-                equivalent: (f64::from(h.target) * old / new).round() as i32,
+                // Target utilization у HPA не меньше 1 %.
+                equivalent: ((f64::from(h.target) * old / new).round() as i32).max(1),
             })
         })
         .collect();
@@ -755,6 +757,78 @@ mod tests {
     }
 
     #[test]
+    fn ratio_raises_the_memory_request() {
+        let r = recommend(
+            &usage(vec![app(
+                amounts(None, Some(64.0 * MI)),
+                amounts(None, Some(1024.0 * MI)),
+                stats(0.1, 0.1, 100.0 * MI, 400.0 * MI),
+            )]),
+            &Constraints {
+                limit_range: Some(LimitRangeBounds {
+                    max_ratio: amounts(None, Some(2.0)),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .containers
+        .remove(0);
+        let v = r.recommended.unwrap();
+        // limit 400Mi × 1,3 = 520Mi → 528Mi; request 115Mi → 128Mi; 528 / 128 > 2.
+        assert_eq!(v.limits.memory, Some(528.0 * MI));
+        // Request поднимается до limit / 2 = 264Mi → 272Mi.
+        assert_eq!(v.requests.memory, Some(272.0 * MI));
+        assert!(r.notes.contains(&Note::LimitRange {
+            field: Field::MemoryRequest,
+            bound: Bound::Ratio
+        }));
+    }
+
+    #[test]
+    fn limit_range_that_requires_a_cpu_limit_gets_one() {
+        let new_usage = || {
+            usage(vec![app(
+                amounts(Some(0.5), Some(256.0 * MI)),
+                Amounts::default(),
+                stats(0.2, 0.3, 100.0 * MI, 120.0 * MI),
+            )])
+        };
+        // Без LimitRange limit не ставится — это совет, а не требование.
+        let free = rec(&new_usage());
+        assert_eq!(free.recommended.unwrap().limits.cpu, None);
+        assert_eq!(free.notes, [Note::CpuLimitNotSet]);
+        // Максимум, limit по умолчанию или предел отношения требуют limit.
+        for lr in [
+            LimitRangeBounds {
+                default_limit: amounts(Some(1.0), None),
+                ..Default::default()
+            },
+            LimitRangeBounds {
+                max_ratio: amounts(Some(4.0), None),
+                ..Default::default()
+            },
+            LimitRangeBounds {
+                max: amounts(Some(2.0), None),
+                ..Default::default()
+            },
+        ] {
+            let r = recommend(
+                &new_usage(),
+                &Constraints {
+                    limit_range: Some(lr.clone()),
+                    ..Default::default()
+                },
+            )
+            .containers
+            .remove(0);
+            // 0,3 × 1,3 = 0,39.
+            assert_eq!(r.recommended.unwrap().limits.cpu, Some(0.39), "{lr:?}");
+            assert!(!r.notes.contains(&Note::CpuLimitNotSet), "{lr:?}");
+        }
+    }
+
+    #[test]
     fn quota_nodes_and_hpa_are_checked_beside_the_recommendation() {
         let u = usage(vec![app(
             amounts(Some(0.1), Some(128.0 * MI)),
@@ -809,6 +883,74 @@ mod tests {
                 equivalent: 8
             }]
         );
+    }
+
+    /// Request CPU падает с 1,0 до 0,12 (0,1 × 1,15 = 0,115 → 0,12); реплик 3, выкладка +1.
+    fn shrinking_usage() -> WorkloadUsage {
+        usage(vec![app(
+            amounts(Some(1.0), Some(256.0 * MI)),
+            amounts(None, Some(512.0 * MI)),
+            stats(0.1, 0.1, 100.0 * MI, 120.0 * MI),
+        )])
+    }
+
+    fn cpu_quota(hard: f64, used: f64) -> Constraints {
+        Constraints {
+            quotas: vec![QuotaRoom {
+                quota: "compute".into(),
+                resource: "requests.cpu".into(),
+                hard,
+                used,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_full_quota_still_fails_the_rollout_surge_when_requests_go_down() {
+        let r = recommend(&shrinking_usage(), &cpu_quota(6.0, 6.0));
+        assert_eq!(
+            r.containers[0].recommended.as_ref().unwrap().requests.cpu,
+            Some(0.12)
+        );
+        // Старые поды держат квоту, пока новый под выкладки не готов: нужно 1 × 0,12.
+        let [Violation::Quota { needed, free, .. }] = r.violations.as_slice() else {
+            panic!("{:?}", r.violations)
+        };
+        assert!((needed - 0.12).abs() < 1e-9 && free.abs() < 1e-9);
+    }
+
+    #[test]
+    fn decreased_requests_with_room_for_the_surge_do_not_violate_the_quota() {
+        let r = recommend(&shrinking_usage(), &cpu_quota(6.0, 5.0));
+        assert!(r.violations.is_empty(), "{:?}", r.violations);
+        // Ровно под выкладку: свободно 0,12 при нужных 0,12.
+        let r = recommend(&shrinking_usage(), &cpu_quota(6.12, 6.0));
+        assert!(r.violations.is_empty(), "{:?}", r.violations);
+    }
+
+    #[test]
+    fn hpa_equivalent_target_is_at_least_one_percent() {
+        let u = usage(vec![app(
+            amounts(Some(0.1), Some(128.0 * MI)),
+            amounts(None, Some(256.0 * MI)),
+            stats(0.9, 1.0, 200.0 * MI, 250.0 * MI),
+        )]);
+        let r = recommend(
+            &u,
+            &Constraints {
+                hpa: vec![HpaTarget {
+                    hpa: "web".into(),
+                    resource: "cpu".into(),
+                    target: 5,
+                }],
+                ..Default::default()
+            },
+        );
+        // Request растёт с 0,1 до 1,04: 5 × 0,1 / 1,04 ≈ 0,48 → 0 без нижней границы.
+        assert_eq!(r.hpa.len(), 1);
+        assert_eq!(r.hpa[0].target, 5);
+        assert_eq!(r.hpa[0].equivalent, 1);
     }
 
     #[test]
