@@ -20,6 +20,9 @@ Prometheus на стенде поддельный: прокси API-сервер
 `monitoring/prometheus-k8s` стоит под-заглушка с hostNetwork на ноде control-plane, а `setup.sh` перенаправляет порт
 19090 её адреса (DNAT в ноде) на рабочую машину — там записанными ответами Prometheus HTTP API отвечает сам тест
 (`tests/common/prometheus.rs`). Порт 19090 рабочей машины на время `it_metrics` и `it_mcp` должен быть свободен.
+Перенаправление лежит в самой ноде и пропадает при перезапуске контейнера ноды (перезапуск Docker, `docker restart`):
+после него снова запустите `dev/kind/setup.sh`. Повторный запуск оставляет ровно одно правило, и при новом адресе
+заглушки или рабочей машины прежнее правило заменяется.
 
 ```bash
 brew install kind            # или https://kind.sigs.k8s.io/docs/user/quick-start/

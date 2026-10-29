@@ -20,9 +20,38 @@ use kube::api::{Api, Patch, PatchParams, PostParams};
 use serde_json::json;
 
 const NS: &str = "team-a";
+const RESTARTED_AT: &str = "kubectl.kubernetes.io/restartedAt";
 
 fn change(v: serde_json::Value) -> Change {
     serde_json::from_value(v).unwrap()
+}
+
+/// Владеет ли менеджер `glafira-kubernetes` ресурсами контейнера `app` в шаблоне пода: в его записи
+/// `managedFields` (не подресурса) под `k:{"name":"app"}` есть `f:resources`.
+fn glafira_owns_app_resources(d: &Deployment) -> bool {
+    d.metadata.managed_fields.iter().flatten().any(|m| {
+        m.manager.as_deref() == Some("glafira-kubernetes")
+            && m.subresource.is_none()
+            && m.fields_v1.as_ref().is_some_and(|f| {
+                f.0.pointer(
+                    "/f:spec/f:template/f:spec/f:containers/k:{\"name\":\"app\"}/f:resources",
+                )
+                .is_some()
+            })
+    })
+}
+
+/// Аннотация шаблона пода `restartedAt`, которой `rolloutRestart` помечает выкладку.
+fn restarted_at(d: &Deployment) -> Option<String> {
+    d.spec
+        .as_ref()?
+        .template
+        .metadata
+        .as_ref()?
+        .annotations
+        .as_ref()?
+        .get(RESTARTED_AT)
+        .cloned()
 }
 
 #[tokio::test]
@@ -40,13 +69,32 @@ async fn every_change_kind_previews_applies_and_conflicts() {
     let hpas: Api<HorizontalPodAutoscaler> = Api::namespaced(c.kube_client().clone(), NS);
     let workload = json!({"kind": "Deployment", "name": "tuned"});
 
-    // Исходное состояние `ops.yaml`: тест можно повторять.
-    let reset = json!({"spec": {"replicas": 1, "template": {"spec": {"containers": [{"name": "app",
-        "resources": {"requests": {"cpu": "10m", "memory": "16Mi"}, "limits": {"memory": "64Mi"}}}]}}}});
+    // Исходное состояние `ops.yaml`: тест можно повторять. Возврат делает другой менеджер полей, чем
+    // `glafira-kubernetes`: владение ресурсами контейнера переходит к нему, и проверка ниже, что оно вернулось
+    // к `glafira-kubernetes` после применения, не проходит от записей прошлых прогонов. Аннотация перезапуска
+    // снимается: `null` в strategic merge patch удаляет ключ.
+    let reset = json!({"spec": {"replicas": 1, "template": {
+        "metadata": {"annotations": {RESTARTED_AT: null}},
+        "spec": {"containers": [{"name": "app",
+            "resources": {"requests": {"cpu": "10m", "memory": "16Mi"}, "limits": {"memory": "64Mi"}}}]}}}});
     deployments
-        .patch("tuned", &PatchParams::default(), &Patch::Strategic(reset))
+        .patch(
+            "tuned",
+            &PatchParams {
+                field_manager: Some("it-ops-reset".into()),
+                ..PatchParams::default()
+            },
+            &Patch::Strategic(reset),
+        )
         .await
         .unwrap();
+    let start = deployments.get("tuned").await.unwrap();
+    assert!(
+        !glafira_owns_app_resources(&start),
+        "после возврата ресурсами контейнера владеет не glafira-kubernetes: {:?}",
+        start.metadata.managed_fields
+    );
+    assert_eq!(restarted_at(&start), None, "после возврата перезапуска нет");
     let reset = json!({"spec": {"minReplicas": 1, "maxReplicas": 2}});
     hpas.patch("tuned-hpa", &PatchParams::default(), &Patch::Merge(reset))
         .await
@@ -68,19 +116,17 @@ async fn every_change_kind_previews_applies_and_conflicts() {
         .await
         .unwrap();
     let d = deployments.get("tuned").await.unwrap();
+    assert!(
+        glafira_owns_app_resources(&d),
+        "fieldManager: ресурсами контейнера владеет glafira-kubernetes: {:?}",
+        d.metadata.managed_fields
+    );
     let r = d.spec.unwrap().template.spec.unwrap().containers[0]
         .resources
         .clone()
         .unwrap();
     assert_eq!(r.requests.unwrap()["cpu"].0, "20m");
     assert_eq!(r.limits.unwrap()["memory"].0, "96Mi");
-    let managed = d.metadata.managed_fields.unwrap_or_default();
-    assert!(
-        managed
-            .iter()
-            .any(|m| m.manager.as_deref() == Some("glafira-kubernetes")),
-        "fieldManager"
-    );
     let e = apply_change_impl(&st, &id, resources, rv, None, None, None)
         .await
         .unwrap_err();
@@ -105,6 +151,8 @@ async fn every_change_kind_previews_applies_and_conflicts() {
         Some(2)
     );
     let restart = change(json!({"kind": "rolloutRestart", "namespace": NS, "workload": workload}));
+    let before = restarted_at(&deployments.get("tuned").await.unwrap());
+    assert_eq!(before, None, "перед перезапуском аннотации нет");
     let p = preview_change_impl(&st, &id, restart.clone())
         .await
         .unwrap();
@@ -112,18 +160,9 @@ async fn every_change_kind_previews_applies_and_conflicts() {
     apply_change_impl(&st, &id, restart, p.version, None, None, None)
         .await
         .unwrap();
-    let annotations = deployments
-        .get("tuned")
-        .await
-        .unwrap()
-        .spec
-        .unwrap()
-        .template
-        .metadata
-        .unwrap()
-        .annotations
-        .unwrap();
-    assert!(annotations.contains_key("kubectl.kubernetes.io/restartedAt"));
+    let after = restarted_at(&deployments.get("tuned").await.unwrap());
+    assert!(after.is_some(), "после перезапуска аннотация есть");
+    assert_ne!(after, before, "перезапуск меняет аннотацию шаблона");
     let back =
         change(json!({"kind": "scale", "namespace": NS, "workload": workload, "replicas": 1}));
     let p = preview_change_impl(&st, &id, back.clone()).await.unwrap();

@@ -54,7 +54,11 @@ echo "$host" > "$out/host-address"
 stub="$(k -n monitoring get pod prometheus-stub -o jsonpath='{.status.podIP}')"
 rule=(OUTPUT -d "$stub/32" -p tcp --dport 19090 -m comment --comment glafira-prometheus-stub -j DNAT
   --to-destination "$host:19090")
-docker exec "$node" iptables -t nat -C "${rule[@]}" 2>/dev/null || docker exec "$node" iptables -t nat -I "${rule[@]}"
+# Правило одно, даже если адрес заглушки или рабочей машины изменился: прежние — по комментарию — удаляются, затем
+# вставляется текущее. Всё в контейнере ноды, на рабочей машине ничего не меняется.
+docker exec "$node" iptables -t nat -S OUTPUT | { grep -F -e glafira-prometheus-stub || true; } |
+  while read -r -a old; do docker exec "$node" iptables -t nat -D OUTPUT "${old[@]:2}"; done
+docker exec "$node" iptables -t nat -I "${rule[@]}"
 k apply -f "$here/health.yaml"
 # Контроллера Gateway API на kind нет: статус маршрута пишет стенд — шлюз маршрут принял, а бэкенда нет.
 k -n team-a patch httproute api --subresource=status --type=merge -p '{"status":{"parents":[{

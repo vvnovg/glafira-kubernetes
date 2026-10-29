@@ -3,6 +3,7 @@
 //! записанными ответами Prometheus HTTP API по тексту запроса.
 
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -21,7 +22,7 @@ pub const THROTTLING: f64 = 0.4;
 fn answer(path: &str, p: &HashMap<String, String>, pods: &[String]) -> Value {
     let q = p.get("query").map_or("", String::as_str);
     let num = |k: &str| p.get(k).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-    if path.ends_with("/query_range") {
+    if path == "/api/v1/query_range" {
         let (start, end) = (num("start"), num("end"));
         let series = |v: f64| {
             json!([{"metric": {"container": "app"},
@@ -87,14 +88,59 @@ fn answer(path: &str, p: &HashMap<String, String>, pods: &[String]) -> Value {
     json!({"status": "success", "data": {"resultType": "vector", "result": result}})
 }
 
+/// Отказ в форме ошибки Prometheus HTTP API: код, строка статуса и тело.
+fn failure(code: u16, error: &str) -> (u16, &'static str, Value) {
+    let text = if code == 404 {
+        "Not Found"
+    } else {
+        "Method Not Allowed"
+    };
+    (
+        code,
+        text,
+        json!({"status": "error", "errorType": "bad_data", "error": error}),
+    )
+}
+
+/// Что стенд отвечает на запрос: только GET `/api/v1/query` и `/api/v1/query_range` — как делает
+/// источник метрик Glafira (`metrics/http.rs`); остальное — 405 для не-GET и 404 для других путей.
+/// Прокси API-сервера отдаёт заглушке путь после `/proxy` как есть, без своего префикса.
+fn respond(method: &str, path: &str, query: &str, pods: &[String]) -> (u16, &'static str, Value) {
+    if method != "GET" {
+        return failure(405, &format!("{method} не разрешён: только GET"));
+    }
+    if !matches!(path, "/api/v1/query" | "/api/v1/query_range") {
+        return failure(404, &format!("нет пути {path}"));
+    }
+    let params: HashMap<String, String> = url::form_urlencoded::parse(query.as_bytes())
+        .into_owned()
+        .collect();
+    (200, "OK", answer(path, &params, pods))
+}
+
 /// Поддельный Prometheus рядом с kubeconfig стенда: по запросу на соединение. На Linux адрес из
 /// `host-address` — шлюз сети kind, то есть адрес этой машины; Docker Desktop доставляет
-/// host.docker.internal на её loopback.
+/// host.docker.internal на её loopback, а самого адреса у машины нет: тогда сервер слушает loopback.
+/// Любая другая ошибка привязки (в первую очередь «адрес занят») — остановка теста с портом в тексте.
 pub async fn serve(kubeconfig: &Path, pods: Arc<Mutex<Vec<String>>>) {
-    let host = std::fs::read_to_string(kubeconfig.with_file_name("host-address")).unwrap();
-    let listener = match TcpListener::bind((host.trim(), PORT)).await {
+    let file = kubeconfig.with_file_name("host-address");
+    let host = std::fs::read_to_string(&file).unwrap_or_else(|e| {
+        panic!(
+            "нет {}: {e}; запустите dev/kind/setup.sh (он пишет адрес рабочей машины)",
+            file.display()
+        )
+    });
+    let host = host.trim();
+    let listener = match TcpListener::bind((host, PORT)).await {
         Ok(l) => l,
-        Err(_) => TcpListener::bind(("127.0.0.1", PORT)).await.unwrap(),
+        Err(e) if e.kind() == ErrorKind::AddrNotAvailable => TcpListener::bind(("127.0.0.1", PORT))
+            .await
+            .unwrap_or_else(|e| {
+                panic!("порт {PORT} на 127.0.0.1 для поддельного Prometheus недоступен: {e}")
+            }),
+        Err(e) => panic!(
+            "порт {PORT} на {host} для поддельного Prometheus недоступен: {e}; освободите его (lsof -nP -iTCP:{PORT})"
+        ),
     };
     tokio::spawn(async move {
         loop {
@@ -110,14 +156,15 @@ pub async fn serve(kubeconfig: &Path, pods: Arc<Mutex<Vec<String>>>) {
                     }
                 }
                 let head = String::from_utf8_lossy(&buf);
-                let target = head.split_whitespace().nth(1).unwrap_or("/");
+                let mut words = head.split_whitespace();
+                let method = words.next().unwrap_or("");
+                let target = words.next().unwrap_or("/");
                 let (path, query) = target.split_once('?').unwrap_or((target, ""));
-                let params: HashMap<String, String> = url::form_urlencoded::parse(query.as_bytes())
-                    .into_owned()
-                    .collect();
-                let body = answer(path, &params, &pods.lock().unwrap()).to_string();
+                let (code, text, body) = respond(method, path, query, &pods.lock().unwrap());
+                let body = body.to_string();
+                let allow = if code == 405 { "Allow: GET\r\n" } else { "" };
                 let reply = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {code} {text}\r\nContent-Type: application/json\r\n{allow}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 let _ = s.write_all(reply.as_bytes()).await;
