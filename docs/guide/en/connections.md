@@ -95,17 +95,19 @@ in kubeconfig). The mode without certificate verification is insecure; your orga
 
 ## Metrics {#metrics}
 
-[[ui:connections.form.metrics]] — where Glafira takes the usage history for the Resources tabs and the check rules
-from (see [Resources and changes](resources-changes.md#source)). [[ui:connections.form.metricsMode.auto]] looks for
-Thanos Querier on OpenShift and for Prometheus through the API server proxy on other clusters, and without them takes
-the current values from `metrics.k8s.io`. [[ui:connections.form.metricsMode.thanos]] and
-[[ui:connections.form.metricsMode.prometheus]] are your own address (for example, a tenancy endpoint your
-administrators opened): [[ui:connections.form.metricsUrl]], [[ui:connections.form.metricsAuth]] (the connection token,
-your own token or no authorization) and [[ui:connections.form.metricsCa]]. Your own source is not replaced by another:
-if it does not respond, the Resources tabs say why. An `http://` address is allowed only without authorization. Your
-own token is kept in the system keychain. The metrics setting stays on this computer: export does not write it. The
-connection test shows the [[ui:connections.form.step.metrics]] step: which source is chosen and why the others did not
-fit; without a source the step is a warning, not an error.
+[[ui:connections.form.metrics]] — where Glafira takes the usage history for the Resources tabs and the check rules from
+(see [Resources and changes](resources-changes.md#source)). [[ui:connections.form.metricsMode.auto]] looks for Thanos
+Querier on OpenShift and for Prometheus through the API server proxy on other clusters, and without them takes the
+current values from `metrics.k8s.io`. [[ui:connections.form.metricsMode.thanos]] and
+[[ui:connections.form.metricsMode.prometheus]] are your own address (for example, a tenancy endpoint your administrators
+opened): [[ui:connections.form.metricsUrl]], [[ui:connections.form.metricsAuth]] (the connection token, your own token
+or no authorization) and [[ui:connections.form.metricsCa]]. A tenancy endpoint answers only within a project, so your
+own Thanos is checked in one of your projects: the first favorite, otherwise the first one listed manually, otherwise
+the first project of the cluster. Glafira does not follow redirects of the metrics source. Your own source is not
+replaced by another: if it does not respond, the Resources tabs say why. An `http://` address is allowed only without
+authorization. Your own token is kept in the system keychain. The metrics setting stays on this computer: export does
+not write it. The connection test shows the [[ui:connections.form.step.metrics]] step: which source is chosen and why
+the others did not fit; without a source the step is a warning, not an error.
 
 ## Rights {#rights}
 

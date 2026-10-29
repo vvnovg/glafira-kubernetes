@@ -12,13 +12,13 @@ and [[ui:connections.form.manualNamespaces]].
 
 ## Project tab {#project}
 
-A project opens in its own tab: [[ui:objects.tabs.overview]], [[ui:project.tabs.workloads]],
-[[ui:objects.tabs.pods]], [[ui:project.tabs.network]], [[ui:project.tabs.config]], [[ui:project.tabs.storage]],
-[[ui:objects.tabs.events]], [[ui:objects.tabs.resources]] and [[ui:project.tabs.quotas]]. Glafira asks the cluster what you may read in the project
+A project opens in its own tab: [[ui:objects.tabs.overview]], [[ui:project.tabs.workloads]], [[ui:objects.tabs.pods]],
+[[ui:project.tabs.network]], [[ui:project.tabs.config]], [[ui:project.tabs.storage]], [[ui:objects.tabs.events]],
+[[ui:objects.tabs.resources]] and [[ui:project.tabs.quotas]]. Glafira asks the cluster what you may read in the project
 and hides the subtabs you have no rights for. The answer is kept for 5 minutes; the tab asks again every 5 minutes and
-when you press [[ui:common.refresh]] on the overview, so a subtab hidden by rights that changed comes back. The
-overview shows the pods by phase and the problem pods, the workloads that are not fine (and the kinds of workloads you
-may not read, with the reason), the quotas used by 90 % or more and the `Warning` events of the last hour.
+when you press [[ui:common.refresh]] on the overview, so a subtab hidden by rights that changed comes back. The overview
+shows the pods by phase and the problem pods, the workloads that are not fine (and the kinds of workloads you may not
+read, with the reason), the quotas used by 90 % or more and the `Warning` events of the last hour.
 
 ## Lists that update themselves {#watch}
 

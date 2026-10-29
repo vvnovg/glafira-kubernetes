@@ -84,8 +84,9 @@ impl KubeWriter {
     }
 }
 
-/// Отказ admission (webhook, квота, `LimitRange`) — `ADMISSION_DENIED`, а не «нет прав»: 403 с
-/// текстом, который не разобрался как отказ RBAC (`k8s::errors::forbidden`).
+/// Отказ admission-webhook — `ADMISSION_DENIED`, а не «нет прав»: 403 с текстом, который не
+/// разобрался как отказ RBAC (`k8s::errors::forbidden`). `LimitRange` и квоту шаблона workload'а
+/// API-сервер не проверяет: их проверяет `change::facts::check` до запроса.
 fn admission(e: AppError) -> AppError {
     if e.key != "errors.k8s.forbidden" {
         return e;

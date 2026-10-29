@@ -31,9 +31,10 @@ it. The result is kept until the next check.
   not programmed.
 - Quotas, storage and scaling: a quota used at 90% or more, a PVC lost or waiting for a volume for more than 5
   minutes, an HPA at its maximum or unable to scale.
-- Resources over the last day from the metrics history (see [Resources and changes](resources-changes.md#source)):
-  CPU throttling above 25 %, memory near the limit (90 % or more), requests far above the usage. Without a history
-  source these rules do not run and the check is marked partial.
+- Resources over the last day from the metrics history (see [Resources and changes](resources-changes.md#source)): CPU
+  throttling above 25 %, memory near the limit (90 % or more), requests far above the usage. The pods of the Jobs of a
+  CronJob count for the CronJob. Without a history source, or when the source cannot be chosen or answers "not found",
+  these rules do not run and the check is marked partial.
 
 ## Severity and environment {#severity}
 
@@ -74,16 +75,18 @@ formatting or links.
 ## LLM proposals {#proposals}
 
 The assistant can propose a change: container resources, replicas, restart or HPA bounds (not pod deletion). Glafira
-checks a proposal by reading the cluster — the object and the containers exist, the values parse, `limits` are not
-below `requests`; the assistant gets `LimitRange` and quota violations as warnings. Proposals are shown in
-[[ui:health.proposals.title]] and on the object screens.
+checks a proposal by reading the cluster — the object and the containers exist, the values parse, `limits` are not below
+`requests`, the values are within the `LimitRange` bounds; otherwise the proposal is refused. Scaling a workload that an
+HPA scales is refused too, with advice to propose HPA bounds. The quota room, scaling to 0 and an HPA, `LimitRange` or
+quota list that could not be read come back to the assistant as warnings, and the proposal is created: the form checks
+everything again when you apply it. Proposals are shown in [[ui:health.proposals.title]] and on the object screens.
 
 - [[ui:health.proposals.openForm]] opens the change form with the fields filled in (see
   [Resources and changes](resources-changes.md#proposals)); after it is applied the proposal is marked "applied" or
   "applied with edits", and the assistant sees it. On a read-only connection the button is disabled.
 - [[ui:health.proposals.reject]] — with an optional reason the assistant sees; [[ui:health.reopen]] brings the
   proposal back. The assistant can withdraw its own proposal.
-- An open proposal expires after 7 days; a connection has at most 50 open ones.
+- A proposal of any status is deleted 7 days after it was created; a connection has at most 50 open ones.
 
 ## With an LLM assistant {#with-llm}
 
