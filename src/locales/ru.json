@@ -210,7 +210,9 @@
       "restartKind": "Job и CronJob перезапустить нельзя",
       "limitBelowRequest": "Контейнер {{container}}: limit {{resource}} меньше request",
       "hpaBounds": "Границы HPA: 1 ≤ minReplicas ≤ maxReplicas ≤ {{max}}",
-      "noContainer": "В шаблоне подов нет контейнера {{container}}"
+      "noContainer": "В шаблоне подов нет контейнера {{container}}",
+      "limitRangeMin": "Контейнер {{container}}: {{field}} ниже минимума LimitRange {{limit}}. API-сервер не проверяет шаблон, и поды новой ревизии не создадутся",
+      "limitRangeMax": "Контейнер {{container}}: {{field}} выше максимума LimitRange {{limit}}. API-сервер не проверяет шаблон, и поды новой ревизии не создадутся"
     }
   },
   "messages": {

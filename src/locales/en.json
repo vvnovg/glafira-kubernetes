@@ -210,7 +210,9 @@
       "restartKind": "A Job or CronJob cannot be restarted",
       "limitBelowRequest": "Container {{container}}: the {{resource}} limit is below the request",
       "hpaBounds": "HPA bounds must be 1 ≤ minReplicas ≤ maxReplicas ≤ {{max}}",
-      "noContainer": "There is no container {{container}} in the pod template"
+      "noContainer": "There is no container {{container}} in the pod template",
+      "limitRangeMin": "Container {{container}}: the {{field}} is below the LimitRange minimum {{limit}}; the API server does not check the template, so the pods of the new revision would be rejected",
+      "limitRangeMax": "Container {{container}}: the {{field}} is above the LimitRange maximum {{limit}}; the API server does not check the template, so the pods of the new revision would be rejected"
     }
   },
   "messages": {

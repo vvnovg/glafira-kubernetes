@@ -32,7 +32,9 @@ pub fn error_text(e: &AppError) -> String {
 
 /// Ключи ошибок, текст которых модель получает как есть: постоянная фраза без данных профиля
 /// или только то, о чём модель спросила сама (проект, объект, id подключения), и ответ
-/// API-сервера на её запрос (`{{message}}` у 404, 409, 400/422, 5xx). Остальные ключи — и
+/// API-сервера на её запрос (`{{message}}` у 404, 409, 400/422, 5xx), и ошибки проверки
+/// изменения `errors.change.*`: в них только имена контейнеров, quantity и границы из самого
+/// изменения и проекта пользователя, без адресов и учётных данных. Остальные ключи — и
 /// любой новый — получают фиксированную фразу (`llm_message`): так текст с адресом сервера,
 /// командой exec-плагина, адресом источника метрик или именем пользователя не уйдёт модели,
 /// даже если о новом ключе здесь забыли.
@@ -66,6 +68,18 @@ pub const LLM_TEXT_KEYS: &[&str] = &[
     "errors.k8s.malformedObject",
     "errors.k8s.unexpectedResponse",
     "errors.health.annotationNotFound",
+    "errors.change.badQuantity",
+    "errors.change.containersCount",
+    "errors.change.duplicateContainer",
+    "errors.change.nothingToChange",
+    "errors.change.scaleKind",
+    "errors.change.replicas",
+    "errors.change.restartKind",
+    "errors.change.limitBelowRequest",
+    "errors.change.hpaBounds",
+    "errors.change.noContainer",
+    "errors.change.limitRangeMin",
+    "errors.change.limitRangeMax",
     "errors.internal",
 ];
 
@@ -864,6 +878,16 @@ mod tests {
         assert!(text.ends_with('…'), "{text}");
         let short = crate::k8s::errors::not_allowed("get", "pods", Some("team-a"));
         assert_eq!(llm_message(&short), short.message);
+    }
+
+    #[test]
+    fn change_check_errors_reach_the_model_with_their_text() {
+        let e = crate::change::check_limits("app", Some(1.0), Some(0.5), "CPU").unwrap_err();
+        assert_eq!(e.key, "errors.change.limitBelowRequest");
+        assert_eq!(
+            llm_message(&e),
+            "Container app: the CPU limit is below the request"
+        );
     }
 
     #[test]

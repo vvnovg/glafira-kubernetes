@@ -14,7 +14,7 @@ use super::{
     Change, ContainerResources, check_bounds, check_limits, quantity_lt, same_quantity_text,
 };
 use crate::error::{AppResult, ErrorCode};
-use crate::k8s::quantity::parse_quantity;
+use crate::k8s::quantity::{format_cpu, format_memory, parse_quantity};
 use crate::k8s::read::{Listed, ReadClient};
 use crate::k8s::workloads::{WorkloadSpec, get_spec};
 use crate::resources::constraints::{limit_range_bounds, quota_rooms};
@@ -255,7 +255,11 @@ pub enum Warning {
     HpaManaged { hpa: String },
     /// Масштаб в 0: подов не останется.
     ScaleToZero,
-    /// Значение вне границы `LimitRange`: API-сервер его отклонит (это покажет dry-run).
+    /// Значение вне границы `LimitRange`. `check` его больше не выдаёт: API-сервер шаблон
+    /// workload'а по `LimitRange` не проверяет (LimitRanger пропускает только Pod и PVC), поды
+    /// новой ревизии отклонят позже, и выкладка встанет, поэтому нарушение — ошибка
+    /// `errors.change.limitRangeMin` / `errors.change.limitRangeMax`, а не предупреждение.
+    /// Вариант оставлен для кода, который его разбирает.
     LimitRange {
         container: String,
         field: Field,
@@ -285,6 +289,46 @@ fn not_in_template(container: &str) -> crate::error::AppError {
     )
 }
 
+/// Значение вне границы `LimitRange`: ошибка, а не предупреждение. API-сервер не проверяет
+/// шаблон workload'а по `LimitRange` (LimitRanger пропускает только Pod и PVC): поды новой
+/// ревизии отклонят при создании, и выкладка встанет.
+fn limit_range_violation(
+    container: &str,
+    field: Field,
+    above: bool,
+    limit: f64,
+) -> crate::error::AppError {
+    let (label, cpu) = match field {
+        Field::CpuRequest => ("CPU request", true),
+        Field::CpuLimit => ("CPU limit", true),
+        Field::MemoryRequest => ("memory request", false),
+        Field::MemoryLimit => ("memory limit", false),
+    };
+    let limit = if cpu {
+        format_cpu(limit)
+    } else {
+        format_memory(limit)
+    };
+    let text = if above {
+        crate::ltext!(
+            "errors.change.limitRangeMax",
+            "Container {{container}}: the {{field}} is above the LimitRange maximum {{limit}}; the API server does not check the template, so the pods of the new revision would be rejected",
+            container = container,
+            field = label,
+            limit = limit
+        )
+    } else {
+        crate::ltext!(
+            "errors.change.limitRangeMin",
+            "Container {{container}}: the {{field}} is below the LimitRange minimum {{limit}}; the API server does not check the template, so the pods of the new revision would be rejected",
+            container = container,
+            field = label,
+            limit = limit
+        )
+    };
+    crate::error::AppError::localized(crate::error::ErrorCode::InvalidInput, text)
+}
+
 /// Значения контейнера после изменения: requests и limits.
 fn after(c: &ContainerResources, now: &ContainerNow) -> (Amounts, Amounts) {
     let v = |change: &Option<Option<String>>, current: Option<f64>| match change {
@@ -309,7 +353,8 @@ fn after(c: &ContainerResources, now: &ContainerNow) -> (Amounts, Amounts) {
 }
 
 /// Проверка изменения против кластера: ошибка — изменение неверно (нет контейнера, limit
-/// меньше request с текущими значениями, границы HPA), предупреждения — применить можно.
+/// меньше request с текущими значениями, значение вне границ `LimitRange`, границы HPA),
+/// предупреждения — применить можно.
 pub fn check(change: &Change, facts: &Facts) -> AppResult<Vec<Warning>> {
     let mut out = Vec::new();
     match (change, facts) {
@@ -345,20 +390,10 @@ pub fn check(change: &Change, facts: &Facts) -> AppResult<Vec<Warning>> {
                         let pick = |a: Amounts| if cpu { a.cpu } else { a.memory };
                         let Some(v) = v else { continue };
                         if let Some(m) = pick(lr.min).filter(|m| quantity_lt(v, *m)) {
-                            out.push(Warning::LimitRange {
-                                container: c.name.clone(),
-                                field,
-                                bound: Bound::Min,
-                                limit: m,
-                            });
+                            return Err(limit_range_violation(&c.name, field, false, m));
                         }
                         if let Some(m) = pick(lr.max).filter(|m| quantity_lt(*m, v)) {
-                            out.push(Warning::LimitRange {
-                                container: c.name.clone(),
-                                field,
-                                bound: Bound::Max,
-                                limit: m,
-                            });
+                            return Err(limit_range_violation(&c.name, field, true, m));
                         }
                     }
                 }
@@ -656,28 +691,48 @@ mod tests {
             (f.resource_version(), f.version().as_deref()),
             (Some("11"), Some("2"))
         );
-        let w = check(&c, &f).unwrap();
-        assert!(w.contains(&Warning::LimitRange {
-            container: "app".into(),
-            field: Field::CpuRequest,
-            bound: Bound::Min,
-            limit: 0.1
-        }));
-        assert!(w.contains(&Warning::LimitRange {
-            container: "app".into(),
-            field: Field::MemoryLimit,
-            bound: Bound::Max,
-            limit: 2048.0 * MI
-        }));
+        // Значение вне границы LimitRange (min CPU 100m, max памяти 2Gi) — ошибка, а не
+        // предупреждение: шаблон API-сервер по LimitRange не проверяет, поды новой ревизии
+        // отклонят позже. Первым в `c` нарушен request CPU 50m.
+        let e = check(&c, &f).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInput);
+        assert_eq!(e.key, "errors.change.limitRangeMin");
+        assert_eq!(
+            (
+                e.params["container"].as_str(),
+                e.params["field"].as_str(),
+                e.params["limit"].as_str()
+            ),
+            ("app", "CPU request", "100m")
+        );
+        let e = check(
+            &set(json!([{"name": "app", "limits": {"memory": "3Gi"}}])),
+            &f,
+        )
+        .unwrap_err();
+        assert_eq!(e.key, "errors.change.limitRangeMax");
+        assert_eq!(
+            (
+                e.params["container"].as_str(),
+                e.params["field"].as_str(),
+                e.params["limit"].as_str()
+            ),
+            ("app", "memory limit", "2Gi")
+        );
+        // Ровно на границах и внутри них изменение проходит.
+        let inside =
+            set(json!([{"name": "app", "requests": {"cpu": "100m"}, "limits": {"memory": "2Gi"}}]));
+        assert!(check(&inside, &f).unwrap().is_empty());
         // (1Gi − 512Mi) × 2 реплики + 1Gi × 1 под выкладки = 2Gi > 1Gi свободно.
-        assert!(
-            w.contains(&Warning::Quota {
+        let grow = set(json!([{"name": "app", "requests": {"memory": "1Gi"}}]));
+        assert_eq!(
+            check(&grow, &f).unwrap(),
+            [Warning::Quota {
                 quota: "compute".into(),
                 resource: "requests.memory".into(),
                 needed: 2048.0 * MI,
                 free: 1024.0 * MI
-            }),
-            "{w:?}"
+            }]
         );
         assert_eq!(
             diff(&c, &f, "now"),
@@ -878,8 +933,10 @@ mod tests {
             workload: web(),
             replicas: 3,
         };
-        // Request ниже min LimitRange из `cluster`: с LimitRange был бы Warning::LimitRange.
+        // Request ниже min LimitRange из `cluster`: с прочитанным LimitRange это была бы ошибка,
+        // а без него (не прочитался или нет API) — только «не проверено» или ничего.
         let cpu = set(json!([{"name": "app", "requests": {"cpu": "50m"}}]));
+        let calm = set(json!([{"name": "app", "requests": {"cpu": "200m"}}]));
         // Request памяти растёт и не помещается в квоту из `cluster`: с квотой был бы Quota.
         let memory = set(json!([{"name": "app", "requests": {"memory": "1Gi"}}]));
         let restart = Change::RolloutRestart {
@@ -908,7 +965,7 @@ mod tests {
         // Что не прочиталось, но изменением не используется, о предупреждении не просит.
         let no_unverified =
             |w: Vec<Warning>| !w.iter().any(|w| matches!(w, Warning::Unverified { .. }));
-        assert!(no_unverified(warnings_when(HPAS, 403, &cpu).await));
+        assert!(no_unverified(warnings_when(HPAS, 403, &calm).await));
         assert!(no_unverified(warnings_when(QUOTAS, 403, &scale).await));
         assert!(no_unverified(
             warnings_when(LIMIT_RANGES, 403, &scale).await
