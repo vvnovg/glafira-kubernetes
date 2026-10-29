@@ -30,6 +30,8 @@ pub struct Connected {
     bearer: Option<SecretString>,
     /// Выбранный источник метрик (спец. §7.1): живёт, пока живёт клиент.
     pub metrics: crate::metrics::select::MetricsCache,
+    /// Allocatable самой крупной ноды для рекомендаций (спец. §7.3): 5 минут, пока живёт клиент.
+    pub nodes: crate::resources::constraints::NodeCache,
 }
 
 impl Connected {
@@ -46,6 +48,7 @@ impl Connected {
             expires_at,
             bearer: None,
             metrics: Default::default(),
+            nodes: Default::default(),
         }
     }
 
@@ -260,6 +263,7 @@ pub(crate) fn test_connected(
         expires_at: None,
         bearer: None,
         metrics: Default::default(),
+        nodes: Default::default(),
     })
 }
 

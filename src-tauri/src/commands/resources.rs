@@ -107,7 +107,7 @@ pub async fn recommend_resources(
     state
         .read_in(&connection_id, &namespace, |c| async move {
             let sel = crate::metrics::select::for_connection(&st, &id, &c, refresh).await?;
-            let nodes = c.info.capabilities.list_nodes;
+            let nodes = c.info.capabilities.list_nodes.then_some(&c.nodes);
             crate::resources::analyze(
                 &c.reader(),
                 &sel,

@@ -62,7 +62,7 @@ async fn prometheus_behind_the_api_server_proxy() {
         "busy",
         7,
         now(),
-        true,
+        Some(&c.nodes),
     )
     .await
     .unwrap();

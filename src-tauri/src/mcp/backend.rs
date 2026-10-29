@@ -454,7 +454,7 @@ impl AppBackend {
                         return Ok(Err(sel.status.clone()));
                     }
                     let kind = workload_kind(workload.kind);
-                    let nodes = c.info.capabilities.list_nodes;
+                    let nodes = c.info.capabilities.list_nodes.then_some(&c.nodes);
                     crate::resources::analyze(
                         &c.reader(),
                         &sel,

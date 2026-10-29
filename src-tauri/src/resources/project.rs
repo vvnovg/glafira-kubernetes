@@ -360,12 +360,16 @@ fn add(a: Option<f64>, b: Option<f64>) -> Option<f64> {
     }
 }
 
-/// Сводка по workload'ам из подов и потребления по поду и контейнеру.
+/// Сводка по workload'ам из подов и потребления по поду и контейнеру. `history` — потребление
+/// за окно у источника истории; без неё (`metrics.k8s.io`) это одна мгновенная выборка, и избыток
+/// по ней не выдаётся: спокойная минута выглядела бы как лишний request, а фильтр «только с
+/// рекомендациями» звал бы урезать requests по одной точке. Риски остаются.
 pub fn summarize(
     workloads: &[(WorkloadKind, String)],
     pods: &[Pod],
     owner: &HashMap<String, (WorkloadKind, String)>,
     usage: &BTreeMap<(String, String), Use>,
+    history: bool,
 ) -> Vec<WorkloadResources> {
     // Худшее потребление по контейнерам workload'а: (вид, имя) → контейнер → значения.
     let mut worst: HashMap<(WorkloadKind, String), BTreeMap<String, Use>> = HashMap::new();
@@ -427,7 +431,9 @@ pub fn summarize(
                 let (req, lim) = per_pod.get(c).copied().unwrap_or_default();
                 let (r, e) = assess(c, u, req, lim);
                 risks.extend(r);
-                excess.extend(e);
+                if history {
+                    excess.extend(e);
+                }
             }
             // Нет потребления (метрик по подам не пришло) — резерв неизвестен, а не весь request.
             let minus = |a: Option<f64>, b: Option<f64>| Some(a? - b?);
@@ -530,7 +536,13 @@ pub async fn project_usage(
         window_days: days,
         source,
         source_status: sel.status.clone(),
-        workloads: summarize(&workloads, &pods.items, &owner, &usage),
+        workloads: summarize(
+            &workloads,
+            &pods.items,
+            &owner,
+            &usage,
+            sel.history.is_some(),
+        ),
         errors,
         truncated: list.truncated || pods.truncated,
         quotas: quotas
@@ -772,6 +784,66 @@ pub(crate) mod tests {
         assert!(!report.actionable());
         assert_eq!(u.quotas[0].resource, "requests.cpu");
         assert!(!u.truncated);
+    }
+
+    /// Без источника истории (`metrics.k8s.io`) потребление — одна мгновенная выборка: избыток по
+    /// ней не выдаётся (спокойная минута — не повод урезать requests), риски остаются.
+    #[tokio::test]
+    async fn a_single_pod_metrics_sample_gives_risks_but_no_excess() {
+        let handler = |s: &crate::k8s::testing::Seen| match s.path() {
+            "/apis/metrics.k8s.io/v1beta1/namespaces/team-a/pods" => (
+                200,
+                serde_json::json!({"apiVersion": "metrics.k8s.io/v1beta1", "kind": "PodMetricsList",
+                    "metadata": {}, "items": [
+                        {"metadata": {"name": "web-7d9f8c6b5d-x2x4z"}, "containers": [
+                            {"name": "app", "usage": {"cpu": "100m", "memory": "950Mi"}}]}]}),
+            ),
+            _ => cluster(s),
+        };
+        let r = ReadClient::new(mock_client(handler).0, StdDuration::from_secs(5));
+        let sel = Selected {
+            history: None,
+            status: source_status(true),
+        };
+        let u = project_usage(&r, &sel, &ApiGroups::default(), "team-a", 7, 1_700_000_000)
+            .await
+            .unwrap();
+        assert_eq!(u.source.location, "metrics.k8s.io");
+        let web = u.workloads.iter().find(|w| w.name == "web").unwrap();
+        // Request 2 ядра и 4Gi против 100m и 950Mi — с историей это был бы избыток CPU и памяти.
+        assert!(web.excess.is_empty(), "{:?}", web.excess);
+        assert!(
+            matches!(&web.risks[..], [Risk::MemoryNearLimit { .. }]),
+            "{:?}",
+            web.risks
+        );
+        // Та же выборка как история за окно — избыток есть: дело именно в источнике.
+        let pods: Vec<Pod> = vec![
+            serde_json::from_value(pod(
+                "web-7d9f8c6b5d-x2x4z",
+                ("ReplicaSet", "web-7d9f8c6b5d"),
+                serde_json::json!({"app": "web", "pod-template-hash": "7d9f8c6b5d"}),
+                "Running",
+                ("2", "4Gi"),
+                Some(("2", "1Gi")),
+            ))
+            .unwrap(),
+        ];
+        let usage = BTreeMap::from([(
+            ("web-7d9f8c6b5d-x2x4z".to_string(), "app".to_string()),
+            Use {
+                cpu_p95: Some(0.1),
+                memory_max: Some(950.0 * MI),
+                ..Default::default()
+            },
+        )]);
+        let workloads = [(WorkloadKind::Deployment, "web".to_string())];
+        let owner = owners(&pods, &[]);
+        let with_history = summarize(&workloads, &pods, &owner, &usage, true);
+        assert_eq!(with_history[0].excess.len(), 2, "{:?}", with_history[0]);
+        let without = summarize(&workloads, &pods, &owner, &usage, false);
+        assert!(without[0].excess.is_empty());
+        assert_eq!(without[0].risks, with_history[0].risks);
     }
 
     /// Метрик по подам нет вовсе или нет по ресурсу: резерв неизвестен (`None`), а не весь

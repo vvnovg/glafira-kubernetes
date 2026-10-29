@@ -269,21 +269,23 @@ pub struct MetricsCache {
 }
 
 impl MetricsCache {
-    pub async fn get_or_select<F: std::future::Future<Output = Selected>>(
+    /// Выбор из подключения или `select` (только он и читает то, что нужно для выбора: токен
+    /// источника из keychain). Ошибка `select` не запоминается.
+    pub async fn get_or_select<F: std::future::Future<Output = AppResult<Selected>>>(
         &self,
         refresh: bool,
         select: impl FnOnce() -> F,
-    ) -> Arc<Selected> {
+    ) -> AppResult<Arc<Selected>> {
         let mut slot = self.inner.lock().await;
         if !refresh
             && let Some((at, s)) = slot.as_ref()
             && at.elapsed() < SELECTION_TTL
         {
-            return s.clone();
+            return Ok(s.clone());
         }
-        let s = Arc::new(select().await);
+        let s = Arc::new(select().await?);
         *slot = Some((Instant::now(), s.clone()));
-        s
+        Ok(s)
     }
 }
 
@@ -294,8 +296,9 @@ fn now_s() -> i64 {
 }
 
 /// Источник подключения `id` для команд и MCP: из подключения или выбор заново. Свой токен
-/// источника читается из keychain (на blocking-потоке). Ответы 403 при пробах кандидатов не
-/// сбрасывают права проекта, в котором идёт чтение: они собираются отдельно (`observe`).
+/// источника читается из keychain (на blocking-потоке) только тогда, когда выбор действительно
+/// идёт, а не при каждом чтении из кэша. Ответы 403 при пробах кандидатов не сбрасывают права
+/// проекта, в котором идёт чтение: они собираются отдельно (`observe`).
 pub async fn for_connection(
     st: &crate::state::AppState,
     id: &str,
@@ -303,32 +306,33 @@ pub async fn for_connection(
     refresh: bool,
 ) -> AppResult<Arc<Selected>> {
     let profile = st.connections.get(id)?;
-    let bearer = profile
-        .metrics
-        .endpoint()
-        .is_some_and(|e| e.auth == MetricsAuth::Bearer);
-    let metrics_token = if bearer {
-        let secrets = st.secrets.clone();
-        let key = crate::secrets::secret_key(id, crate::secrets::METRICS_TOKEN);
-        crate::commands::blocking(move || secrets.get(&key))
-            .await?
-            .map(SecretString::from)
-    } else {
-        None
+    let pick = || {
+        Box::pin(async move {
+            let bearer = profile
+                .metrics
+                .endpoint()
+                .is_some_and(|e| e.auth == MetricsAuth::Bearer);
+            let metrics_token = if bearer {
+                let secrets = st.secrets.clone();
+                let key = crate::secrets::secret_key(id, crate::secrets::METRICS_TOKEN);
+                crate::commands::blocking(move || secrets.get(&key))
+                    .await?
+                    .map(SecretString::from)
+            } else {
+                None
+            };
+            let inputs = Inputs {
+                reader: c.reader(),
+                profile,
+                platform: c.info.platform.clone(),
+                connection_token: c.bearer().cloned(),
+                metrics_token,
+            };
+            Ok(select(&inputs, now_s()).await)
+        })
     };
-    let inputs = Inputs {
-        reader: c.reader(),
-        profile,
-        platform: c.info.platform.clone(),
-        connection_token: c.bearer().cloned(),
-        metrics_token,
-    };
-    let (s, _) = crate::k8s::read::observe(
-        c.metrics
-            .get_or_select(refresh, || Box::pin(select(&inputs, now_s()))),
-    )
-    .await;
-    Ok(s)
+    let (s, _) = crate::k8s::read::observe(c.metrics.get_or_select(refresh, pick)).await;
+    s
 }
 
 #[cfg(test)]
@@ -583,16 +587,64 @@ mod tests {
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let pick = || async {
             calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            select(
+            Ok(select(
                 &inputs(PlatformKind::Kubernetes, |_| status(404, "NotFound", "no")),
                 1,
             )
-            .await
+            .await)
         };
-        cache.get_or_select(false, pick).await;
-        cache.get_or_select(false, pick).await;
+        cache.get_or_select(false, pick).await.unwrap();
+        cache.get_or_select(false, pick).await.unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-        cache.get_or_select(true, pick).await;
+        cache.get_or_select(true, pick).await.unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        // Ошибка выбора не запоминается: следующий вызов выбирает заново.
+        let failing = MetricsCache::default();
+        let fail = || async { Err(crate::k8s::errors::timeout()) };
+        assert!(failing.get_or_select(false, fail).await.is_err());
+        failing.get_or_select(false, pick).await.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    /// Хранилище секретов, которое считает чтения; токена в нём нет.
+    #[derive(Default)]
+    struct CountingStore(std::sync::atomic::AtomicUsize);
+
+    impl crate::secrets::SecretStore for CountingStore {
+        fn get(&self, _key: &str) -> AppResult<Option<String>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(None)
+        }
+        fn set(&self, _key: &str, _value: &str) -> AppResult<()> {
+            Ok(())
+        }
+        fn delete(&self, _key: &str) -> AppResult<()> {
+            Ok(())
+        }
+    }
+
+    /// Свой токен источника читается из keychain только при выборе, а не при каждом чтении из
+    /// кэша подключения (вкладка «Ресурсы», проверка, MCP).
+    #[tokio::test]
+    async fn the_metrics_token_is_read_only_when_the_source_is_selected() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = std::sync::Arc::new(CountingStore::default());
+        let st = crate::state::AppState::new(dir.path(), secrets.clone()).unwrap();
+        let mut p = sample_profile("a");
+        p.metrics = MetricsConfig::Prometheus(MetricsEndpoint {
+            url: "https://prometheus.invalid".into(),
+            auth: MetricsAuth::Bearer,
+            ca: MetricsCa::Connection,
+        });
+        st.connections.upsert(p).unwrap();
+        let c = crate::k8s::pool::test_connected(|_| status(404, "NotFound", "no"));
+        let reads = || secrets.0.load(std::sync::atomic::Ordering::SeqCst);
+        for _ in 0..3 {
+            let s = for_connection(&st, "a", &c, false).await.unwrap();
+            assert_eq!(s.status.rejected[0].reason, Reason::TokenMissing);
+        }
+        assert_eq!(reads(), 1, "из кэша — без keychain");
+        for_connection(&st, "a", &c, true).await.unwrap();
+        assert_eq!(reads(), 2, "«Обновить» выбирает заново");
     }
 }
