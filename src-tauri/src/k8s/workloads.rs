@@ -491,11 +491,24 @@ pub struct WorkloadFacts {
     pub row: WorkloadRow,
     pub conditions: Vec<ConditionView>,
     pub template: Option<PodTemplateSpec>,
+    /// CronJob, из которого создан Job (`ownerReferences`); у остальных видов `None`.
+    pub cron: Option<String>,
+}
+
+/// CronJob-владелец объекта: по нему поды Job относят к CronJob (вкладка «Ресурсы» проекта и
+/// правила `resources.*`).
+pub fn cron_owner(meta: &ObjectMeta) -> Option<&str> {
+    meta.owner_references
+        .iter()
+        .flatten()
+        .find(|o| o.kind == "CronJob")
+        .map(|o| o.name.as_str())
 }
 
 impl From<Parsed> for WorkloadFacts {
     fn from(p: Parsed) -> Self {
         Self {
+            cron: cron_owner(&p.meta).map(String::from),
             row: p.row,
             conditions: p.conditions,
             template: p.template,

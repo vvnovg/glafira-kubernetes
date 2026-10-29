@@ -16,6 +16,8 @@ use super::snapshot::ClusterSnapshot;
 use super::store::{CheckRun, HealthStore, Scope, Trigger, connection_not_found};
 use crate::commands::blocking;
 use crate::error::{AppError, AppResult, ErrorCode};
+use crate::metrics::prometheus::MetricsSource;
+use crate::metrics::select::Selected;
 use crate::state::AppState;
 use crate::storage::profile::Environment;
 use crate::sync::{MutexExt, RwLockExt};
@@ -295,6 +297,14 @@ impl HealthService {
     }
 }
 
+/// Источник истории метрик из результата выбора. Ошибка выбора (keychain с токеном источника
+/// закрыт или отказал, подключение не прочиталось) проверку не прерывает: правила кластера
+/// работают, а `resources` остаётся разрывом `METRICS_UNAVAILABLE` и проверка — частичной
+/// (спец. §8.1: непрочитанное — не проверено).
+fn history_of(sel: AppResult<Arc<Selected>>) -> Option<Arc<dyn MetricsSource>> {
+    sel.ok().and_then(|s| s.history.clone())
+}
+
 /// Чтение кластера подключения для проверки: клиент из пула или новое подключение, как у
 /// команд интерфейса (`AppState::read`).
 fn collector(state: &AppState, connection_id: &str) -> Collector {
@@ -307,7 +317,8 @@ fn collector(state: &AppState, connection_id: &str) -> Collector {
             st.read(&id, |c| async move {
                 let now = now_ms() / 1000;
                 // Источник истории метрик — для правил `resources.*`; без него — разрыв.
-                let sel = crate::metrics::select::for_connection(&st2, &id2, &c, false).await?;
+                let history =
+                    history_of(crate::metrics::select::for_connection(&st2, &id2, &c, false).await);
                 Ok(collect(
                     &c.reader(),
                     &c.info,
@@ -315,7 +326,7 @@ fn collector(state: &AppState, connection_id: &str) -> Collector {
                     requested.as_deref(),
                     LIMITS,
                     now,
-                    sel.history.as_deref(),
+                    history.as_deref(),
                 )
                 .await)
             })
@@ -385,6 +396,33 @@ mod tests {
 
     fn panicking() -> Collector {
         Arc::new(|_| Box::pin(async { panic!("collect exploded") }))
+    }
+
+    #[test]
+    fn a_failed_source_selection_leaves_the_check_without_history() {
+        use crate::metrics::prometheus::fake::{FakeSource, vector};
+        use crate::resources::usage::tests::source_status;
+
+        // Keychain с токеном источника закрыт или отказал: выбор вернул ошибку.
+        let locked = Err(crate::app_err!(
+            ErrorCode::Internal,
+            "errors.app.taskPanicked",
+            "Background task failed: {{error}}",
+            error = "keychain"
+        ));
+        assert!(history_of(locked).is_none());
+        let history: Arc<dyn MetricsSource> =
+            Arc::new(FakeSource::new(|_, _| Ok(vector(&[(&[], 1.0)]))));
+        let found = Ok(Arc::new(Selected {
+            history: Some(history),
+            status: source_status(false),
+        }));
+        assert!(history_of(found).is_some());
+        let none = Ok(Arc::new(Selected {
+            history: None,
+            status: source_status(false),
+        }));
+        assert!(history_of(none).is_none());
     }
 
     #[tokio::test]

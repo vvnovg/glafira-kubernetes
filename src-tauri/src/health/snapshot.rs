@@ -169,6 +169,9 @@ pub struct WorkloadSnap {
     pub available_cond: Option<Cond>,
     /// Основные контейнеры шаблона подов.
     pub containers: Vec<TemplateContainer>,
+    /// Только у Job: CronJob, из которого он создан. По нему правила `resources.*` относят поды
+    /// Job к CronJob, как вкладка «Ресурсы» проекта.
+    pub cron: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

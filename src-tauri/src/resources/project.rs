@@ -17,10 +17,10 @@ use tokio::time::Instant;
 use super::current::Amounts;
 use super::recommend::QuotaRoom;
 use crate::error::AppResult;
-use crate::k8s::pods::owner_of;
+use crate::k8s::pods::{OwnerRef, owner_of};
 use crate::k8s::quantity::parse_quantity;
 use crate::k8s::read::ReadClient;
-use crate::k8s::workloads::{KindError, WorkloadKind, list_workloads};
+use crate::k8s::workloads::{KindError, WorkloadKind, cron_owner, list_workloads};
 use crate::metrics::prometheus::{Failure, MetricsSource, SourceInfo, query};
 use crate::metrics::promql;
 use crate::metrics::select::{Selected, SourceStatus};
@@ -53,7 +53,7 @@ pub struct Use {
 
 impl Use {
     /// Худшее из двух подов.
-    fn worst(self, o: Self) -> Self {
+    pub(crate) fn worst(self, o: Self) -> Self {
         Self {
             cpu_p95: larger(self.cpu_p95, o.cpu_p95),
             memory_max: larger(self.memory_max, o.memory_max),
@@ -228,28 +228,27 @@ pub fn kind_of(s: &str) -> Option<WorkloadKind> {
         .find(|k| format!("{k:?}") == s)
 }
 
+/// Workload, которому принадлежит под с владельцем `o` (`owner_of`): под Job из CronJob
+/// (`cron` — имя его CronJob) относится к CronJob, чтобы временное имя Job не попадало в ключ
+/// workload'а; остальные — к своему владельцу. `None` — владелец не workload.
+pub(crate) fn workload_owner(o: &OwnerRef, cron: Option<&str>) -> Option<(WorkloadKind, String)> {
+    match (o.kind.as_str(), cron) {
+        ("Job", Some(c)) => Some((WorkloadKind::CronJob, c.to_string())),
+        (k, _) => Some((kind_of(k)?, o.name.clone())),
+    }
+}
+
 /// Владелец-workload работающих подов: `pod → (вид, имя)`.
 pub fn owners(pods: &[Pod], jobs: &[Job]) -> HashMap<String, (WorkloadKind, String)> {
     let cron: HashMap<&str, &str> = jobs
         .iter()
-        .filter_map(|j| {
-            let o = j
-                .metadata
-                .owner_references
-                .iter()
-                .flatten()
-                .find(|o| o.kind == "CronJob")?;
-            Some((j.metadata.name.as_deref()?, o.name.as_str()))
-        })
+        .filter_map(|j| Some((j.metadata.name.as_deref()?, cron_owner(&j.metadata)?)))
         .collect();
     pods.iter()
         .filter_map(|p| {
             let name = p.metadata.name.clone()?;
             let o = owner_of(p)?;
-            let w = match (o.kind.as_str(), cron.get(o.name.as_str())) {
-                ("Job", Some(c)) => (WorkloadKind::CronJob, (*c).to_string()),
-                (k, _) => (kind_of(k)?, o.name),
-            };
+            let w = workload_owner(&o, cron.get(o.name.as_str()).copied())?;
             Some((name, w))
         })
         .collect()
@@ -296,11 +295,14 @@ pub struct ProjectUsage {
     pub collected_at_ms: i64,
 }
 
+/// Под считается работающим, пока он не завершился: любая фаза, кроме `Succeeded` и `Failed`
+/// (`Pending` и `Unknown` — тоже), и фаза без значения.
+pub(crate) fn is_running(phase: Option<&str>) -> bool {
+    !matches!(phase, Some("Succeeded" | "Failed"))
+}
+
 fn running(p: &Pod) -> bool {
-    !matches!(
-        p.status.as_ref().and_then(|s| s.phase.as_deref()),
-        Some("Succeeded" | "Failed")
-    )
+    is_running(p.status.as_ref().and_then(|s| s.phase.as_deref()))
 }
 
 fn pod_amounts(p: &Pod, limits: bool) -> BTreeMap<String, Amounts> {
@@ -334,10 +336,19 @@ fn pod_amounts(p: &Pod, limits: bool) -> BTreeMap<String, Amounts> {
         .collect()
 }
 
-fn larger(a: Option<f64>, b: Option<f64>) -> Option<f64> {
+pub(crate) fn larger(a: Option<f64>, b: Option<f64>) -> Option<f64> {
     match (a, b) {
         (Some(a), Some(b)) => Some(a.max(b)),
         (a, b) => a.or(b),
+    }
+}
+
+/// Покомпонентно наибольшее из двух значений: request или limit контейнера на под берётся
+/// наибольшим среди подов.
+pub(crate) fn larger_amounts(a: Amounts, b: Amounts) -> Amounts {
+    Amounts {
+        cpu: larger(a.cpu, b.cpu),
+        memory: larger(a.memory, b.memory),
     }
 }
 
@@ -391,15 +402,13 @@ pub fn summarize(
                     requests.cpu = add(requests.cpu, a.cpu);
                     requests.memory = add(requests.memory, a.memory);
                     let e = per_pod.entry(c.clone()).or_default();
-                    e.0.cpu = larger(e.0.cpu, a.cpu);
-                    e.0.memory = larger(e.0.memory, a.memory);
+                    e.0 = larger_amounts(e.0, *a);
                 }
                 for (c, a) in &lim {
                     limits.cpu = add(limits.cpu, a.cpu);
                     limits.memory = add(limits.memory, a.memory);
                     let e = per_pod.entry(c.clone()).or_default();
-                    e.1.cpu = larger(e.1.cpu, a.cpu);
-                    e.1.memory = larger(e.1.memory, a.memory);
+                    e.1 = larger_amounts(e.1, *a);
                 }
             }
             let n = mine.len() as f64;

@@ -8,27 +8,13 @@ use serde_json::json;
 
 use super::{Findings, listed};
 use crate::health::model::Target;
-use crate::health::snapshot::{ClusterSnapshot, ContainerAmounts, ProjectSnap};
+use crate::health::snapshot::{ClusterSnapshot, ProjectSnap};
 use crate::k8s::quantity::{format_cpu, format_memory};
 use crate::k8s::workloads::WorkloadKind;
 use crate::resources::current::Amounts;
-use crate::resources::project::{Excess, Risk, Use, assess, kind_of, workload_of};
-
-fn larger(a: Option<f64>, b: Option<f64>) -> Option<f64> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some(a.max(b)),
-        (a, b) => a.or(b),
-    }
-}
-
-/// Request и limit контейнера на под — наибольшие среди работающих подов workload'а.
-fn per_pod(a: &mut (Amounts, Amounts), c: &ContainerAmounts) {
-    let (r, l) = (c.requests(), c.limits());
-    a.0.cpu = larger(a.0.cpu, r.cpu);
-    a.0.memory = larger(a.0.memory, r.memory);
-    a.1.cpu = larger(a.1.cpu, l.cpu);
-    a.1.memory = larger(a.1.memory, l.memory);
-}
+use crate::resources::project::{
+    Excess, Risk, Use, assess, is_running, larger_amounts, workload_of, workload_owner,
+};
 
 fn project(p: &ProjectSnap, out: &mut Findings) {
     let (Some(usage), Some(pods), Some(workloads)) = (&p.usage, &p.pods, &p.workloads) else {
@@ -36,11 +22,18 @@ fn project(p: &ProjectSnap, out: &mut Findings) {
     };
     let list: Vec<(WorkloadKind, String)> =
         workloads.iter().map(|w| (w.kind, w.name.clone())).collect();
+    // Job → его CronJob: поды Job из CronJob относятся к CronJob, как во вкладке «Ресурсы».
+    let cron: HashMap<&str, &str> = workloads
+        .iter()
+        .filter(|w| w.kind == WorkloadKind::Job)
+        .filter_map(|w| Some((w.name.as_str(), w.cron.as_deref()?)))
+        .collect();
     let owner: HashMap<&str, (WorkloadKind, String)> = pods
         .iter()
         .filter_map(|pod| {
             let o = pod.owner.as_ref()?;
-            Some((pod.name.as_str(), (kind_of(&o.kind)?, o.name.clone())))
+            let w = workload_owner(o, cron.get(o.name.as_str()).copied())?;
+            Some((pod.name.as_str(), w))
         })
         .collect();
     // Худшее потребление и request / limit на под: workload → контейнер → значения.
@@ -52,24 +45,19 @@ fn project(p: &ProjectSnap, out: &mut Findings) {
                 .or_default()
                 .entry(container.clone())
                 .or_default();
-            *e = Use {
-                cpu_p95: larger(e.cpu_p95, u.cpu_p95),
-                memory_max: larger(e.memory_max, u.memory_max),
-                throttling_mean: larger(e.throttling_mean, u.throttling_mean),
-                oom_count: None,
-            };
+            *e = e.worst(*u);
         }
     }
+    // Request и limit контейнера на под — наибольшие среди работающих подов workload'а.
     let mut amounts: HashMap<(WorkloadKind, String), BTreeMap<String, (Amounts, Amounts)>> =
         HashMap::new();
-    for pod in pods
-        .iter()
-        .filter(|p| p.phase == "Running" || p.phase == "Pending")
-    {
+    for pod in pods.iter().filter(|p| is_running(Some(&p.phase))) {
         if let Some(w) = owner.get(pod.name.as_str()) {
             let m = amounts.entry(w.clone()).or_default();
             for c in pod.containers.iter().filter(|c| !c.init || c.sidecar) {
-                per_pod(m.entry(c.name.clone()).or_default(), &c.amounts);
+                let e = m.entry(c.name.clone()).or_default();
+                e.0 = larger_amounts(e.0, c.amounts.requests());
+                e.1 = larger_amounts(e.1, c.amounts.limits());
             }
         }
     }
@@ -163,7 +151,7 @@ mod tests {
     use super::super::pods::fixtures::{pod, project as with_pods};
     use super::*;
     use crate::health::model::{Finding, Severity};
-    use crate::health::snapshot::{PodSnap, WorkloadSnap};
+    use crate::health::snapshot::{ContainerAmounts, PodSnap, WorkloadSnap};
     use crate::platform::PlatformKind;
     use crate::storage::profile::Environment;
 
@@ -186,18 +174,35 @@ mod tests {
         p
     }
 
-    fn snapshot(pods: Vec<PodSnap>, usage: &[(&str, Use)]) -> ClusterSnapshot {
-        let mut p = with_pods("team-a", pods);
-        p.workloads = Some(vec![WorkloadSnap {
-            kind: WorkloadKind::Deployment,
-            name: "web".into(),
+    fn workload(kind: WorkloadKind, name: &str, cron: Option<&str>) -> WorkloadSnap {
+        WorkloadSnap {
+            kind,
+            name: name.into(),
             created: None,
             desired: Some(1),
             available: Some(1),
             progressing: None,
             available_cond: None,
             containers: vec![],
-        }]);
+            cron: cron.map(String::from),
+        }
+    }
+
+    fn snapshot(pods: Vec<PodSnap>, usage: &[(&str, Use)]) -> ClusterSnapshot {
+        snapshot_of(
+            pods,
+            vec![workload(WorkloadKind::Deployment, "web", None)],
+            usage,
+        )
+    }
+
+    fn snapshot_of(
+        pods: Vec<PodSnap>,
+        workloads: Vec<WorkloadSnap>,
+        usage: &[(&str, Use)],
+    ) -> ClusterSnapshot {
+        let mut p = with_pods("team-a", pods);
+        p.workloads = Some(workloads);
         p.usage = Some(
             usage
                 .iter()
@@ -237,8 +242,9 @@ mod tests {
             )],
             &[
                 ("web-7d9f8c6b5d-x2x4z", u(0.3, 950.0 * MI as f64, 0.4)),
-                // Под, удалённый за сутки, — по форме имени.
-                ("web-5f6d7c8b9d-q2w4x", u(0.2, 100.0 * MI as f64, 0.1)),
+                // Под, удалённый за сутки, — по форме имени: его максимум памяти выше, CPU ниже;
+                // берётся худшее по каждому значению отдельно.
+                ("web-5f6d7c8b9d-q2w4x", u(0.2, 980.0 * MI as f64, 0.1)),
             ],
         );
         let f = run(&s, Environment::Prod);
@@ -256,9 +262,106 @@ mod tests {
             "resources.cpuThrottled:workload:team-a:Deployment/web"
         );
         assert_eq!(f[0].params["containers"][0], "web 40%");
-        assert_eq!(f[1].params["containers"][0], "web 950Mi / 1Gi");
+        assert_eq!(f[1].params["containers"][0], "web 980Mi / 1Gi");
         assert_eq!(f[2].params["cpu"][0], "web 2 / p95 300m");
-        assert_eq!(f[2].params["memory"][0], "web 4Gi / max 950Mi");
+        assert_eq!(f[2].params["memory"][0], "web 4Gi / max 980Mi");
+    }
+
+    #[test]
+    fn two_running_pods_take_the_larger_request_and_limit() {
+        // Один под с большим request и малым limit памяти, другой — наоборот: как во вкладке
+        // «Ресурсы», берётся наибольшее среди подов, в каком бы порядке они ни пришли.
+        let big_request = web_pod(
+            "web-7d9f8c6b5d-aaaaa",
+            2000,
+            Some(1000),
+            4096 * MI,
+            1024 * MI,
+        );
+        let big_limit = web_pod("web-7d9f8c6b5d-bbbbb", 500, Some(2000), 256 * MI, 2048 * MI);
+        let usage = [("web-7d9f8c6b5d-aaaaa", u(0.3, 950.0 * MI as f64, 0.4))];
+        for pods in [
+            vec![big_request.clone(), big_limit.clone()],
+            vec![big_limit, big_request],
+        ] {
+            let f = run(&snapshot(pods, &usage), Environment::Prod);
+            let ids: Vec<_> = f.iter().map(|f| f.rule_id.as_str()).collect();
+            // Limit памяти 2Gi — 950Mi до порога далеко; request 2 ядра и 4Gi — избыток.
+            assert_eq!(ids, ["resources.cpuThrottled", "resources.overProvisioned"]);
+            assert_eq!(f[1].params["cpu"][0], "web 2 / p95 300m");
+            assert_eq!(f[1].params["memory"][0], "web 4Gi / max 950Mi");
+        }
+    }
+
+    #[test]
+    fn cronjob_pods_belong_to_the_cronjob_not_to_the_transient_job() {
+        let run_of = |job: &str, pod: &str| {
+            let mut p = web_pod(pod, 2000, Some(1000), 4096 * MI, 1024 * MI);
+            p.owner = Some(crate::k8s::pods::OwnerRef {
+                kind: "Job".into(),
+                name: job.into(),
+            });
+            let s = snapshot_of(
+                vec![p],
+                vec![
+                    workload(WorkloadKind::CronJob, "report", None),
+                    workload(WorkloadKind::Job, job, Some("report")),
+                ],
+                &[(pod, u(0.3, 950.0 * MI as f64, 0.4))],
+            );
+            run(&s, Environment::Prod)
+        };
+        let first = run_of("report-29000", "report-29000-x2x4z");
+        let keys: Vec<_> = first.iter().map(|f| f.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "resources.cpuThrottled:workload:team-a:CronJob/report",
+                "resources.memoryNearLimit:workload:team-a:CronJob/report",
+                "resources.overProvisioned:workload:team-a:CronJob/report",
+            ]
+        );
+        // Следующий запуск — другой Job и другой под, а ключ тот же: замечание не пропадает
+        // и не появляется заново, снятое остаётся снятым.
+        let next = run_of("report-29001", "report-29001-q7w8e");
+        let next_keys: Vec<_> = next.iter().map(|f| f.key.as_str()).collect();
+        assert_eq!(next_keys, keys);
+        // Job без CronJob остаётся собой.
+        let mut p = web_pod("once-x2x4z", 2000, Some(1000), 4096 * MI, 1024 * MI);
+        p.owner = Some(crate::k8s::pods::OwnerRef {
+            kind: "Job".into(),
+            name: "once".into(),
+        });
+        let s = snapshot_of(
+            vec![p],
+            vec![workload(WorkloadKind::Job, "once", None)],
+            &[("once-x2x4z", u(0.3, 950.0 * MI as f64, 0.4))],
+        );
+        let f = run(&s, Environment::Prod);
+        assert_eq!(f[0].key, "resources.cpuThrottled:workload:team-a:Job/once");
+    }
+
+    #[test]
+    fn a_pod_counts_while_it_has_not_finished() {
+        let usage = [("web-7d9f8c6b5d-x2x4z", u(0.3, 950.0 * MI as f64, 0.4))];
+        let with_phase = |phase: &str| {
+            let mut p = web_pod(
+                "web-7d9f8c6b5d-x2x4z",
+                2000,
+                Some(1000),
+                4096 * MI,
+                1024 * MI,
+            );
+            p.phase = phase.into();
+            run(&snapshot(vec![p], &usage), Environment::Prod).len()
+        };
+        // Как во вкладке «Ресурсы»: не работают только завершённые поды.
+        for phase in ["Running", "Pending", "Unknown"] {
+            assert_eq!(with_phase(phase), 3, "{phase}");
+        }
+        for phase in ["Succeeded", "Failed"] {
+            assert_eq!(with_phase(phase), 0, "{phase}");
+        }
     }
 
     #[test]

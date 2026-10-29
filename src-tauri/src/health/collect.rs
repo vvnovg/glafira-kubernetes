@@ -337,6 +337,7 @@ fn workload_snap(f: WorkloadFacts) -> WorkloadSnap {
         WorkloadKind::Deployment | WorkloadKind::DeploymentConfig
     );
     WorkloadSnap {
+        cron: f.cron,
         kind: f.row.kind,
         name: f.row.name,
         created: f.row.created,
@@ -563,25 +564,7 @@ async fn project(
         rd.list("resourcequotas", n, rd.r.list::<ResourceQuota>(n, &lp)),
         rd.list("secrets", n, rd.r.names::<Secret>(ns)),
     );
-    // Потребление за 24 ч — агрегирующими запросами по проекту (три запроса под одним слотом).
-    let usage = match metrics {
-        Some(src) => {
-            rd.read("resources", n, async move {
-                crate::resources::project::pod_container_use(
-                    src,
-                    ns,
-                    RESOURCES_WINDOW_DAYS,
-                    now,
-                    false,
-                )
-                .await
-                .map_err(|f| f.error)
-            })
-            .await
-        }
-        None => None,
-    };
-    let (route_objs, gateway_objs, http_objs, grpc_objs) = tokio::join!(
+    let (route_objs, gateway_objs, http_objs, grpc_objs, usage) = tokio::join!(
         async {
             match groups.routes {
                 true => dynamic("routes", routes()).await,
@@ -604,6 +587,29 @@ async fn project(
             match groups.gateway_api {
                 true => dynamic("grpcroutes", grpc_routes()).await,
                 false => None,
+            }
+        },
+        // Потребление за 24 ч — агрегирующими запросами по проекту (три запроса под одним
+        // слотом). Медленный источник держит только это чтение, а не чтение маршрутов. Ответ 404
+        // источника или прокси API-сервера — такой же разрыв, как остальные ошибки: непрочитанное
+        // не проверено, а не «вида нет» (`read_required`, не `read`).
+        async {
+            match metrics {
+                Some(src) => {
+                    rd.read_required("resources", n, async move {
+                        crate::resources::project::pod_container_use(
+                            src,
+                            ns,
+                            RESOURCES_WINDOW_DAYS,
+                            now,
+                            false,
+                        )
+                        .await
+                        .map_err(|f| f.error)
+                    })
+                    .await
+                }
+                None => None,
             }
         },
     );
@@ -1249,6 +1255,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn metrics_not_found_is_a_gap_not_an_absent_kind() {
+        // 404 источника (HTTP) или прокси API-сервера к сервису, которого нет: «вида нет» тут
+        // не бывает, правила `resources.*` не проверены, и проверка частичная.
+        let (client, _server) = mock_raw(|_| list("List", vec![]));
+        let r = ReadClient::new(client, Duration::from_secs(5));
+        let missing = FakeSource::new(|_, _| {
+            Err(crate::metrics::prometheus::Failure::from_error(
+                crate::k8s::errors::from_status(
+                    &kube::core::Status::failure(
+                        "services \"prometheus-k8s\" not found",
+                        "NotFound",
+                    )
+                    .with_code(404),
+                ),
+            ))
+        });
+        let s = collect(
+            &r,
+            &info(admin()),
+            &sample_profile("c1"),
+            Some(&["a".to_string()]),
+            LIMITS,
+            NOW,
+            Some(&missing),
+        )
+        .await;
+        assert!(s.projects[0].usage.is_none());
+        assert!(
+            gap_lines(&s).contains(&"a resources NOT_FOUND".to_string()),
+            "{:?}",
+            gap_lines(&s)
+        );
+        assert!(s.coverage.partial());
+    }
+
+    #[tokio::test]
+    async fn a_job_remembers_the_cronjob_it_came_from() {
+        let job = |name: &str, owners: Value| {
+            json!({"metadata": {"name": name, "ownerReferences": owners},
+                "spec": {"template": {"spec": {"containers": []}}}})
+        };
+        let (client, _server) = mock_raw(move |s| match s.path() {
+            p if p.ends_with("/jobs") => list(
+                "JobList",
+                vec![
+                    job(
+                        "report-29000",
+                        json!([{"apiVersion": "batch/v1", "kind": "CronJob",
+                            "name": "report", "uid": "u1", "controller": true}]),
+                    ),
+                    job("once", json!([])),
+                ],
+            ),
+            _ => list("List", vec![]),
+        });
+        let r = ReadClient::new(client, Duration::from_secs(5));
+        let s = collect(
+            &r,
+            &info(admin()),
+            &sample_profile("c1"),
+            Some(&["a".to_string()]),
+            LIMITS,
+            NOW,
+            None,
+        )
+        .await;
+        let cron: Vec<_> = s.projects[0]
+            .workloads
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|w| (w.name.as_str(), w.cron.as_deref()))
+            .collect();
+        assert_eq!(cron, [("report-29000", Some("report")), ("once", None)]);
+    }
+
+    #[tokio::test]
     async fn an_absent_kind_is_not_a_gap() {
         // Gateway API 1.0 без GRPCRoute v1 и кластер без IngressClass отвечают 404.
         let (client, _server) = mock_raw(|s| match s.path() {
@@ -1501,6 +1584,7 @@ mod tests {
                 })
                 .to_vec(),
             template: None,
+            cron: None,
         };
         for kind in WorkloadKind::ALL {
             let w = workload_snap(facts(kind));
