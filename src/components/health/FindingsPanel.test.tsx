@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Annotation, HealthView } from "../../api/types";
+import type { Annotation, HealthView, Proposal } from "../../api/types";
 import { useWorkspace } from "../../state/workspace";
 import { finding } from "../../test/health";
 import { renderWithClient } from "../../test/render";
@@ -19,6 +19,9 @@ vi.mock("../../api/client", async (importOriginal) => {
       setAnnotationStatus: vi.fn(),
       deleteAnnotation: vi.fn(),
       deleteAllAnnotations: vi.fn(),
+      setProposalStatus: vi.fn(),
+      deleteProposal: vi.fn(),
+      deleteAllProposals: vi.fn(),
     },
   };
 });
@@ -138,7 +141,8 @@ describe("FindingsPanel", () => {
     await user.type(screen.getByRole("textbox", { name: "Поиск по имени или проекту" }), "team-b");
     expect(screen.getByText("Deployment team-b/legacy: образы с тегом latest")).toBeInTheDocument();
     expect(screen.queryByText("Deployment team-a/web: образы с тегом latest")).not.toBeInTheDocument();
-    expect(screen.getByText("Под фильтры ничего не подходит.")).toBeInTheDocument();
+    // Пусто и у предложений, и у замечаний.
+    expect(screen.getAllByText("Под фильтры ничего не подходит.")).toHaveLength(2);
   });
 
   it("закрывает и удаляет замечания LLM", async () => {
@@ -159,5 +163,34 @@ describe("FindingsPanel", () => {
     await user.click(within(screen.getByRole("alert")).getByRole("button", { name: "Удалить все замечания LLM" }));
     expect(api.deleteAllAnnotations).toHaveBeenCalledWith("c1");
     await waitFor(() => expect(screen.getByText("Замечаний LLM нет.")).toBeInTheDocument());
+  });
+
+  it("предложения LLM: отклонение с причиной и «Открыть в форме» — вкладка workload'а с формой", async () => {
+    const proposal: Proposal = {
+      id: "p1",
+      severity: "warning",
+      title: "Two replicas",
+      rationale: "one replica is a risk",
+      target: { kind: "workload", namespace: "team-a", name: "web", workloadKind: "Deployment" },
+      change: { kind: "scale", namespace: "team-a", workload: { kind: "Deployment", name: "web" }, replicas: 2 },
+      client: "claude-ai",
+      createdAtMs: 1,
+      updatedAtMs: 1,
+      status: "open",
+    };
+    vi.mocked(api.getHealth).mockResolvedValue(view({ proposals: [proposal] }));
+    vi.mocked(api.setProposalStatus).mockResolvedValue(view({ proposals: [{ ...proposal, status: "rejected", rejectReason: "later" }] }));
+    useWorkspace.setState({ tabs: [], activeId: null });
+    const user = userEvent.setup();
+    renderWithClient(<FindingsPanel connectionId="c1" />);
+    const item = (await screen.findByText("Two replicas")).closest("li")!;
+    expect(within(item).getByText("Реплик: 2")).toBeInTheDocument();
+    await user.click(within(item).getByRole("button", { name: "Открыть в форме" }));
+    expect(useWorkspace.getState().tabs[0]).toMatchObject({ kind: "workload", name: "web", proposal: { proposal } });
+    await user.click(within(item).getByRole("button", { name: "Отклонить" }));
+    await user.type(within(item).getByLabelText("Причина (необязательно)"), "later");
+    await user.click(within(item).getByRole("button", { name: "Отклонить предложение" }));
+    expect(api.setProposalStatus).toHaveBeenCalledWith("c1", "p1", "rejected", "later");
+    await waitFor(() => expect(screen.getByText(/отклонено: later/)).toBeInTheDocument());
   });
 });

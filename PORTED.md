@@ -195,3 +195,7 @@
 | `src/components/common/ConfirmDialog.tsx` | `src/components/common/ConfirmDialog.tsx` | `8bbd0bd` | адаптирован: подписи — имя пода |
 | `src/components/common/ConfirmDialog.test.tsx` | `src/components/common/ConfirmDialog.test.tsx` | `8bbd0bd` | адаптирован: объекты Kubernetes в примерах |
 | `src/lib/useConnection.ts` | `src/lib/useConnection.ts` | `8bbd0bd` | как есть |
+| `src/components/health/ProposalItem.tsx` | `src/components/health/ProposalItem.tsx` | `8bbd0bd` | адаптирован: объект — всегда ссылка, описание изменений Kubernetes |
+| `src/components/health/ProposalItem.test.tsx` | `src/components/health/ProposalItem.test.tsx` | `8bbd0bd` | адаптирован: предложение о репликах |
+| `src/components/health/useActivePrefill.ts` | `src/components/health/useActivePrefill.ts` | `8bbd0bd` | как есть |
+| `src/components/health/proposals.ts` | `src/components/health/proposals.ts` | `8bbd0bd` | адаптирован: вкладка формы и описание изменений Kubernetes (§9) |

@@ -1,5 +1,8 @@
 import { create } from "zustand";
-import type { WorkloadKind } from "../api/types";
+import type { Proposal, WorkloadKind } from "../api/types";
+
+/** Предложение LLM, которое открывается заполненной формой; новый `nonce` — новое «Открыть в форме». */
+export type ProposalPrefill = { proposal: Proposal; nonce: number };
 
 export type TabSpec =
   /** Обзор подключения и кластера: кто вошёл, права, API-сервер, ноды, у OpenShift — обновления и операторы. */
@@ -7,8 +10,8 @@ export type TabSpec =
   | { kind: "nodes"; connectionId: string }
   /** Находки проверки кластера и замечания LLM подключения. */
   | { kind: "findings"; connectionId: string }
-  | { kind: "project"; connectionId: string; namespace: string }
-  | { kind: "workload"; connectionId: string; namespace: string; workloadKind: WorkloadKind; name: string }
+  | { kind: "project"; connectionId: string; namespace: string; proposal?: ProposalPrefill }
+  | { kind: "workload"; connectionId: string; namespace: string; workloadKind: WorkloadKind; name: string; proposal?: ProposalPrefill }
   | { kind: "pod"; connectionId: string; namespace: string; name: string }
   /** folderId — папка нового подключения («Новое подключение здесь»). */
   | { kind: "connection-form"; connectionId: string | null; folderId?: string | null }

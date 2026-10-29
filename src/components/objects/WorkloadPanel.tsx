@@ -12,7 +12,10 @@ import { ReadError } from "../common/ReadError";
 import { RefreshControls, useRefreshInterval } from "../common/RefreshControls";
 import { SubTabs } from "../common/SubTabs";
 import { YamlView } from "../common/YamlView";
-import { WorkloadActions } from "../change/ChangeActions";
+import { WorkloadActions, hintsOf } from "../change/ChangeActions";
+import { ChangeDialog } from "../change/ChangeDialog";
+import { useActivePrefill } from "../health/useActivePrefill";
+import type { ProposalPrefill } from "../../state/workspace";
 import { WorkloadResources } from "../resources/WorkloadResources";
 import { matchWorkload } from "../health/findings";
 import { HealthBlock } from "../health/HealthBlock";
@@ -23,9 +26,25 @@ import { PodList } from "./PodList";
 type Sub = "overview" | "pods" | "resources" | "events" | "yaml";
 
 /** Вкладка workload'а (спец. §6.4): обзор, его поды, ресурсы, события вместе с подами, YAML. */
-export function WorkloadPanel({ connectionId, namespace, kind, name }: { connectionId: string; namespace: string; kind: WorkloadKind; name: string }) {
+export function WorkloadPanel({
+  connectionId,
+  namespace,
+  kind,
+  name,
+  proposal,
+}: {
+  connectionId: string;
+  namespace: string;
+  kind: WorkloadKind;
+  name: string;
+  /** «Открыть в форме» предложения LLM: форма изменения поверх вкладки. */
+  proposal?: ProposalPrefill;
+}) {
   const { t } = useTranslation();
   const [sub, setSub] = useState<Sub>("overview");
+  const [prefill, clearPrefill] = useActivePrefill(proposal);
+  // Подсказки формы ресурсов — из того же запроса, что и обзор.
+  const details = useQuery({ queryKey: ["workload", connectionId, namespace, kind, name], queryFn: () => api.getWorkload(connectionId, namespace, kind, name), enabled: prefill !== undefined });
   const tabs: { id: Sub; label: string }[] = [
     { id: "overview", label: t("objects.tabs.overview") },
     { id: "pods", label: t("objects.tabs.pods") },
@@ -47,6 +66,16 @@ export function WorkloadPanel({ connectionId, namespace, kind, name }: { connect
       {sub === "resources" && <WorkloadResources connectionId={connectionId} namespace={namespace} kind={kind} name={name} />}
       {sub === "events" && <ObjectEvents connectionId={connectionId} namespace={namespace} object={{ kind, name }} />}
       {sub === "yaml" && <YamlView connectionId={connectionId} namespace={namespace} kind={kind} name={name} />}
+      {prefill && (
+        <ChangeDialog
+          key={prefill.nonce}
+          connectionId={connectionId}
+          initial={prefill.proposal.change}
+          proposal={prefill.proposal}
+          hints={details.data ? hintsOf(details.data) : undefined}
+          onClose={clearPrefill}
+        />
+      )}
     </div>
   );
 }

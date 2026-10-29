@@ -12,11 +12,11 @@ vi.mock("@tanstack/react-virtual", () => ({
 
 vi.mock("../../api/client", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../../api/client")>();
-  return { ...orig, api: { getHealth: vi.fn().mockResolvedValue({ lastCheck: null, ignored: [], annotations: [], proposals: [] }), getWorkload: vi.fn(), startWatch: vi.fn(), stopSession: vi.fn(), listEvents: vi.fn(), getYaml: vi.fn() } };
+  return { ...orig, api: { getHealth: vi.fn().mockResolvedValue({ lastCheck: null, ignored: [], annotations: [], proposals: [] }), getWorkload: vi.fn(), listConnections: vi.fn().mockResolvedValue([]), startWatch: vi.fn(), stopSession: vi.fn(), listEvents: vi.fn(), getYaml: vi.fn() } };
 });
 
 import { api } from "../../api/client";
-import type { WorkloadDetails } from "../../api/types";
+import type { Proposal, WorkloadDetails } from "../../api/types";
 import { container, workloadRow } from "../../test/objects";
 import { WorkloadPanel } from "./WorkloadPanel";
 
@@ -89,5 +89,28 @@ describe("WorkloadPanel", () => {
     expect(screen.getByText("report-1")).toBeInTheDocument();
     expect(screen.getByText(/приостановлен/)).toBeInTheDocument();
     expect(screen.queryByText("История выкладки")).not.toBeInTheDocument();
+  });
+
+  it("«Открыть в форме» предложения LLM: форма поверх вкладки, «Отмена» её закрывает", async () => {
+    vi.mocked(api.getWorkload).mockResolvedValue(DETAILS);
+    const user = userEvent.setup();
+    const proposal: Proposal = {
+      id: "p1",
+      severity: "warning",
+      title: "Two replicas",
+      rationale: "r",
+      target: { kind: "workload", namespace: "team-a", name: "web", workloadKind: "Deployment" },
+      change: { kind: "scale", namespace: "team-a", workload: { kind: "Deployment", name: "web" }, replicas: 2 },
+      client: null,
+      createdAtMs: 1,
+      updatedAtMs: 1,
+      status: "open",
+    };
+    renderWithClient(<WorkloadPanel connectionId="c1" namespace="team-a" kind="Deployment" name="web" proposal={{ proposal, nonce: 1 }} />);
+    const dialog = screen.getByRole("dialog", { name: "Реплики: Deployment web" });
+    expect(dialog).toHaveTextContent("Применяется предложение LLM: Two replicas");
+    expect(screen.getByLabelText("Реплики")).toHaveValue(2);
+    await user.click(screen.getByRole("button", { name: "Отмена" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 });

@@ -167,7 +167,7 @@ describe("badge tooltip", () => {
     const b = badgeFor(v, isWorkload);
     expect(b).toMatchObject({ count: 4, severity: "critical" });
     // Внутри строгости: сначала находки, затем замечания; порядок как в данных.
-    expect(b?.items.map((i) => (i.kind === "finding" ? i.finding.target.name : i.note.title))).toEqual(["c1", "Critical note", "w1", "Warning note"]);
+    expect(b?.items.map((i) => (i.kind === "finding" ? i.finding.target.name : i.kind === "note" ? i.note.title : i.proposal.title))).toEqual(["c1", "Critical note", "w1", "Warning note"]);
     expect(badgeTooltip(b!, t)).toBe(
       [
         "Требуют внимания: 4",

@@ -307,7 +307,8 @@
     },
     "health": {
       "check": "Runs the built-in Glafira rules over the cluster, its nodes and up to 50 projects. Severity depends on the connection environment. The check only reads the cluster.",
-      "hidden": "Findings you hid for a particular object. They are not counted in badges; LLM assistants see them marked as hidden."
+      "hidden": "Findings you hid for a particular object. They are not counted in badges; LLM assistants see them marked as hidden.",
+      "proposals": "A change an LLM assistant suggests. Nothing is applied until you open it in a form and confirm; you can edit the values first."
     },
     "resources": {
       "window": "Statistics over the last 1, 7, 14 or 30 days, but not longer than the metrics source keeps. Percentiles are taken per pod, then the worst pod.",
@@ -1259,7 +1260,34 @@
       }
     },
     "proposals": {
-      "applying": "Applying an LLM proposal: {{title}}"
+      "applying": "Applying an LLM proposal: {{title}}",
+      "title": "LLM proposals",
+      "intro": "LLM assistants connected over MCP can propose changes here. Nothing is applied until you open a proposal in a form and confirm it.",
+      "none": "No LLM proposals.",
+      "by": "LLM proposal · {{client}}",
+      "openForm": "Open in form",
+      "readOnly": "The connection is read-only",
+      "reject": "Reject",
+      "reasonPlaceholder": "Reason (optional)",
+      "rejectConfirm": "Reject proposal",
+      "deleteAll": "Delete all LLM proposals",
+      "deleteAllConfirm": "Delete all LLM proposals of this connection?",
+      "status": {
+        "applied": "applied {{when}}",
+        "appliedEdited": "applied with edits {{when}}",
+        "rejected": "rejected",
+        "rejectedWithReason": "rejected: {{reason}}",
+        "withdrawn": "withdrawn"
+      },
+      "appliedAs": "Applied: {{change}}",
+      "change": {
+        "setResources": "Resources:",
+        "remove": "remove",
+        "keep": "keep",
+        "scale": "Replicas: {{replicas}}",
+        "rolloutRestart": "Restart",
+        "setHpaBounds": "HPA {{hpa}} bounds: {{min}}–{{max}}"
+      }
     }
   },
   "change": {

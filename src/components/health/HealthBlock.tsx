@@ -4,6 +4,7 @@ import { useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { badgeFor, badgeTooltip, itemsFor, type Match } from "./findings";
 import { FindingItem, NoteItem, SeverityMark } from "./parts";
+import { ProposalItem } from "./ProposalItem";
 
 /**
  * Значок объекта: число находок и замечаний уровня «критично» и «предупреждение»; в подсказке — их заголовки.
@@ -21,16 +22,21 @@ export function HealthBadge({ connectionId, match }: { connectionId: string; mat
   );
 }
 
-/** Блок «Замечания» на экране объекта: его находки и открытые замечания LLM с действиями. */
+/** Блок «Замечания» на экране объекта: его находки, открытые замечания и предложения LLM с действиями. */
 export function HealthBlock({ connectionId, match, showTarget = false }: { connectionId: string; match: Match; showTarget?: boolean }) {
   const { t } = useTranslation();
   const health = useHealth(connectionId);
   const actions = useHealthActions(connectionId);
   const open = useWorkspace((s) => s.open);
-  const { findings, notes } = itemsFor(health.data, match);
-  if (findings.length === 0 && notes.length === 0) return null;
-  const busy = actions.ignore.isPending || actions.setStatus.isPending || actions.remove.isPending;
-  const error = actions.ignore.error ?? actions.setStatus.error ?? actions.remove.error;
+  const { findings, notes, proposals } = itemsFor(health.data, match);
+  if (findings.length === 0 && notes.length === 0 && proposals.length === 0) return null;
+  const busy =
+    actions.ignore.isPending ||
+    actions.setStatus.isPending ||
+    actions.remove.isPending ||
+    actions.setProposalStatus.isPending ||
+    actions.removeProposal.isPending;
+  const error = actions.ignore.error ?? actions.setStatus.error ?? actions.remove.error ?? actions.setProposalStatus.error ?? actions.removeProposal.error;
   return (
     <section className="health-block" aria-label={t("health.title")}>
       <h3>
@@ -60,6 +66,17 @@ export function HealthBlock({ connectionId, match, showTarget = false }: { conne
             showTarget={showTarget}
             onStatus={(status) => actions.setStatus.mutate({ id: a.id, status })}
             onDelete={() => actions.remove.mutate(a.id)}
+          />
+        ))}
+        {proposals.map((p) => (
+          <ProposalItem
+            key={p.id}
+            connectionId={connectionId}
+            proposal={p}
+            busy={busy}
+            showTarget={showTarget}
+            onStatus={(status, reason) => actions.setProposalStatus.mutateAsync({ id: p.id, status, reason }).then(() => true, () => false)}
+            onDelete={() => actions.removeProposal.mutate(p.id)}
           />
         ))}
       </ul>
