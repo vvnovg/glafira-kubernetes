@@ -181,7 +181,7 @@ pub async fn get_project_usage_impl(
             }
             let (s, cid, ns) = (st.clone(), connection_id.clone(), namespace.clone());
             let read = st.read_in(&connection_id, &namespace, |c| async move {
-                let sel = crate::metrics::select::for_connection(&s, &cid, &c, false).await?;
+                let sel = crate::metrics::select::for_connection(&s, &cid, &c, refresh).await?;
                 let groups = c.info.api_groups;
                 crate::resources::project::project_usage(
                     &c.reader(),

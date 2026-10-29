@@ -1373,7 +1373,14 @@
       "oom": "OOM",
       "restarts": "Restarts",
       "pod": "Pod",
-      "memoryNow": "Memory"
+      "memoryNow": "Memory",
+      "workload": "Workload",
+      "pods": "Pods",
+      "requests": "Requests CPU / memory",
+      "limits": "Limits CPU / memory",
+      "usage": "Usage p95 CPU / max memory",
+      "reserve": "Reserve",
+      "risks": "Risks and excess"
     },
     "totals": "For the whole workload ({{replicas}} replicas): requests CPU {{requestsCpu}}, memory {{requestsMemory}}; limits CPU {{limitsCpu}}, memory {{limitsMemory}}",
     "hpaShift": "HPA {{hpa}}: the {{resource}} target {{target}} % is relative to the request; for the same scaling with the new request set it to {{equivalent}} %",
@@ -1401,6 +1408,26 @@
     },
     "chartFailed": "The chart could not be loaded",
     "currentOnly": "Current values from metrics.k8s.io only: no history, the window does not apply",
-    "noPodUsage": "No usage data for this pod"
+    "noPodUsage": "No usage data for this pod",
+    "sort": "Sort",
+    "sortRisk": "By risk",
+    "sortReserve": "By reserve",
+    "onlyActionable": "Only with recommendations",
+    "filter": "Workload name",
+    "collecting": "Collecting the project usage (up to 45 s)…",
+    "collected": "collected {{when}}",
+    "truncated": "The list of workloads or pods is incomplete: the totals cover only what was read.",
+    "quotas": "Quotas:",
+    "noWorkloads": "No workloads",
+    "moreRows": "Showing {{shown}} of {{total}}: narrow the list by name",
+    "risk": {
+      "throttled": "{{container}}: throttling {{value}} %",
+      "oom": "{{container}}: OOM {{count}}",
+      "memoryNearLimit": "{{container}}: memory {{max}} of {{limit}}"
+    },
+    "excess": {
+      "cpu": "{{container}}: CPU request {{request}} with p95 {{usage}}",
+      "memory": "{{container}}: memory request {{request}} with max {{usage}}"
+    }
   }
 }

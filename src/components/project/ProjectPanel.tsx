@@ -17,8 +17,9 @@ import { ProjectOverview } from "./ProjectOverview";
 import { QuotasView } from "./QuotasView";
 import { StorageView } from "./StorageView";
 import { WorkloadsTable } from "./WorkloadsTable";
+import { ProjectUsageView } from "../resources/ProjectUsageView";
 
-type Sub = "overview" | "workloads" | "pods" | "network" | "config" | "storage" | "events" | "quotas";
+type Sub = "overview" | "workloads" | "pods" | "network" | "config" | "storage" | "events" | "resources" | "quotas";
 
 /** Ресурсы «Сети»: подвкладка видна, если читается хоть один. */
 const NETWORK_RESOURCES = [
@@ -45,6 +46,7 @@ export function ProjectPanel({ connectionId, namespace }: { connectionId: string
     { id: "config", label: t("project.tabs.config"), visible: canList(a, "configmaps", "secrets") },
     { id: "storage", label: t("project.tabs.storage"), visible: canList(a, "persistentvolumeclaims") },
     { id: "events", label: t("objects.tabs.events"), visible: canList(a, "events") },
+    { id: "resources", label: t("objects.tabs.resources"), visible: canList(a, "pods") },
     { id: "quotas", label: t("project.tabs.quotas"), visible: canList(a, "resourcequotas", "limitranges") },
   ];
   const visible = tabs.filter((x) => x.visible);
@@ -63,6 +65,7 @@ export function ProjectPanel({ connectionId, namespace }: { connectionId: string
       {active === "config" && <ConfigView connectionId={connectionId} namespace={namespace} />}
       {active === "storage" && <StorageView connectionId={connectionId} namespace={namespace} />}
       {active === "events" && <ProjectEvents connectionId={connectionId} namespace={namespace} />}
+      {active === "resources" && <ProjectUsageView connectionId={connectionId} namespace={namespace} />}
       {active === "quotas" && <QuotasView connectionId={connectionId} namespace={namespace} />}
     </div>
   );

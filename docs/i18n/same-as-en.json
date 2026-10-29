@@ -38,6 +38,8 @@
     "change.fieldName.memoryLimit",
     "resources.init",
     "resources.col.cpu",
-    "resources.col.oom"
+    "resources.col.oom",
+    "resources.col.workload",
+    "resources.risk.oom"
   ]
 }

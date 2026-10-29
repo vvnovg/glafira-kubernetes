@@ -1393,7 +1393,14 @@
       "oom": "OOM",
       "restarts": "Рестарты",
       "pod": "Под",
-      "memoryNow": "Память"
+      "memoryNow": "Память",
+      "workload": "Workload",
+      "pods": "Поды",
+      "requests": "Requests CPU / память",
+      "limits": "Limits CPU / память",
+      "usage": "Потребление p95 CPU / max памяти",
+      "reserve": "Резерв",
+      "risks": "Риски и избыток"
     },
     "totals": "На весь workload ({{replicas}} реплик): requests CPU {{requestsCpu}}, память {{requestsMemory}}; limits CPU {{limitsCpu}}, память {{limitsMemory}}",
     "hpaShift": "HPA {{hpa}}: цель {{resource}} {{target}} % считается от request; чтобы масштабирование осталось прежним при новом request, поставьте {{equivalent}} %",
@@ -1421,6 +1428,26 @@
     },
     "chartFailed": "График не загрузился",
     "currentOnly": "Только текущие значения metrics.k8s.io: истории нет, окно не применяется",
-    "noPodUsage": "Нет данных о потреблении пода"
+    "noPodUsage": "Нет данных о потреблении пода",
+    "sort": "Сортировка",
+    "sortRisk": "По риску",
+    "sortReserve": "По резерву",
+    "onlyActionable": "Только с рекомендациями",
+    "filter": "Имя workload'а",
+    "collecting": "Собираю потребление проекта (до 45 с)…",
+    "collected": "собрано {{when}}",
+    "truncated": "Список workloads или подов неполный: итоги — только по прочитанному.",
+    "quotas": "Квоты:",
+    "noWorkloads": "Workloads нет",
+    "moreRows": "Показаны {{shown}} из {{total}}: сузьте список по имени",
+    "risk": {
+      "throttled": "{{container}}: троттлинг {{value}} %",
+      "oom": "{{container}}: OOM {{count}}",
+      "memoryNearLimit": "{{container}}: память {{max}} из {{limit}}"
+    },
+    "excess": {
+      "cpu": "{{container}}: CPU request {{request}} при p95 {{usage}}",
+      "memory": "{{container}}: memory request {{request}} при max {{usage}}"
+    }
   }
 }
