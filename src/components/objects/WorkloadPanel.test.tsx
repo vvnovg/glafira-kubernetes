@@ -12,12 +12,26 @@ vi.mock("@tanstack/react-virtual", () => ({
 
 vi.mock("../../api/client", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../../api/client")>();
-  return { ...orig, api: { getHealth: vi.fn().mockResolvedValue({ lastCheck: null, ignored: [], annotations: [] }), getWorkload: vi.fn(), startWatch: vi.fn(), stopSession: vi.fn(), listEvents: vi.fn(), getYaml: vi.fn() } };
+  return {
+    ...orig,
+    api: {
+      getHealth: vi.fn().mockResolvedValue({ lastCheck: null, ignored: [], annotations: [], proposals: [] }),
+      getWorkload: vi.fn(),
+      listConnections: vi.fn().mockResolvedValue([]),
+      startWatch: vi.fn(),
+      stopSession: vi.fn(),
+      listEvents: vi.fn(),
+      getYaml: vi.fn(),
+      previewChange: vi.fn(),
+      applyChange: vi.fn(),
+    },
+  };
 });
 
 import { api } from "../../api/client";
-import type { WorkloadDetails } from "../../api/types";
+import type { Change, Proposal, WorkloadDetails } from "../../api/types";
 import { container, workloadRow } from "../../test/objects";
+import { newProfile } from "../connections/profile";
 import { WorkloadPanel } from "./WorkloadPanel";
 
 const DETAILS: WorkloadDetails = {
@@ -41,6 +55,8 @@ const DETAILS: WorkloadDetails = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Кнопки изменений читают профиль подключения из кэша ["connections"]; тест применения подставляет свой.
+  vi.mocked(api.listConnections).mockResolvedValue([]);
   vi.mocked(api.getWorkload).mockResolvedValue(DETAILS);
   vi.mocked(api.startWatch).mockResolvedValue("s1");
   vi.mocked(api.stopSession).mockResolvedValue(true);
@@ -87,5 +103,49 @@ describe("WorkloadPanel", () => {
     expect(screen.getByText("report-1")).toBeInTheDocument();
     expect(screen.getByText(/приостановлен/)).toBeInTheDocument();
     expect(screen.queryByText("История выкладки")).not.toBeInTheDocument();
+  });
+
+  const proposal: Proposal = {
+    id: "p1",
+    severity: "warning",
+    title: "Two replicas",
+    rationale: "r",
+    target: { kind: "workload", namespace: "team-a", name: "web", workloadKind: "Deployment" },
+    change: { kind: "scale", namespace: "team-a", workload: { kind: "Deployment", name: "web" }, replicas: 2 },
+    client: null,
+    createdAtMs: 1,
+    updatedAtMs: 1,
+    status: "open",
+  };
+
+  it("«Открыть в форме» предложения LLM: форма поверх вкладки, «Отмена» её закрывает", async () => {
+    vi.mocked(api.getWorkload).mockResolvedValue(DETAILS);
+    const user = userEvent.setup();
+    renderWithClient(<WorkloadPanel connectionId="c1" namespace="team-a" kind="Deployment" name="web" proposal={{ proposal, nonce: 1 }} />);
+    const dialog = screen.getByRole("dialog", { name: "Реплики: Deployment web" });
+    expect(dialog).toHaveTextContent("Применяется предложение LLM: Two replicas");
+    expect(screen.getByLabelText("Реплики")).toHaveValue(2);
+    await user.click(screen.getByRole("button", { name: "Отмена" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("предложение LLM: «Проверить» → «Применить» отправляет applyChange с id предложения", async () => {
+    vi.mocked(api.listConnections).mockResolvedValue([{ ...newProfile(), id: "c1", name: "dev", environment: "dev" }]);
+    vi.mocked(api.previewChange).mockImplementation(async (_id, change) => ({
+      change,
+      version: "g4",
+      diff: [{ container: null, field: "replicas", before: "3", after: "2" }],
+      warnings: [],
+      dryRun: { status: "passed" },
+      confirmPodName: false,
+    }));
+    vi.mocked(api.applyChange).mockImplementation(async (_id, change) => change);
+    const user = userEvent.setup();
+    renderWithClient(<WorkloadPanel connectionId="c1" namespace="team-a" kind="Deployment" name="web" proposal={{ proposal, nonce: 1 }} />);
+    await user.click(screen.getByRole("button", { name: "Проверить" }));
+    await user.click(await screen.findByRole("button", { name: "Применить" }));
+    const sent: Change = proposal.change;
+    await waitFor(() => expect(api.applyChange).toHaveBeenCalledWith("c1", sent, "g4", null, null, "p1"));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 });

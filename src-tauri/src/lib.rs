@@ -1,18 +1,23 @@
 #[macro_use]
 pub mod i18n;
 pub mod auth;
+pub mod change;
 pub mod commands;
 pub mod der;
 mod dock_name;
 pub mod error;
+pub mod guard;
 pub mod health;
 pub mod k8s;
 pub mod logging;
 pub mod logs;
 pub mod mcp;
+pub mod metrics;
+pub mod ops;
 pub mod platform;
 pub mod policy;
 pub mod product;
+pub mod resources;
 pub mod secrets;
 pub mod sessions;
 pub mod settings;
@@ -153,12 +158,22 @@ pub fn run() {
             commands::objects::list_pvcs,
             commands::objects::get_quotas,
             commands::objects::get_yaml,
+            commands::resources::get_metrics_source_status,
+            commands::resources::get_workload_usage,
+            commands::resources::get_pod_usage,
+            commands::resources::recommend_resources,
+            commands::resources::get_project_usage,
+            commands::changes::preview_change,
+            commands::changes::apply_change,
             commands::health::run_health_check,
             commands::health::get_health,
             commands::health::set_finding_ignored,
             commands::health::set_annotation_status,
             commands::health::delete_annotation,
             commands::health::delete_all_annotations,
+            commands::health::set_proposal_status,
+            commands::health::delete_proposal,
+            commands::health::delete_all_proposals,
             commands::mcp::get_mcp_status,
             commands::mcp::set_mcp_enabled,
             commands::mcp::answer_mcp_approval,

@@ -120,6 +120,20 @@ pub enum ReadOp {
         namespace: String,
         workload: WorkloadRef,
     },
+    /// Статистика потребления workload'а за окно (`get_resource_usage`).
+    ResourceUsage {
+        connection_id: String,
+        namespace: String,
+        workload: WorkloadRef,
+        window_days: u32,
+    },
+    /// Рекомендация requests и limits (`recommend_resources`).
+    RecommendResources {
+        connection_id: String,
+        namespace: String,
+        workload: WorkloadRef,
+        window_days: u32,
+    },
 }
 
 impl ReadOp {
@@ -137,7 +151,9 @@ impl ReadOp {
             | ReadOp::ListEvents { connection_id, .. }
             | ReadOp::Quotas { connection_id, .. }
             | ReadOp::Network { connection_id, .. }
-            | ReadOp::WorkloadState { connection_id, .. } => Some(connection_id),
+            | ReadOp::WorkloadState { connection_id, .. }
+            | ReadOp::ResourceUsage { connection_id, .. }
+            | ReadOp::RecommendResources { connection_id, .. } => Some(connection_id),
         }
     }
 
@@ -151,7 +167,9 @@ impl ReadOp {
             | ReadOp::ListEvents { namespace, .. }
             | ReadOp::Quotas { namespace, .. }
             | ReadOp::Network { namespace, .. }
-            | ReadOp::WorkloadState { namespace, .. } => Some(namespace),
+            | ReadOp::WorkloadState { namespace, .. }
+            | ReadOp::ResourceUsage { namespace, .. }
+            | ReadOp::RecommendResources { namespace, .. } => Some(namespace),
             _ => None,
         }
     }
@@ -172,6 +190,8 @@ pub enum ReadOutput {
     Quotas(Quotas),
     Network(Network),
     WorkloadState(WorkloadState),
+    ResourceUsage(crate::resources::ResourceUsage),
+    Recommendation(crate::resources::Recommendation),
 }
 
 /// Источник данных шлюза. Реализация приложения проверяет `llmAccess` подключения и в `read`,
@@ -182,6 +202,12 @@ pub trait Backend: Hooks {
     fn read(&self, op: ReadOp) -> BoxFuture<'_, Result<ReadOutput, BackendError>>;
     /// Проверка кластера и замечания: кластер только читается, замечания пишутся в Glafira.
     fn health(&self, op: HealthOp) -> BoxFuture<'_, Result<HealthOutput, BackendError>>;
+    /// Предложения изменений: кластер только читается (проверка предложения), предложение
+    /// пишется в Glafira, применяет его человек.
+    fn proposals(
+        &self,
+        op: crate::proposals::ProposalOp,
+    ) -> BoxFuture<'_, Result<crate::proposals::ProposalOutput, BackendError>>;
 }
 
 /// Часть ответа: данные или причина, по которой их нет (права, ошибка чтения).

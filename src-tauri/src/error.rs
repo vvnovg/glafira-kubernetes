@@ -19,6 +19,11 @@ pub enum ErrorCode {
     InvalidInput,
     ReadOnly,
     ConfirmationRequired,
+    /// Отказ admission-контроллера на dry-run или при применении: webhook, политика (спец. §9).
+    /// `LimitRange` и квоту шаблона workload'а API-сервер не проверяет: их проверяет Rust.
+    AdmissionDenied,
+    /// Ни один источник метрик не подошёл (спец. §7.1).
+    MetricsUnavailable,
     Internal,
 }
 
@@ -151,6 +156,8 @@ mod tests {
                 "CONFIRMATION_REQUIRED",
                 false,
             ),
+            (ErrorCode::AdmissionDenied, "ADMISSION_DENIED", false),
+            (ErrorCode::MetricsUnavailable, "METRICS_UNAVAILABLE", false),
             (ErrorCode::Internal, "INTERNAL", false),
         ] {
             assert_eq!(serde_json::to_value(code).unwrap(), name);

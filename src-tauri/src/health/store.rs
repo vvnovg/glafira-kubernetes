@@ -1,6 +1,6 @@
-//! Файл `health/<connectionId>.json` (спец. §8.1, §13): последняя проверка, скрытые находки и
-//! замечания LLM. Срок замечания — 7 дней с создания; открытых — не больше 200 на подключение.
-//! Предложения LLM (этап O3) добавятся в этот же файл.
+//! Файл `health/<connectionId>.json` (спец. §8.1, §10.5, §13): последняя проверка, скрытые
+//! находки, замечания и предложения LLM. Срок замечания и предложения — 7 дней с создания;
+//! открытых замечаний — не больше 200, предложений — 50 на подключение.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -8,6 +8,11 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 use super::model::{Finding, Severity, Target};
+use super::proposals::{
+    MAX_OPEN_PROPOSALS, MAX_REJECT_REASON_CHARS, MAX_RELATED_KEY_CHARS, PROPOSAL_TTL_MS, Proposal,
+    ProposalStatus,
+};
+use crate::change::{Change, applied_as_proposed};
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::storage::fs::{read_json_or_quarantine, write_json};
 use crate::storage::profile::Environment;
@@ -110,6 +115,9 @@ pub struct HealthFile {
     pub ignored: Vec<Ignored>,
     #[serde(default)]
     pub annotations: Vec<Annotation>,
+    /// Предложения LLM: любой статус до истечения срока.
+    #[serde(default)]
+    pub proposals: Vec<Proposal>,
 }
 
 impl HealthFile {
@@ -120,6 +128,8 @@ impl HealthFile {
     fn purge(&mut self, now_ms: i64) {
         self.annotations
             .retain(|a| now_ms - a.created_at_ms < ANNOTATION_TTL_MS);
+        self.proposals
+            .retain(|p| now_ms - p.created_at_ms < PROPOSAL_TTL_MS);
     }
 }
 
@@ -133,6 +143,10 @@ pub struct Author {
 impl Author {
     fn owns(&self, a: &Annotation) -> bool {
         self.owns_record(&a.client, a.session_id.as_deref())
+    }
+
+    fn owns_proposal(&self, p: &Proposal) -> bool {
+        self.owns_record(&p.client, p.session_id.as_deref())
     }
 
     /// Именованный клиент владеет записями с тем же именем; безымянный — только своей сессии.
@@ -168,6 +182,45 @@ pub enum Removed {
     Removed,
     NotFound,
     NotOwner,
+}
+
+/// Новое предложение LLM (спец. §10.5).
+#[derive(Debug, Clone)]
+pub struct NewProposal {
+    pub severity: Severity,
+    pub title: String,
+    pub rationale: String,
+    pub change: Change,
+    pub related_rule_id: Option<String>,
+    pub related_finding_key: Option<String>,
+    pub author: Author,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Proposed {
+    Created(String),
+    /// Открытое предложение того же автора, вида и объекта обновлено.
+    Updated(String),
+    LimitReached,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Withdrawn {
+    Withdrawn,
+    NotFound,
+    NotOwner,
+    /// Уже не открытое: применено, отклонено или отозвано раньше.
+    Closed(ProposalStatus),
+}
+
+/// Итог отметки «применено» в команде изменения (спец. §9, шаг 5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MarkApplied {
+    Applied {
+        as_proposed: bool,
+    },
+    /// Предложения нет, оно закрыто или относится к другому изменению: операция прошла, отметки нет.
+    Skipped(&'static str),
 }
 
 /// Текст замечания: без управляющих символов (кроме перевода строки), не длиннее `max` символов.
@@ -452,6 +505,209 @@ impl HealthStore {
         })
     }
 
+    // ---- Предложения LLM ----
+
+    fn proposal_not_found() -> crate::error::AppError {
+        app_err!(
+            ErrorCode::NotFound,
+            "errors.health.proposalNotFound",
+            "The proposal was deleted or has expired"
+        )
+    }
+
+    /// `propose_change` из MCP: повтор того же автора по тому же виду и объекту среди открытых
+    /// обновляет запись; открытых — не больше `MAX_OPEN_PROPOSALS`.
+    pub fn propose(
+        &self,
+        connection_id: &str,
+        new: NewProposal,
+        now_ms: i64,
+    ) -> AppResult<Proposed> {
+        let title = sanitize(&new.title, MAX_TITLE_CHARS);
+        let rationale = sanitize(&new.rationale, MAX_BODY_CHARS);
+        // Ключ находки приходит от модели: без управляющих символов и не длиннее предела; пустой
+        // после очистки — как не заданный.
+        let related_finding_key = new
+            .related_finding_key
+            .map(|k| sanitize(&k, MAX_RELATED_KEY_CHARS))
+            .filter(|k| !k.is_empty());
+        let change = new.change.trimmed();
+        let target = change.target();
+        self.update(connection_id, now_ms, |f| {
+            if let Some(p) = f.proposals.iter_mut().find(|p| {
+                p.status == ProposalStatus::Open
+                    && new.author.owns_proposal(p)
+                    && p.change.kind_name() == change.kind_name()
+                    && p.target == target
+            }) {
+                p.severity = new.severity;
+                p.title = title;
+                p.rationale = rationale;
+                p.change = change;
+                p.related_rule_id = new.related_rule_id;
+                p.related_finding_key = related_finding_key;
+                p.updated_at_ms = now_ms;
+                return Proposed::Updated(p.id.clone());
+            }
+            let open = f
+                .proposals
+                .iter()
+                .filter(|p| p.status == ProposalStatus::Open)
+                .count();
+            if open >= MAX_OPEN_PROPOSALS {
+                return Proposed::LimitReached;
+            }
+            let id = uuid::Uuid::new_v4().to_string();
+            let session_id = new
+                .author
+                .client
+                .is_none()
+                .then(|| new.author.session_id.clone());
+            f.proposals.push(Proposal {
+                id: id.clone(),
+                severity: new.severity,
+                title,
+                rationale,
+                target,
+                change,
+                related_rule_id: new.related_rule_id,
+                related_finding_key,
+                client: new.author.client,
+                session_id,
+                created_at_ms: now_ms,
+                updated_at_ms: now_ms,
+                status: ProposalStatus::Open,
+                closed_at_ms: None,
+                applied_as_proposed: None,
+                applied_change: None,
+                reject_reason: None,
+            });
+            Proposed::Created(id)
+        })
+    }
+
+    /// Человек: «Отклонить» (из открытого, с необязательной причиной) или «Открыть снова»
+    /// (из отклонённого). Применённое и отозванное не меняются.
+    pub fn set_proposal_status(
+        &self,
+        connection_id: &str,
+        proposal_id: &str,
+        status: ProposalStatus,
+        reason: Option<String>,
+        now_ms: i64,
+    ) -> AppResult<()> {
+        let reason = reason
+            .map(|r| sanitize(&r, MAX_REJECT_REASON_CHARS))
+            .filter(|r| !r.is_empty());
+        self.update(connection_id, now_ms, |f| {
+            let Some(p) = f.proposals.iter_mut().find(|p| p.id == proposal_id) else {
+                return Err(Self::proposal_not_found());
+            };
+            match (p.status, status) {
+                (ProposalStatus::Open, ProposalStatus::Rejected) => {
+                    p.status = ProposalStatus::Rejected;
+                    p.closed_at_ms = Some(now_ms);
+                    p.reject_reason = reason;
+                }
+                (ProposalStatus::Rejected, ProposalStatus::Open) => {
+                    p.status = ProposalStatus::Open;
+                    p.closed_at_ms = None;
+                    p.reject_reason = None;
+                    p.updated_at_ms = now_ms;
+                }
+                (from, to) => {
+                    return Err(app_err!(
+                        ErrorCode::InvalidInput,
+                        "errors.health.proposalClosed",
+                        "The proposal is {{status}} and cannot be changed to {{to}}",
+                        status = from.as_str(),
+                        to = to.as_str()
+                    ));
+                }
+            }
+            Ok(())
+        })?
+    }
+
+    /// Команда изменения после успеха в кластере: открытое предложение того же вида и объекта
+    /// становится `applied`; иначе отметка пропускается (операция уже прошла) и файл не пишется.
+    pub fn mark_applied(
+        &self,
+        connection_id: &str,
+        proposal_id: &str,
+        applied: &Change,
+        now_ms: i64,
+    ) -> AppResult<MarkApplied> {
+        self.update_if(connection_id, now_ms, |f| {
+            let Some(p) = f.proposals.iter_mut().find(|p| p.id == proposal_id) else {
+                return (MarkApplied::Skipped("proposal not found"), false);
+            };
+            if p.status != ProposalStatus::Open {
+                return (MarkApplied::Skipped("proposal is not open"), false);
+            }
+            if p.change.kind_name() != applied.kind_name() || p.target != applied.target() {
+                return (
+                    MarkApplied::Skipped("proposal is about another change"),
+                    false,
+                );
+            }
+            let as_proposed = applied_as_proposed(&p.change, applied);
+            p.status = ProposalStatus::Applied;
+            p.closed_at_ms = Some(now_ms);
+            p.applied_as_proposed = Some(as_proposed);
+            // С правками — что применено фактически; как предложено — оно совпадает с `change`.
+            p.applied_change = (!as_proposed).then(|| applied.clone());
+            (MarkApplied::Applied { as_proposed }, true)
+        })
+    }
+
+    /// `withdraw_proposal` из MCP: только своё и только открытое.
+    pub fn withdraw_own(
+        &self,
+        connection_id: &str,
+        proposal_id: &str,
+        author: &Author,
+        now_ms: i64,
+    ) -> AppResult<Withdrawn> {
+        self.update(connection_id, now_ms, |f| {
+            let Some(p) = f.proposals.iter_mut().find(|p| p.id == proposal_id) else {
+                return Withdrawn::NotFound;
+            };
+            if !author.owns_proposal(p) {
+                return Withdrawn::NotOwner;
+            }
+            if p.status != ProposalStatus::Open {
+                return Withdrawn::Closed(p.status);
+            }
+            p.status = ProposalStatus::Withdrawn;
+            p.closed_at_ms = Some(now_ms);
+            Withdrawn::Withdrawn
+        })
+    }
+
+    pub fn delete_proposal(
+        &self,
+        connection_id: &str,
+        proposal_id: &str,
+        now_ms: i64,
+    ) -> AppResult<()> {
+        let found = self.update(connection_id, now_ms, |f| {
+            let n = f.proposals.len();
+            f.proposals.retain(|p| p.id != proposal_id);
+            f.proposals.len() < n
+        })?;
+        found.then_some(()).ok_or_else(Self::proposal_not_found)
+    }
+
+    /// «Удалить все предложения LLM» у подключения.
+    pub fn delete_all_proposals(&self, connection_id: &str, now_ms: i64) -> AppResult<usize> {
+        self.update(connection_id, now_ms, |f| {
+            let n = f.proposals.len();
+            f.proposals.clear();
+            n
+        })
+    }
+
     /// Удаление вместе с подключением.
     pub fn delete_connection(&self, connection_id: &str) -> AppResult<()> {
         let _g = self.lock.lock_safe();
@@ -500,6 +756,376 @@ mod tests {
             Annotated::Created(id) => id,
             other => panic!("{other:?}"),
         }
+    }
+
+    fn scale(workload: &str, replicas: i32) -> Change {
+        Change::Scale {
+            namespace: "team-a".into(),
+            workload: crate::k8s::pods::WorkloadRef {
+                kind: crate::k8s::workloads::WorkloadKind::Deployment,
+                name: workload.into(),
+            },
+            replicas,
+        }
+    }
+
+    fn proposal(change: Change, who: Author) -> NewProposal {
+        NewProposal {
+            severity: Severity::Warning,
+            title: "Scale web out".into(),
+            rationale: "single replica\nis risky".into(),
+            change,
+            related_rule_id: Some("workload.singleReplica".into()),
+            related_finding_key: None,
+            author: who,
+        }
+    }
+
+    fn proposed_id(p: Proposed) -> String {
+        match p {
+            Proposed::Created(id) => id,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn proposal_of_same_author_kind_and_object_is_updated() {
+        let (d, s) = store();
+        let claude = || author(Some("claude-ai"), "s1");
+        let mut first = scale("web", 2);
+        if let Change::Scale { workload, .. } = &mut first {
+            workload.name = " web ".into();
+        }
+        let id = proposed_id(s.propose(ID, proposal(first, claude()), T0).unwrap());
+        let mut again = proposal(scale("web", 3), author(Some("claude-ai"), "s9"));
+        again.title = "  New title ".into();
+        again.severity = Severity::Critical;
+        assert_eq!(
+            s.propose(ID, again, T0 + 5).unwrap(),
+            Proposed::Updated(id.clone())
+        );
+        // Другой вид по тому же workload'у и другой автор — новые записи.
+        let restart = Change::RolloutRestart {
+            namespace: "team-a".into(),
+            workload: crate::k8s::pods::WorkloadRef {
+                kind: crate::k8s::workloads::WorkloadKind::Deployment,
+                name: "web".into(),
+            },
+        };
+        proposed_id(s.propose(ID, proposal(restart, claude()), T0).unwrap());
+        proposed_id(
+            s.propose(
+                ID,
+                proposal(scale("web", 2), author(Some("cursor"), "s2")),
+                T0,
+            )
+            .unwrap(),
+        );
+        let f = s.load(ID, T0 + 5).unwrap();
+        assert_eq!(f.proposals.len(), 3);
+        let p = f.proposals.iter().find(|p| p.id == id).unwrap();
+        assert_eq!(p.title, "New title");
+        assert_eq!(p.severity, Severity::Critical);
+        assert_eq!(p.updated_at_ms, T0 + 5);
+        assert_eq!(
+            p.target,
+            Target::workload(
+                "team-a",
+                crate::k8s::workloads::WorkloadKind::Deployment,
+                "web"
+            )
+        );
+        assert_eq!(p.change, scale("web", 3));
+        assert_eq!(p.status, ProposalStatus::Open);
+        assert_eq!(p.client.as_deref(), Some("claude-ai"));
+        assert_eq!(p.session_id, None);
+        let raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(d.path().join("health/c1.json")).unwrap())
+                .unwrap();
+        assert_eq!(raw["proposals"][0]["change"]["kind"], "scale");
+        assert_eq!(raw["proposals"][0]["status"], "open");
+        assert!(raw["proposals"][0].get("appliedAsProposed").is_none());
+    }
+
+    /// Ключ находки от модели хранится очищенным и не длиннее предела; пустой после очистки — как
+    /// не заданный. Повтор того же автора обновляет ключ так же.
+    #[test]
+    fn related_finding_key_is_sanitized_and_cut() {
+        let (_d, s) = store();
+        let claude = || author(Some("claude-ai"), "s1");
+        let mut p = proposal(scale("web", 2), claude());
+        p.related_finding_key = Some(format!("\u{1b}[31m{}\u{7}", "k".repeat(300)));
+        let id = proposed_id(s.propose(ID, p, T0).unwrap());
+        let stored = |s: &HealthStore| {
+            s.load(ID, T0)
+                .unwrap()
+                .proposals
+                .into_iter()
+                .find(|p| p.id == id)
+                .unwrap()
+                .related_finding_key
+        };
+        let key = stored(&s).unwrap();
+        assert_eq!(key.chars().count(), MAX_RELATED_KEY_CHARS);
+        assert!(key.starts_with("[31mkkk"), "{key}");
+        assert!(!key.chars().any(|c| c.is_control()), "{key:?}");
+        let mut again = proposal(scale("web", 3), claude());
+        again.related_finding_key = Some("\u{7}\u{1b}".into());
+        assert_eq!(
+            s.propose(ID, again, T0).unwrap(),
+            Proposed::Updated(id.clone())
+        );
+        assert_eq!(stored(&s), None);
+    }
+
+    #[test]
+    fn open_proposals_are_limited_to_fifty() {
+        let (d, s) = store();
+        let id = proposed_id(
+            s.propose(ID, proposal(scale("w0", 2), author(Some("c"), "s")), T0)
+                .unwrap(),
+        );
+        let mut f = s.load(ID, T0).unwrap();
+        let first = f.proposals[0].clone();
+        f.proposals = (0..MAX_OPEN_PROPOSALS)
+            .map(|i| {
+                let change = scale(&format!("w{i}"), 2);
+                Proposal {
+                    id: if i == 0 { id.clone() } else { format!("p{i}") },
+                    target: change.target(),
+                    change,
+                    ..first.clone()
+                }
+            })
+            .collect();
+        write_json(&d.path().join("health/c1.json"), &f).unwrap();
+        assert_eq!(
+            s.propose(
+                ID,
+                proposal(scale("one-more", 2), author(Some("c"), "s")),
+                T0
+            )
+            .unwrap(),
+            Proposed::LimitReached
+        );
+        // Обновление существующего лимит не трогает.
+        assert_eq!(
+            s.propose(ID, proposal(scale("w5", 3), author(Some("c"), "s")), T0)
+                .unwrap(),
+            Proposed::Updated("p5".into())
+        );
+        // Закрытые не считаются.
+        s.set_proposal_status(ID, &id, ProposalStatus::Rejected, None, T0)
+            .unwrap();
+        proposed_id(
+            s.propose(
+                ID,
+                proposal(scale("one-more", 2), author(Some("c"), "s")),
+                T0,
+            )
+            .unwrap(),
+        );
+    }
+
+    #[test]
+    fn proposals_expire_after_seven_days_whatever_the_status() {
+        let (_d, s) = store();
+        let id = proposed_id(
+            s.propose(ID, proposal(scale("web", 2), author(Some("c"), "s")), T0)
+                .unwrap(),
+        );
+        s.mark_applied(ID, &id, &scale("web", 2), T0 + 1).unwrap();
+        assert_eq!(
+            s.load(ID, T0 + PROPOSAL_TTL_MS - 1)
+                .unwrap()
+                .proposals
+                .len(),
+            1
+        );
+        assert!(
+            s.load(ID, T0 + PROPOSAL_TTL_MS)
+                .unwrap()
+                .proposals
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn status_transitions_reject_reopen_and_refuse_closed() {
+        let (_d, s) = store();
+        let id = proposed_id(
+            s.propose(ID, proposal(scale("web", 2), author(Some("c"), "s")), T0)
+                .unwrap(),
+        );
+        s.set_proposal_status(
+            ID,
+            &id,
+            ProposalStatus::Rejected,
+            Some("  too risky\u{7} ".into()),
+            T0 + 1,
+        )
+        .unwrap();
+        let p = &s.load(ID, T0).unwrap().proposals[0];
+        assert_eq!(
+            (p.status, p.closed_at_ms),
+            (ProposalStatus::Rejected, Some(T0 + 1))
+        );
+        assert_eq!(p.reject_reason.as_deref(), Some("too risky"));
+        let e = s
+            .set_proposal_status(ID, &id, ProposalStatus::Rejected, None, T0 + 2)
+            .unwrap_err();
+        assert_eq!(e.key, "errors.health.proposalClosed");
+        s.set_proposal_status(ID, &id, ProposalStatus::Open, None, T0 + 3)
+            .unwrap();
+        let p = &s.load(ID, T0).unwrap().proposals[0];
+        assert_eq!(
+            (p.status, p.closed_at_ms, p.reject_reason.clone()),
+            (ProposalStatus::Open, None, None)
+        );
+        assert_eq!(p.updated_at_ms, T0 + 3);
+        // Применённое снова не открыть и не отклонить.
+        let id2 = proposed_id(
+            s.propose(ID, proposal(scale("api", 2), author(Some("c"), "s")), T0)
+                .unwrap(),
+        );
+        s.mark_applied(ID, &id2, &scale("api", 2), T0).unwrap();
+        for to in [ProposalStatus::Open, ProposalStatus::Rejected] {
+            let e = s.set_proposal_status(ID, &id2, to, None, T0).unwrap_err();
+            assert_eq!(
+                (e.code, e.key.as_str()),
+                (ErrorCode::InvalidInput, "errors.health.proposalClosed")
+            );
+            assert_eq!(e.params["status"], "applied");
+        }
+        let e = s
+            .set_proposal_status(ID, "nope", ProposalStatus::Rejected, None, T0)
+            .unwrap_err();
+        assert_eq!(e.key, "errors.health.proposalNotFound");
+    }
+
+    #[test]
+    fn mark_applied_records_edits_and_skips_foreign_or_closed() {
+        let (d, s) = store();
+        assert_eq!(
+            s.mark_applied(ID, "nope", &scale("web", 2), T0).unwrap(),
+            MarkApplied::Skipped("proposal not found")
+        );
+        assert!(
+            !d.path().join("health").join("c1.json").exists(),
+            "пропуск файл не пишет"
+        );
+        let id = proposed_id(
+            s.propose(ID, proposal(scale("web", 2), author(Some("c"), "s")), T0)
+                .unwrap(),
+        );
+        assert_eq!(
+            s.mark_applied(ID, &id, &scale("other", 2), T0).unwrap(),
+            MarkApplied::Skipped("proposal is about another change")
+        );
+        assert_eq!(
+            s.mark_applied(ID, &id, &scale("web", 4), T0 + 1).unwrap(),
+            MarkApplied::Applied { as_proposed: false }
+        );
+        let p = &s.load(ID, T0).unwrap().proposals[0];
+        assert_eq!(
+            (p.status, p.closed_at_ms, p.applied_as_proposed),
+            (ProposalStatus::Applied, Some(T0 + 1), Some(false))
+        );
+        assert_eq!(p.applied_change, Some(scale("web", 4)));
+        assert_eq!(p.change, scale("web", 2));
+        assert_eq!(
+            s.mark_applied(ID, &id, &scale("web", 2), T0 + 2).unwrap(),
+            MarkApplied::Skipped("proposal is not open")
+        );
+        let id2 = proposed_id(
+            s.propose(ID, proposal(scale("api", 2), author(Some("c"), "s")), T0)
+                .unwrap(),
+        );
+        assert_eq!(
+            s.mark_applied(ID, &id2, &scale("api", 2), T0).unwrap(),
+            MarkApplied::Applied { as_proposed: true }
+        );
+        let f = s.load(ID, T0).unwrap();
+        assert_eq!(
+            f.proposals
+                .iter()
+                .find(|p| p.id == id2)
+                .unwrap()
+                .applied_change,
+            None
+        );
+    }
+
+    #[test]
+    fn llm_withdraws_only_its_own_open_proposals() {
+        let (_d, s) = store();
+        let named = proposed_id(
+            s.propose(
+                ID,
+                proposal(scale("a", 2), author(Some("claude-ai"), "s1")),
+                T0,
+            )
+            .unwrap(),
+        );
+        let unnamed = proposed_id(
+            s.propose(ID, proposal(scale("b", 2), author(None, "s2")), T0)
+                .unwrap(),
+        );
+        assert_eq!(
+            s.withdraw_own(ID, &named, &author(Some("cursor"), "s1"), T0)
+                .unwrap(),
+            Withdrawn::NotOwner
+        );
+        assert_eq!(
+            s.withdraw_own(ID, &unnamed, &author(None, "s3"), T0)
+                .unwrap(),
+            Withdrawn::NotOwner
+        );
+        assert_eq!(
+            s.withdraw_own(ID, &unnamed, &author(None, "s2"), T0)
+                .unwrap(),
+            Withdrawn::Withdrawn
+        );
+        assert_eq!(
+            s.withdraw_own(ID, &unnamed, &author(None, "s2"), T0)
+                .unwrap(),
+            Withdrawn::Closed(ProposalStatus::Withdrawn)
+        );
+        assert_eq!(
+            s.withdraw_own(ID, "nope", &author(Some("claude-ai"), "s1"), T0)
+                .unwrap(),
+            Withdrawn::NotFound
+        );
+        // Отозванное LLM человек снова не откроет.
+        let e = s
+            .set_proposal_status(ID, &unnamed, ProposalStatus::Open, None, T0)
+            .unwrap_err();
+        assert_eq!(e.params["status"], "withdrawn");
+    }
+
+    #[test]
+    fn proposals_are_deleted_one_by_one_and_all_at_once() {
+        let (_d, s) = store();
+        let id = proposed_id(
+            s.propose(ID, proposal(scale("a", 2), author(Some("c"), "s")), T0)
+                .unwrap(),
+        );
+        proposed_id(
+            s.propose(ID, proposal(scale("b", 2), author(Some("c"), "s")), T0)
+                .unwrap(),
+        );
+        s.delete_proposal(ID, &id, T0).unwrap();
+        let e = s.delete_proposal(ID, &id, T0).unwrap_err();
+        assert_eq!(e.key, "errors.health.proposalNotFound");
+        assert_eq!(s.delete_all_proposals(ID, T0).unwrap(), 1);
+        assert!(s.load(ID, T0).unwrap().proposals.is_empty());
+        // Замечания при этом не трогаются.
+        created(
+            s.annotate(ID, note("n", author(Some("c"), "s")), T0)
+                .unwrap(),
+        );
+        assert_eq!(s.delete_all_proposals(ID, T0).unwrap(), 0);
+        assert_eq!(s.load(ID, T0).unwrap().annotations.len(), 1);
     }
 
     #[test]

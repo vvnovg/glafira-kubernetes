@@ -30,9 +30,15 @@ pub fn error_text(e: &AppError) -> String {
     format!("{}: {}", code(e), llm_message(e))
 }
 
-/// Ошибки подключения, текст которых остаётся как есть: либо постоянная фраза без данных
-/// профиля, либо только то, что модель сама назвала в запросе (проект, id подключения).
-const PLAIN_CONNECTION_KEYS: &[&str] = &[
+/// Ключи ошибок, текст которых модель получает как есть: постоянная фраза без данных профиля
+/// или только то, о чём модель спросила сама (проект, объект, id подключения), и ответ
+/// API-сервера на её запрос (`{{message}}` у 404, 409, 400/422, 5xx), и ошибки проверки
+/// изменения `errors.change.*`: в них только имена контейнеров, quantity и границы из самого
+/// изменения и проекта пользователя, без адресов и учётных данных. Остальные ключи — и
+/// любой новый — получают фиксированную фразу (`llm_message`): так текст с адресом сервера,
+/// командой exec-плагина, адресом источника метрик или именем пользователя не уйдёт модели,
+/// даже если о новом ключе здесь забыли.
+pub const LLM_TEXT_KEYS: &[&str] = &[
     "errors.exec.notApproved",
     "errors.connections.loginRequired",
     "errors.connections.tokenMissing",
@@ -42,18 +48,56 @@ const PLAIN_CONNECTION_KEYS: &[&str] = &[
     "errors.oauth.cancelled",
     "errors.oauth.timeout",
     "errors.oauth.badTokenResponse",
+    "errors.k8s.notFound",
+    "errors.k8s.badName",
+    "errors.k8s.forbiddenIn",
+    "errors.k8s.forbiddenCluster",
+    "errors.k8s.unauthorized",
+    "errors.k8s.conflict",
+    "errors.k8s.invalid",
+    "errors.k8s.tooManyRequests",
+    "errors.k8s.serverError",
+    "errors.k8s.apiError",
+    "errors.k8s.hostnameMismatch",
+    "errors.k8s.certExpired",
+    "errors.k8s.caUntrusted",
+    "errors.k8s.tlsError",
+    "errors.k8s.dns",
+    "errors.k8s.timeout",
+    "errors.k8s.connect",
+    "errors.k8s.malformedObject",
+    "errors.k8s.unexpectedResponse",
+    "errors.health.annotationNotFound",
+    "errors.change.badQuantity",
+    "errors.change.containersCount",
+    "errors.change.duplicateContainer",
+    "errors.change.nothingToChange",
+    "errors.change.scaleKind",
+    "errors.change.replicas",
+    "errors.change.restartKind",
+    "errors.change.limitBelowRequest",
+    "errors.change.hpaBounds",
+    "errors.change.noContainer",
+    "errors.change.limitRangeMin",
+    "errors.change.limitRangeMax",
+    "errors.change.resourcesKind",
+    "errors.internal",
 ];
 
-/// Текст ошибки для LLM. Чтение открывает подключение, если оно ещё не открыто, и тексты этих
-/// ошибок несут данные профиля: команду exec-плагина и параметры её запуска (`errors.exec.*`),
-/// адрес API-сервера и прокси (`errors.connections.*`), ответ OAuth-сервера (`errors.oauth.*`),
-/// цепочку причин kube и сети, имя пользователя из ответа 403. Модель получает вместо них фиксированную фразу без этих данных;
-/// код ошибки остаётся прежним, подробности — только у человека в интерфейсе. Остальные ошибки
-/// несут имена объектов, о которых модель сама спросила, и не меняются.
+/// Длина текста ошибки для модели: ответ API-сервера бывает длинным (сообщение webhook'а).
+pub const MAX_LLM_ERROR_CHARS: usize = 500;
+
+/// Текст ошибки для LLM. Чтение открывает подключение, если оно ещё не открыто, и тексты
+/// ошибок подключения несут данные профиля: команду exec-плагина и параметры её запуска
+/// (`errors.exec.*`), адрес API-сервера и прокси (`errors.connections.*`), ответ OAuth-сервера
+/// (`errors.oauth.*`), цепочку причин kube и сети, имя пользователя из ответа 403. Как есть
+/// уходят только ключи `LLM_TEXT_KEYS` (не длиннее `MAX_LLM_ERROR_CHARS`); остальные получают
+/// фиксированную фразу по группе ключа. Код ошибки остаётся прежним, подробности — только у
+/// человека в интерфейсе.
 pub fn llm_message(e: &AppError) -> String {
     let key = e.key.as_str();
-    if PLAIN_CONNECTION_KEYS.contains(&key) {
-        return e.message.clone();
+    if LLM_TEXT_KEYS.contains(&key) {
+        return cut(&e.message, MAX_LLM_ERROR_CHARS);
     }
     let hidden = if key.starts_with("errors.exec.") {
         "The connection's credential plugin failed; check the connection in Glafira"
@@ -66,10 +110,20 @@ pub fn llm_message(e: &AppError) -> String {
             "errors.k8s.credentials" => "The credentials were rejected; sign in again in Glafira",
             "errors.k8s.transport" => "The cluster could not be reached",
             "errors.k8s.forbidden" => "Access is forbidden",
-            _ => return e.message.clone(),
+            _ => "The operation failed; the user can see the details in Glafira",
         }
     };
     hidden.to_string()
+}
+
+/// Не длиннее `max` символов, с «…» на месте отрезанного.
+fn cut(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max - 1).collect();
+    out.push('…');
+    out
 }
 
 pub fn code(e: &AppError) -> String {
@@ -798,5 +852,68 @@ mod tests {
             panic!("ошибка")
         };
         assert!(error.starts_with("FORBIDDEN: "), "{error}");
+    }
+
+    #[test]
+    fn unknown_error_keys_get_a_fixed_phrase() {
+        let e = crate::app_err!(
+            crate::error::ErrorCode::ConnectionFailed,
+            "errors.someday.newKey",
+            "Cannot reach {{url}}",
+            url = "https://marker-host.example/prometheus"
+        );
+        assert_eq!(
+            error_text(&e),
+            "CONNECTION_FAILED: The operation failed; the user can see the details in Glafira"
+        );
+    }
+
+    #[test]
+    fn server_text_is_cut_for_the_model() {
+        let long = "x".repeat(2000);
+        let e = crate::k8s::errors::from_status(
+            &kube::core::Status::failure(&long, "Invalid").with_code(422),
+        );
+        let text = llm_message(&e);
+        assert_eq!(text.chars().count(), MAX_LLM_ERROR_CHARS);
+        assert!(text.ends_with('…'), "{text}");
+        let short = crate::k8s::errors::not_allowed("get", "pods", Some("team-a"));
+        assert_eq!(llm_message(&short), short.message);
+    }
+
+    #[test]
+    fn change_check_errors_reach_the_model_with_their_text() {
+        let e = crate::change::check_limits("app", Some(1.0), Some(0.5), "CPU").unwrap_err();
+        assert_eq!(e.key, "errors.change.limitBelowRequest");
+        assert_eq!(
+            llm_message(&e),
+            "Container app: the CPU limit is below the request"
+        );
+    }
+
+    #[test]
+    fn the_job_resources_refusal_reaches_the_model_with_its_text() {
+        let job: crate::change::Change = serde_json::from_value(serde_json::json!({
+            "kind": "setResources", "namespace": "team-a",
+            "workload": {"kind": "Job", "name": "once"},
+            "containers": [{"name": "app", "requests": {"cpu": "1"}}]}))
+        .unwrap();
+        let e = crate::change::validate_form(&job).unwrap_err();
+        assert_eq!(e.key, "errors.change.resourcesKind");
+        assert_eq!(llm_message(&e), e.message);
+    }
+
+    #[test]
+    fn llm_text_keys_are_dictionary_keys() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/locales/en.json");
+        let dict: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        for key in LLM_TEXT_KEYS {
+            let found = key
+                .split('.')
+                .try_fold(&dict, |v, part| v.get(part))
+                .is_some_and(serde_json::Value::is_string);
+            assert!(found, "{key}");
+        }
     }
 }

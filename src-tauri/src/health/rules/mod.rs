@@ -1,10 +1,11 @@
 //! Каталог правил и их строгость по окружению (спец. §8.2). Правила — чистые функции над
-//! `ClusterSnapshot`: сеть и файлы здесь не трогаются. Правила `resources.*` — этап O3.
+//! `ClusterSnapshot`: сеть и файлы здесь не трогаются.
 
 mod cluster;
 mod network;
 pub mod pods;
 mod project;
+mod resources;
 mod workloads;
 
 use serde_json::Value;
@@ -76,6 +77,9 @@ pub const RULES: &[RuleDef] = &[
     rule("gatewayRoute.notAccepted", C, W, W),
     rule("gatewayRoute.refsUnresolved", C, W, W),
     rule("gateway.notProgrammed", C, C, W),
+    rule("resources.cpuThrottled", W, W, I),
+    rule("resources.memoryNearLimit", W, W, I),
+    rule("resources.overProvisioned", I, I, I),
     rule("check.partial", I, I, I),
 ];
 
@@ -161,6 +165,7 @@ pub fn evaluate(s: &ClusterSnapshot, env: Environment) -> Vec<Finding> {
     workloads::check(s, &mut out);
     project::check(s, &mut out);
     network::check(s, &mut out);
+    resources::check(s, &mut out);
     cluster::partial(s, &mut out);
     out.into_sorted()
 }
@@ -189,7 +194,7 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), n);
-        assert_eq!(n, 34, "37 правил §8.2 без трёх resources.* (этап O3)");
+        assert_eq!(n, 37, "все правила §8.2");
     }
 
     #[test]
@@ -229,6 +234,9 @@ mod tests {
             ("gatewayRoute.notAccepted", "КПП"),
             ("gatewayRoute.refsUnresolved", "КПП"),
             ("gateway.notProgrammed", "ККП"),
+            ("resources.cpuThrottled", "ППИ"),
+            ("resources.memoryNearLimit", "ППИ"),
+            ("resources.overProvisioned", "ИИИ"),
             ("check.partial", "ИИИ"),
         ];
         let sym = |s: Option<Severity>| match s {

@@ -17,7 +17,7 @@ pub enum PlatformKind {
 }
 
 /// Справочный дистрибутив платформы `kubernetes`: виден в интерфейсе и MCP и влияет только
-/// на порядок кандидатов автопоиска метрик (этап O3).
+/// на порядок кандидатов автопоиска метрик (`metrics::discovery::candidates`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Distribution {
@@ -31,6 +31,19 @@ pub enum Distribution {
 }
 
 impl Distribution {
+    /// Код, как в JSON: `rancher`, `eks`.
+    pub fn id(self) -> &'static str {
+        match self {
+            Distribution::Eks => "eks",
+            Distribution::Gke => "gke",
+            Distribution::Aks => "aks",
+            Distribution::Rancher => "rancher",
+            Distribution::Deckhouse => "deckhouse",
+            Distribution::K3s => "k3s",
+            Distribution::Rke2 => "rke2",
+        }
+    }
+
     /// Название в интерфейсе (не переводится).
     pub fn title(self) -> &'static str {
         match self {

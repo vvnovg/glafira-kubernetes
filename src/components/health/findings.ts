@@ -1,5 +1,5 @@
 import type { TFunction } from "i18next";
-import type { Annotation, Finding, HealthTarget, HealthView, Severity, WorkloadKind } from "../../api/types";
+import type { Annotation, Finding, HealthTarget, HealthView, Proposal, Severity, WorkloadKind } from "../../api/types";
 
 export const SEVERITY_RANK: Record<Severity, number> = { info: 0, warning: 1, critical: 2 };
 export const SEVERITIES: Severity[] = ["critical", "warning", "info"];
@@ -79,6 +79,7 @@ export function detailsKey(f: Finding): string {
       return [p.projectLimit, p.podLimit, p.timedOut].includes(true) || (Array.isArray(p.gaps) && p.gaps.length > 0) ? "details" : "detailsUnknown";
     // Пустой список не называется: «без request CPU: ;» читается как сбой.
     case "container.noRequests":
+    case "resources.overProvisioned":
       if (Array.isArray(p.cpu) && p.cpu.length === 0) return "detailsMemory";
       return Array.isArray(p.memory) && p.memory.length === 0 ? "detailsCpu" : "details";
     default:
@@ -111,7 +112,15 @@ export function openNotes(view: HealthView | undefined): Annotation[] {
   return (view?.annotations ?? []).filter((a) => a.status === "open");
 }
 
-/** Закрытые замечания — недавно закрытые сверху (по времени закрытия, иначе обновления). */
+/**
+ * Открытые предложения LLM подключения — их показывают блок объекта и значки (`itemsFor`, `badgeFor`); применённые,
+ * отклонённые и отозванные видны только в списке «Закрытые» раздела «Предложения LLM» экрана «Замечания».
+ */
+export function openProposals(view: HealthView | undefined): Proposal[] {
+  return (view?.proposals ?? []).filter((p) => p.status === "open");
+}
+
+/** Закрытые замечания и предложения — недавно закрытые сверху (по времени закрытия, иначе обновления). */
 export function newestClosedFirst<T extends { closedAtMs?: number; updatedAtMs: number }>(items: T[]): T[] {
   return [...items].sort((a, b) => (b.closedAtMs ?? b.updatedAtMs) - (a.closedAtMs ?? a.updatedAtMs));
 }
@@ -143,34 +152,39 @@ export const matchPod =
     t.namespace === namespace &&
     ((t.kind === "pod" && t.name === name) || (t.kind === "workload" && Array.isArray(params?.pods) && params.pods.includes(name)));
 
-/** Что относится к объекту: видимые находки и открытые замечания. Без `match` — всё подключение. */
+/** Что относится к объекту: видимые находки, открытые замечания и открытые предложения. Без `match` — всё подключение. */
 export function itemsFor(view: HealthView | undefined, match?: Match) {
   const m = match ?? (() => true);
   return {
     findings: findingsOf(view, false).filter((f) => m(f.target, f.params)),
     notes: openNotes(view).filter((a) => m(a.target)),
+    proposals: openProposals(view).filter((p) => m(p.target)),
   };
 }
 
-/** Что посчитал значок: находка или открытое замечание уровня «критично» или «предупреждение». */
-export type BadgeItem = { kind: "finding"; severity: Severity; finding: Finding } | { kind: "note"; severity: Severity; note: Annotation };
+/** Что посчитал значок: находка, открытое замечание или открытое предложение уровня «критично» или «предупреждение». */
+export type BadgeItem =
+  | { kind: "finding"; severity: Severity; finding: Finding }
+  | { kind: "note"; severity: Severity; note: Annotation }
+  | { kind: "proposal"; severity: Severity; proposal: Proposal };
 
 export interface Badge {
   count: number;
   severity: Severity;
-  /** Самые строгие первыми; внутри строгости — сначала находки, затем замечания; порядок данных сохраняется. */
+  /** Самые строгие первыми; внутри строгости — сначала находки, затем замечания, затем предложения; порядок данных сохраняется. */
   items: BadgeItem[];
 }
 
 /** Сколько заголовков показывает подсказка значка; остальное сворачивается в «…». */
 export const BADGE_TITLES_MAX = 10;
 
-/** Значок: число видимых находок и открытых замечаний уровня «критично» и «предупреждение»; без `match` — всего подключения. */
+/** Значок: число видимых находок, открытых замечаний и предложений уровня «критично» и «предупреждение»; без `match` — всего подключения. */
 export function badgeFor(view: HealthView | undefined, match?: Match): Badge | null {
-  const { findings, notes } = itemsFor(view, match);
+  const { findings, notes, proposals } = itemsFor(view, match);
   const items: BadgeItem[] = [
     ...findings.map((finding): BadgeItem => ({ kind: "finding", severity: finding.severity, finding })),
     ...notes.map((note): BadgeItem => ({ kind: "note", severity: note.severity, note })),
+    ...proposals.map((proposal): BadgeItem => ({ kind: "proposal", severity: proposal.severity, proposal })),
   ]
     .filter((i) => i.severity !== "info")
     // Сортировка стабильна: порядок внутри одной строгости остаётся прежним.
@@ -184,12 +198,12 @@ const oneLine = (s: string) => s.replace(/\s+/g, " ").trim();
 /**
  * Подсказка значка: первая строка — «Требуют внимания: N», далее заголовки учтённого (не больше 10, затем «…»).
  * Строки через перевод строки: нативная подсказка `title` его показывает. Пробелы и переводы строк
- * в заголовке замечания LLM схлопываются: одна строка подсказки — один заголовок.
+ * в заголовке замечания или предложения LLM схлопываются: одна строка подсказки — один заголовок.
  */
 export function badgeTooltip(badge: Badge, t: TFunction): string {
   const titles = badge.items
     .slice(0, BADGE_TITLES_MAX)
-    .map((i) => (i.kind === "finding" ? findingTexts(i.finding, t).title : oneLine(i.note.title)));
+    .map((i) => (i.kind === "finding" ? findingTexts(i.finding, t).title : i.kind === "note" ? oneLine(i.note.title) : oneLine(i.proposal.title)));
   if (badge.items.length > BADGE_TITLES_MAX) titles.push("…");
   return [t("health.badgeTitle", { count: badge.count }), ...titles].join("\n");
 }

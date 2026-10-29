@@ -29,6 +29,8 @@ pub struct AppState {
     pub access: Arc<crate::k8s::access::AccessCache>,
     /// Проверка кластера, скрытые находки и замечания LLM (`health/<id>.json`).
     pub health: Arc<crate::health::service::HealthService>,
+    /// Собранное по проектам для вкладки «Ресурсы» (кэш на 5 минут).
+    pub resources: Arc<crate::resources::project::ProjectCache>,
 }
 
 impl AppState {
@@ -43,6 +45,7 @@ impl AppState {
             sessions: Arc::new(crate::sessions::Sessions::default()),
             access: Arc::new(crate::k8s::access::AccessCache::default()),
             health: Arc::new(crate::health::service::HealthService::open(data_dir)),
+            resources: Arc::new(Default::default()),
         })
     }
 
@@ -167,6 +170,7 @@ impl AppState {
         let evicted = breaks_client(e.code) && self.pool.evict_if_same(id, used);
         if evicted {
             self.access.forget_connection(id);
+            self.resources.forget_connection(id);
         }
         evicted
     }
@@ -176,6 +180,7 @@ impl AppState {
     pub fn evict_connection(&self, id: &str) {
         self.pool.evict(id);
         self.access.forget_connection(id);
+        self.resources.forget_connection(id);
     }
 
     /// Удаляет подключение целиком: профиль, секреты, клиент, сессии и данные проверки.
@@ -214,6 +219,13 @@ mod tests {
         let epoch = st.access.epoch(connection_id);
         let rights = crate::k8s::access::NamespaceAccess::default();
         assert!(st.access.put(connection_id, namespace, epoch, rights));
+    }
+
+    /// Собранное по проекту в кэше ресурсов подключения.
+    fn cache_project(st: &AppState, connection_id: &str, namespace: &str) {
+        let usage = crate::resources::project::tests::sample_usage(namespace, 7);
+        let epoch = st.resources.epoch(connection_id);
+        assert!(st.resources.put(connection_id, epoch, &usage));
     }
 
     #[tokio::test]
@@ -441,6 +453,7 @@ mod tests {
                     .insert_if_current("a", st.pool.generation("a"), pooled.clone())
             );
             cache_rights(&st, "a", "team-a");
+            cache_project(&st, "a", "team-a");
             let expected = pooled.clone();
             let e = st
                 .read("a", move |c| async move {
@@ -456,6 +469,11 @@ mod tests {
                 evicts,
                 "{code:?}: кэш прав"
             );
+            assert_eq!(
+                st.resources.get("a", "team-a", 7).is_none(),
+                evicts,
+                "{code:?}: кэш ресурсов проекта"
+            );
         }
     }
 
@@ -468,6 +486,7 @@ mod tests {
         let (old, new) = (pooled_client().await, pooled_client().await);
         assert!(st.pool.insert_if_current("a", st.pool.generation("a"), old));
         cache_rights(&st, "a", "team-a");
+        cache_project(&st, "a", "team-a");
         let pool = st.pool.clone();
         let replacement = new.clone();
         let e = st
@@ -487,6 +506,10 @@ mod tests {
         assert!(
             st.access.get("a", "team-a").is_some(),
             "кэш прав нового клиента не тронут"
+        );
+        assert!(
+            st.resources.get("a", "team-a", 7).is_some(),
+            "кэш ресурсов проекта нового клиента не тронут"
         );
     }
 
@@ -737,6 +760,34 @@ mod tests {
         assert!(st.access.get("a", "team-a").is_none());
     }
 
+    /// Собранное по проектам живёт 5 минут, но не переживает смену профиля или токена,
+    /// отключение и удаление: прежние числа относятся к другому кластеру или учётной записи.
+    #[test]
+    fn evicting_a_client_forgets_the_collected_projects_of_the_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = state(dir.path());
+        cache_project(&st, "a", "team-a");
+        cache_project(&st, "a", "team-b");
+        cache_project(&st, "b", "team-a");
+        st.evict_connection("a");
+        assert!(st.resources.get("a", "team-a", 7).is_none());
+        assert!(st.resources.get("a", "team-b", 7).is_none());
+        assert!(
+            st.resources.get("b", "team-a", 7).is_some(),
+            "другое подключение не тронуто"
+        );
+    }
+
+    #[test]
+    fn deleting_a_connection_forgets_its_collected_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = state(dir.path());
+        st.connections.upsert(sample_profile("a")).unwrap();
+        cache_project(&st, "a", "team-a");
+        st.delete_connection_full("a").unwrap();
+        assert!(st.resources.get("a", "team-a", 7).is_none());
+    }
+
     /// Новое подключение («Подключиться заново», вход через браузер, вставленный токен)
     /// забывает и кэш прав: с новым токеном права могут быть другими.
     #[tokio::test]
@@ -744,10 +795,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let st = state(dir.path());
         cache_rights(&st, "a", "team-a");
+        cache_project(&st, "a", "team-a");
         // Профиля нет: подключение не удастся, но клиент сбрасывается до чтения профиля.
         let e = st.connected("a", true).await.err().unwrap();
         assert_eq!(e.code, ErrorCode::NotFound);
         assert!(st.access.get("a", "team-a").is_none());
+        assert!(st.resources.get("a", "team-a", 7).is_none());
     }
 
     #[test]

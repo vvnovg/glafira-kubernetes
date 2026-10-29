@@ -1,7 +1,10 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
+  Analysis,
   AnnotationStatus,
   AppError,
+  Change,
+  ChangePreview,
   AppInfo,
   ClusterOverview,
   ConfigValue,
@@ -22,6 +25,7 @@ import type {
   McpAuditEntry,
   McpClientConfigs,
   McpStatus,
+  MetricsSourceStatus,
   NamespaceAccess,
   NetworkView,
   NodeDetails,
@@ -29,8 +33,11 @@ import type {
   OperatorRow,
   PodDetails,
   PodRow,
+  PodUsage,
   PolicyStatus,
   ProjectList,
+  ProjectUsageEvent,
+  ProposalStatus,
   PvcRow,
   QuotasView,
   SecretsInput,
@@ -43,6 +50,7 @@ import type {
   WorkloadKind,
   WorkloadList,
   WorkloadRef,
+  WorkloadUsage,
   YamlKind,
 } from "./types";
 
@@ -140,6 +148,39 @@ export const api = {
   getYaml: (connectionId: string, namespace: string, kind: YamlKind, name: string) =>
     call<string>("get_yaml", { connectionId, namespace, kind, name }),
 
+  /** Источник метрик подключения: выбранный и отвергнутые; `refresh` — выбрать заново. */
+  getMetricsSourceStatus: (connectionId: string, refresh = false) =>
+    call<MetricsSourceStatus>("get_metrics_source_status", { connectionId, refresh }),
+  /** Статистика workload'а за окно 1, 7, 14 или 30 дней; `refresh` — выбрать источник метрик заново. */
+  getWorkloadUsage: (connectionId: string, namespace: string, kind: WorkloadKind, name: string, windowDays: number, refresh = false) =>
+    call<WorkloadUsage>("get_workload_usage", { connectionId, namespace, kind, name, windowDays, refresh }),
+  getPodUsage: (connectionId: string, namespace: string, pod: string, refresh = false) =>
+    call<PodUsage>("get_pod_usage", { connectionId, namespace, pod, refresh }),
+  /** Статистика и рекомендация requests и limits (вкладка «Ресурсы» workload'а); `refresh` — выбрать источник заново. */
+  recommendResources: (connectionId: string, namespace: string, kind: WorkloadKind, name: string, windowDays: number, refresh = false) =>
+    call<Analysis>("recommend_resources", { connectionId, namespace, kind, name, windowDays, refresh }),
+  /** Ресурсы проекта — фоновая сессия; итог приходит в `onEvent`. Возвращает id сессии для `stopSession`. */
+  startProjectUsage: (connectionId: string, namespace: string, windowDays: number, refresh: boolean, onEvent: (e: ProjectUsageEvent) => void) => {
+    const channel = new Channel<ProjectUsageEvent>();
+    channel.onmessage = onEvent;
+    return call<string>("get_project_usage", { connectionId, namespace, windowDays, refresh, onEvent: channel });
+  },
+
+  /** «Было → станет», предупреждения и server-side dry-run изменения (спец. §9). */
+  previewChange: (connectionId: string, change: Change) => call<ChangePreview>("preview_change", { connectionId, change }),
+  /**
+   * Применение после стражей: `confirm` — имя prod-подключения, `confirmPod` — имя пода без контроллера,
+   * `proposalId` — предложение LLM, которое применяется. Возвращает применённое изменение.
+   */
+  applyChange: (
+    connectionId: string,
+    change: Change,
+    expectedVersion: string | null,
+    confirm: string | null,
+    confirmPod: string | null,
+    proposalId: string | null,
+  ) => call<Change>("apply_change", { connectionId, change, expectedVersion, confirm, confirmPod, proposalId }),
+
   /** Watch списка проекта; события приходят в `onEvent`. Возвращает id сессии для `stopSession`. */
   startWatch: (params: WatchParams, onEvent: (e: WatchEvent) => void) => {
     const channel = new Channel<WatchEvent>();
@@ -176,4 +217,9 @@ export const api = {
   deleteAnnotation: (connectionId: string, annotationId: string) =>
     call<HealthView>("delete_annotation", { connectionId, annotationId }),
   deleteAllAnnotations: (connectionId: string) => call<HealthView>("delete_all_annotations", { connectionId }),
+  /** «Отклонить» (с необязательной причиной) и «Открыть снова» предложения LLM. */
+  setProposalStatus: (connectionId: string, proposalId: string, status: ProposalStatus, reason: string | null = null) =>
+    call<HealthView>("set_proposal_status", { connectionId, proposalId, status, reason }),
+  deleteProposal: (connectionId: string, proposalId: string) => call<HealthView>("delete_proposal", { connectionId, proposalId }),
+  deleteAllProposals: (connectionId: string) => call<HealthView>("delete_all_proposals", { connectionId }),
 };

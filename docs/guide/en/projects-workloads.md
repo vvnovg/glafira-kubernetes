@@ -12,13 +12,13 @@ and [[ui:connections.form.manualNamespaces]].
 
 ## Project tab {#project}
 
-A project opens in its own tab: [[ui:objects.tabs.overview]], [[ui:project.tabs.workloads]],
-[[ui:objects.tabs.pods]], [[ui:project.tabs.network]], [[ui:project.tabs.config]], [[ui:project.tabs.storage]],
-[[ui:objects.tabs.events]] and [[ui:project.tabs.quotas]]. Glafira asks the cluster what you may read in the project
+A project opens in its own tab: [[ui:objects.tabs.overview]], [[ui:project.tabs.workloads]], [[ui:objects.tabs.pods]],
+[[ui:project.tabs.network]], [[ui:project.tabs.config]], [[ui:project.tabs.storage]], [[ui:objects.tabs.events]],
+[[ui:objects.tabs.resources]] and [[ui:project.tabs.quotas]]. Glafira asks the cluster what you may read in the project
 and hides the subtabs you have no rights for. The answer is kept for 5 minutes; the tab asks again every 5 minutes and
-when you press [[ui:common.refresh]] on the overview, so a subtab hidden by rights that changed comes back. The
-overview shows the pods by phase and the problem pods, the workloads that are not fine (and the kinds of workloads you
-may not read, with the reason), the quotas used by 90 % or more and the `Warning` events of the last hour.
+when you press [[ui:common.refresh]] on the overview, so a subtab hidden by rights that changed comes back. The overview
+shows the pods by phase and the problem pods, the workloads that are not fine (and the kinds of workloads you may not
+read, with the reason), the quotas used by 90 % or more and the `Warning` events of the last hour.
 
 ## Lists that update themselves {#watch}
 
@@ -50,7 +50,9 @@ the pods of an indexed Job, Jobs created from a CronJob by hand and the children
 about 46 characters are not included. YAML shows the object as `kubectl get -o yaml` does, but without `managedFields`,
 without the annotations that copy the whole object (`kubectl.kubernetes.io/last-applied-configuration` and the like) and
 without the private key of a Route; the values of environment variables with secret-looking names (PASSWORD, TOKEN,
-KEY…) are replaced by `***`.
+KEY…) are replaced by `***`. [[ui:objects.tabs.resources]] shows the usage and the recommendation of requests and
+limits, and the buttons on the overview change resources and replicas, restart the workload and set the HPA bounds
+(see [Resources and changes](resources-changes.md#workload)).
 
 ## Network {#network}
 

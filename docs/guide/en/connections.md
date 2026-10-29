@@ -93,6 +93,22 @@ groups, not on the platform: Route, projects and Gateway API appear wherever the
 in kubeconfig). The mode without certificate verification is insecure; your organization may forbid it.
 [[ui:connections.form.proxy]]: the system proxy (`HTTPS_PROXY` and `NO_PROXY`), no proxy, or an explicit address.
 
+## Metrics {#metrics}
+
+[[ui:connections.form.metrics]] — where Glafira takes the usage history for the Resources tabs and the check rules from
+(see [Resources and changes](resources-changes.md#source)). [[ui:connections.form.metricsMode.auto]] looks for Thanos
+Querier on OpenShift and for Prometheus through the API server proxy on other clusters, and without them takes the
+current values from `metrics.k8s.io`. [[ui:connections.form.metricsMode.thanos]] and
+[[ui:connections.form.metricsMode.prometheus]] are your own address (for example, a tenancy endpoint your administrators
+opened): [[ui:connections.form.metricsUrl]], [[ui:connections.form.metricsAuth]] (the connection token, your own token
+or no authorization) and [[ui:connections.form.metricsCa]]. A tenancy endpoint answers only within a project, so your
+own Thanos is checked in one of your projects: the first favorite, otherwise the first one listed manually, otherwise
+the first project of the cluster. Glafira does not follow redirects of the metrics source. Your own source is not
+replaced by another: if it does not respond, the Resources tabs say why. An `http://` address is allowed only without
+authorization. Your own token is kept in the system keychain. The metrics setting stays on this computer: export does
+not write it. The connection test shows the [[ui:connections.form.step.metrics]] step: which source is chosen and why
+the others did not fit; without a source the step is a warning, not an error.
+
 ## Rights {#rights}
 
 Glafira works with your rights only. On connection it checks what you may read at the cluster level (projects, nodes,
@@ -123,7 +139,8 @@ conditions, taints, capacity and allocatable resources, addresses and labels.
 ## Environments and read-only {#environments}
 
 [[ui:connections.form.environment]] sets the color of the connection. A new `prod` connection is
-[[ui:common.readOnly]]: Glafira will not change anything in the cluster through it.
+[[ui:common.readOnly]]: Glafira will not change anything in the cluster through it. If you clear the box, every change
+on a prod connection requires typing its name (see [Resources and changes](resources-changes.md#changes)).
 
 ## LLM access {#llm}
 

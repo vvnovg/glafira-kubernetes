@@ -1,4 +1,4 @@
-import type { AuthConfig, AuthMethod, CaConfig, CaMode, ConnectionProfile, ExecAuth, ProxyConfig, ProxyMode } from "../../api/types";
+import type { AuthConfig, AuthMethod, CaConfig, CaMode, ConnectionProfile, ExecAuth, MetricsConfig, MetricsEndpoint, MetricsMode, ProxyConfig, ProxyMode } from "../../api/types";
 import { newExec } from "./exec";
 
 export function newProfile(): ConnectionProfile {
@@ -19,7 +19,19 @@ export function newProfile(): ConnectionProfile {
     connectTimeoutMs: 10000,
     llmAccess: "off",
     llmNamespaces: null,
+    metrics: { mode: "auto" },
   };
+}
+
+export function newMetricsEndpoint(): MetricsEndpoint {
+  return { url: "", auth: "connection", ca: { mode: "connection" } };
+}
+
+/** Источник метрик; адрес, авторизация и CA сохраняются при переключении между своими источниками и «Автоматически». */
+export function withMetricsMode(metrics: MetricsConfig, mode: MetricsMode, last: MetricsEndpoint = newMetricsEndpoint()): MetricsConfig {
+  if (mode === "auto") return { mode };
+  const { url, auth, ca } = metrics.mode === "auto" ? last : metrics;
+  return { mode, url, auth, ca };
 }
 
 /** Способ входа; сертификат и exec-плагин сохраняются при переключении туда и обратно. */

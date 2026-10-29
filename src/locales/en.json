@@ -22,7 +22,14 @@
       "hours": "{{n}}h",
       "days": "{{n}}d"
     },
-    "copyFailed": "Could not copy to the clipboard"
+    "copyFailed": "Could not copy to the clipboard",
+    "confirm": {
+      "typeObject": "To confirm, type the {{label}} <code>{{name}}</code>",
+      "prodNotice": "This is a prod connection. Type its name <code>{{name}}</code>",
+      "defaultLabel": "name",
+      "objectAria": "Confirmation: {{label}}",
+      "connectionAria": "Connection name"
+    }
   },
   "errors": {
     "generic": "{{message}}",
@@ -72,7 +79,9 @@
       "execForbidden": "Connections with exec plugins are forbidden by your organization",
       "tokenNotUsed": "This connection does not sign in with a token",
       "pemContainsKey": "A certificate field contains a private key — put the key into the key field",
-      "credentialsInUrl": "Remove the user name and password from “{{url}}”: credentials do not belong in the address (a proxy with a password is set via the system HTTPS_PROXY)"
+      "credentialsInUrl": "Remove the user name and password from “{{url}}”: credentials do not belong in the address (a proxy with a password is set via the system HTTPS_PROXY)",
+      "badMetricsUrl": "Invalid metrics source address “{{url}}”: use https://host[:port][/path]",
+      "metricsHttpsRequired": "A metrics source with a token needs an https:// address"
     },
     "folders": {
       "notFound": "Folder {{id}} not found",
@@ -163,7 +172,9 @@
       "saveStopped": "Saving the log was stopped: the connection was closed"
     },
     "health": {
-      "annotationNotFound": "The note was deleted or has expired"
+      "annotationNotFound": "The note was deleted or has expired",
+      "proposalNotFound": "The proposal was deleted or has expired",
+      "proposalClosed": "The proposal is {{status}} and cannot be changed to {{to}}"
     },
     "mcp": {
       "startFailed": "The MCP server did not start: {{error}}",
@@ -183,6 +194,39 @@
       "installFailed": "Failed to install the update",
       "sessionsActive": "LLM assistants connected over MCP: {{active}}. Updating will disconnect them.",
       "none": "No updates available"
+    },
+    "metrics": {
+      "badResponse": "The metrics source returned an unexpected response",
+      "httpStatus": "The metrics source {{url}} answered with code {{status}}",
+      "tokenMissing": "The metrics source token is not saved",
+      "unavailable": "No metrics source is available"
+    },
+    "resources": {
+      "badWindow": "The analysis window must be 1, 7, 14 or 30 days, not {{days}}"
+    },
+    "guard": {
+      "readOnly": "Connection “{{name}}” is read-only",
+      "prodConfirm": "To change a prod connection, type its name “{{name}}”",
+      "typeToConfirm": "Type “{{expected}}” to confirm"
+    },
+    "change": {
+      "badQuantity": "Container {{container}}: “{{value}}” is not a valid {{field}} quantity",
+      "containersCount": "List 1 to {{max}} containers",
+      "duplicateContainer": "Container {{container}} is listed twice",
+      "nothingToChange": "Container {{container}}: nothing to change",
+      "scaleKind": "Only a Deployment, StatefulSet or DeploymentConfig can be scaled",
+      "replicas": "Replicas must be from 0 to {{max}}",
+      "restartKind": "A Job or CronJob cannot be restarted",
+      "limitBelowRequest": "Container {{container}}: the {{resource}} limit is below the request",
+      "hpaBounds": "HPA bounds must be 1 ≤ minReplicas ≤ maxReplicas ≤ {{max}}",
+      "noContainer": "There is no container {{container}} in the pod template",
+      "limitRangeMin": "Container {{container}}: the {{field}} is below the LimitRange minimum {{limit}}; the API server does not check the template, so the pods of the new revision would be rejected",
+      "limitRangeMax": "Container {{container}}: the {{field}} is above the LimitRange maximum {{limit}}; the API server does not check the template, so the pods of the new revision would be rejected",
+      "resourcesKind": "The resources of a Job cannot be changed: its pod template is immutable"
+    },
+    "ops": {
+      "admissionDenied": "The cluster rejected the change: {{message}}",
+      "changed": "The object has changed since the preview: refresh and retry"
     }
   },
   "messages": {
@@ -199,12 +243,26 @@
       "discoveryGroups": "{{platform}} · API server {{version}} · found: {{groups}}",
       "projectsOk": "Available projects: {{count}}",
       "projectsManual": "The cluster does not list projects for you; projects from the profile: {{count}}",
-      "authOkGroups": "Signed in as {{user}}, groups: {{groups}}"
+      "authOkGroups": "Signed in as {{user}}, groups: {{groups}}",
+      "metricsHistory": "History of resource usage: {{source}}",
+      "metricsCurrent": "No history source: only current values from metrics.k8s.io"
     },
     "import": {
       "addressChanged": "“{{name}}”: the API address changes from {{from}} to {{to}}. The saved credentials (token, key or confirmed exec plugin) will be sent to the new address.",
       "proxyChanged": "“{{name}}”: the proxy settings change. The saved credentials (token, key or confirmed exec plugin) will go through the new proxy.",
       "tlsChanged": "“{{name}}”: the certificate verification settings (CA or TLS server name) change. The saved credentials (token, key or confirmed exec plugin) will be used with the new settings."
+    },
+    "metrics": {
+      "thanosForbidden": "{{source}}: no rights to cluster monitoring (the cluster-monitoring-view role or similar is needed)",
+      "podMetricsForbidden": "{{source}}: no rights to read pod metrics",
+      "proxyForbidden": "{{source}}: no rights to the source (through the API server — get services/proxy)",
+      "podMetricsMissing": "{{source}}: not installed in the cluster",
+      "notFound": "{{source}}: not found",
+      "unavailable": "{{source}}: does not respond",
+      "timeout": "{{source}}: did not respond in time",
+      "badResponse": "{{source}}: answered, but not as Prometheus",
+      "tokenMissing": "{{source}}: the token is not saved — enter it in the connection settings",
+      "ownForbidden": "{{source}}: the source rejected the credentials — check the authorization in the connection settings"
     }
   },
   "hints": {
@@ -225,7 +283,9 @@
       "manualNamespaces": "If the cluster does not let you list projects, list the ones you work with here.",
       "test": "Checks step by step: address, TLS, sign-in, platform and projects. Unsaved fields are tested too.",
       "llmAccess": "What an LLM assistant connected over MCP may read. Metadata: objects, statuses, events, quotas — no secret, env or ConfigMap values. Off: the LLM does not see this connection.",
-      "llmScope": "Projects the LLM may read; an empty list means it sees no projects. The cluster itself and nodes stay visible if you can read them. The setting stays on this computer: export does not write it."
+      "llmScope": "Projects the LLM may read; an empty list means it sees no projects. The cluster itself and nodes stay visible if you can read them. The setting stays on this computer: export does not write it.",
+      "metrics": "Automatic: Thanos Querier on OpenShift, Prometheus through the API server elsewhere, then metrics.k8s.io. Own: a Thanos or Prometheus address. Not exported.",
+      "metricsAuth": "Connection token — the token of this connection. Own token — saved in the system secret store. A token is sent only over https."
     },
     "cluster": {
       "platform": "Detected from the API groups and the version: OpenShift, or Kubernetes with its distribution (EKS, GKE, AKS, Rancher, Deckhouse, k3s, RKE2).",
@@ -247,7 +307,12 @@
     },
     "health": {
       "check": "Runs the built-in Glafira rules over the cluster, its nodes and up to 50 projects. Severity depends on the connection environment. The check only reads the cluster.",
-      "hidden": "Findings you hid for a particular object. They are not counted in badges; LLM assistants see them marked as hidden."
+      "hidden": "Findings you hid for a particular object. They are not counted in badges; LLM assistants see them marked as hidden.",
+      "proposals": "A change an LLM assistant suggests. Nothing is applied until you open it in a form and confirm; you can edit the values first."
+    },
+    "resources": {
+      "window": "Statistics over the last 1, 7, 14 or 30 days, but not longer than the metrics source keeps. Percentiles are taken per pod, then the worst pod.",
+      "confidence": "High — window and data of 7 days or more with coverage of 80 % or more; medium — data of 24 hours or more with coverage of 50 % or more; low — less, or only metrics.k8s.io."
     }
   },
   "connections": {
@@ -318,7 +383,8 @@
         "tls": "TLS",
         "auth": "Sign-in",
         "discovery": "Platform",
-        "projects": "Projects"
+        "projects": "Projects",
+        "metrics": "Metrics"
       },
       "llmAccess": "LLM access (MCP)",
       "llmAccessOff": "Off",
@@ -326,7 +392,27 @@
       "llmScope": "Projects for the LLM",
       "llmScopeAll": "All available",
       "llmScopeList": "Only these",
-      "llmNamespaces": "LLM projects"
+      "llmNamespaces": "LLM projects",
+      "metrics": "Metrics",
+      "metricsMode": {
+        "auto": "Automatic",
+        "thanos": "Own Thanos Querier",
+        "prometheus": "Own Prometheus"
+      },
+      "metricsUrl": "Source address",
+      "metricsAuth": "Source authorization",
+      "metricsAuthMode": {
+        "connection": "Connection token",
+        "bearer": "Own token",
+        "none": "No authorization"
+      },
+      "metricsToken": "Source token",
+      "metricsCa": "Source CA",
+      "metricsCaMode": {
+        "connection": "As the connection",
+        "pem": "Certificates (PEM)"
+      },
+      "metricsCaPem": "Source CA certificates (PEM)"
     }
   },
   "cluster": {
@@ -635,7 +721,8 @@
     "tabs": {
       "overview": "Overview",
       "pods": "Pods",
-      "events": "Events"
+      "events": "Events",
+      "resources": "Resources"
     },
     "watch": {
       "polling": "No watch rights — the list refreshes every 10 s"
@@ -969,7 +1056,10 @@
       "gatewayRoute.notAccepted": "Routes not accepted by Gateways",
       "gatewayRoute.refsUnresolved": "Route references unresolved",
       "gateway.notProgrammed": "Gateways not programmed",
-      "check.partial": "Incomplete check"
+      "check.partial": "Incomplete check",
+      "resources.cpuThrottled": "CPU throttling",
+      "resources.memoryNearLimit": "Memory near the limit",
+      "resources.overProvisioned": "Excess requests"
     },
     "rules": {
       "cluster.apiNotReady": {
@@ -1150,7 +1240,216 @@
         "details": "Some objects were not checked: {{parts}}. Findings may be missing for them.",
         "detailsUnknown": "Some objects were not checked: findings may be missing for them.",
         "fix": "Check as a user who can read more, or check fewer projects; the permissions are on the cluster overview."
+      },
+      "resources.cpuThrottled": {
+        "title": "{{object}}: CPU is throttled",
+        "details": "Containers with a CPU limit were throttled on average over the last 24 hours: {{containers}}.",
+        "fix": "Raise the CPU limit or remove it: the limit cuts CPU time and slows responses. The Resources tab shows the usage and a recommendation."
+      },
+      "resources.memoryNearLimit": {
+        "title": "{{object}}: memory close to the limit",
+        "details": "Containers used 90% or more of their memory limit over the last 24 hours (maximum / limit): {{containers}}.",
+        "fix": "Raise the memory limit or reduce the usage: the next spike may end in OOMKilled. The Resources tab shows the usage and a recommendation."
+      },
+      "resources.overProvisioned": {
+        "title": "{{object}}: requests far above the usage",
+        "details": "Requests are much higher than the usage over the last 24 hours — CPU (request / p95): {{cpu}}; memory (request / maximum): {{memory}}.",
+        "detailsCpu": "Requests are much higher than the usage over the last 24 hours — CPU (request / p95): {{cpu}}.",
+        "detailsMemory": "Requests are much higher than the usage over the last 24 hours — memory (request / maximum): {{memory}}.",
+        "fix": "Lower the requests closer to the usage: the reserved capacity is unavailable to other pods and counts against the quota. The Resources tab shows a recommendation."
       }
+    },
+    "proposals": {
+      "applying": "Applying an LLM proposal: {{title}}",
+      "title": "LLM proposals",
+      "intro": "LLM assistants connected over MCP can propose changes here. Nothing is applied until you open a proposal in a form and confirm it.",
+      "none": "No LLM proposals.",
+      "by": "LLM proposal · {{client}}",
+      "openForm": "Open in form",
+      "readOnly": "The connection is read-only",
+      "reject": "Reject",
+      "reasonPlaceholder": "Reason (optional)",
+      "rejectConfirm": "Reject proposal",
+      "deleteAll": "Delete all LLM proposals",
+      "deleteAllConfirm": "Delete all LLM proposals of this connection?",
+      "status": {
+        "applied": "applied {{when}}",
+        "appliedEdited": "applied with edits {{when}}",
+        "rejected": "rejected",
+        "rejectedWithReason": "rejected: {{reason}}",
+        "withdrawn": "withdrawn"
+      },
+      "appliedAs": "Applied: {{change}}",
+      "change": {
+        "setResources": "Resources:",
+        "remove": "remove",
+        "keep": "keep",
+        "scale": "Replicas: {{replicas}}",
+        "rolloutRestart": "Restart",
+        "setHpaBounds": "HPA {{hpa}} bounds: {{min}}–{{max}}"
+      }
+    }
+  },
+  "change": {
+    "warning": {
+      "unverified": "Could not read {{what}}: the change was not checked against this data",
+      "hpaManaged": "HPA {{hpa}} scales this workload and will overwrite the replicas",
+      "scaleToZero": "No pods will be left",
+      "quota": "The quota {{quota}} lacks {{resource}}: {{needed}} needed, {{free}} free — the pods of the new revision would not be created and the rollout would stall",
+      "orphan": "The pod has no controller: nobody will create it again"
+    },
+    "unverifiedWhat": {
+      "hpa": "the HPA of this workload",
+      "limitRange": "the LimitRange of the project",
+      "quota": "the quotas of the project"
+    },
+    "title": {
+      "setResources": "Container resources",
+      "scale": "Replicas",
+      "rolloutRestart": "Restart",
+      "setHpaBounds": "HPA bounds",
+      "deletePod": "Delete pod"
+    },
+    "action": {
+      "setResources": "Change resources",
+      "scale": "Scale",
+      "rolloutRestart": "Restart",
+      "setHpaBounds": "HPA bounds",
+      "deletePod": "Delete pod"
+    },
+    "preview": "Check",
+    "apply": "Apply",
+    "delete": "Delete",
+    "confirmTitle": "Apply the change?",
+    "podName": "pod name",
+    "refreshRetry": "Refresh and retry",
+    "readOnly": "The connection is read-only: changes are not available",
+    "noRights": "No rights: {{verb}} {{resource}}",
+    "diffTitle": "Before → after",
+    "noDiff": "Nothing changes",
+    "notSet": "not set",
+    "col": {
+      "container": "Container",
+      "field": "Field",
+      "before": "Before",
+      "after": "After"
+    },
+    "diff": {
+      "requests": {
+        "cpu": "CPU request",
+        "memory": "Memory request"
+      },
+      "limits": {
+        "cpu": "CPU limit",
+        "memory": "Memory limit"
+      },
+      "replicas": "Replicas",
+      "minReplicas": "Min replicas",
+      "maxReplicas": "Max replicas",
+      "restartedAt": "Restarted at",
+      "pod": "Pod"
+    },
+    "dryRun": {
+      "passed": "The API server accepted the change (dry-run)",
+      "skipped": "This call has no dry-run: the API server checks it when it is applied",
+      "rejected": "The API server rejected the change"
+    },
+    "replicas": "Replicas",
+    "minReplicas": "Min replicas",
+    "maxReplicas": "Max replicas",
+    "keep": "keep",
+    "removed": "will be removed",
+    "current": "now {{value}}",
+    "remove": "Remove the value",
+    "restartNote": "Pods are recreated one by one according to the rollout strategy.",
+    "restartDc": "A new DeploymentConfig rollout starts (oc rollout latest).",
+    "deleteNote": "The pod is deleted gracefully; its controller, if any, creates a new one.",
+    "fieldName": {
+      "cpuRequest": "CPU request",
+      "cpuLimit": "CPU limit",
+      "memoryRequest": "memory request",
+      "memoryLimit": "memory limit"
+    }
+  },
+  "resources": {
+    "window": "Window",
+    "days": "{{count}} d",
+    "source": "Source: {{source}}",
+    "coverage": "coverage {{value}}",
+    "dataDays": "data for {{count}} d",
+    "confidence": "confidence: {{value}}",
+    "confidenceLabel": "Confidence",
+    "confidenceLevel": {
+      "low": "low",
+      "medium": "medium",
+      "high": "high"
+    },
+    "noKubeStateMetrics": "No kube-state-metrics: pods are matched by name, OOM and restarts are unknown.",
+    "applyRecommendation": "Apply the recommendation",
+    "lowConfidence": "The confidence of the recommendation is low: little data for the window. Check the values before applying.",
+    "init": "init",
+    "col": {
+      "cpu": "CPU p95 / max",
+      "memory": "Memory max",
+      "throttling": "Throttling",
+      "oom": "OOM",
+      "restarts": "Restarts",
+      "pod": "Pod",
+      "memoryNow": "Memory",
+      "workload": "Workload",
+      "pods": "Pods",
+      "requests": "Requests CPU / memory",
+      "limits": "Limits CPU / memory",
+      "usage": "Usage p95 CPU / max memory",
+      "reserve": "Reserve",
+      "risks": "Risks and excess"
+    },
+    "totals": "For the whole workload ({{replicas}} replicas): requests CPU {{requestsCpu}}, memory {{requestsMemory}}; limits CPU {{limitsCpu}}, memory {{limitsMemory}}",
+    "hpaShift": "HPA {{hpa}}: the {{resource}} target {{target}} % is relative to the request; for the same scaling with the new request set it to {{equivalent}} %",
+    "chartCpu": "CPU, cores",
+    "chartMemory": "Memory",
+    "marks": "Restarts and OOM",
+    "now": "Current usage",
+    "note": {
+      "cpuLimitNotSet": "The CPU limit is not set — there is no throttling, no limit is added",
+      "cpuThrottled": "Throttling p95 is {{p95}} %: the observed CPU usage is capped by the limit, the limit is at least the current one × 1.5",
+      "oomKilled": "OOMKilled {{count}} times in the window: the observed memory usage is cut by the limit, the limit is at least the current one × 1.5",
+      "noData": "No data for the window: no recommendation",
+      "limitRange": "{{field}} is pulled to the LimitRange {{bound}}",
+      "limitRangeDefault": "The current {{field}} comes from the LimitRange default, the template has none",
+      "java": "Java options are set: check -Xmx or MaxRAMPercentage together with the memory limit",
+      "go": "GOMEMLIMIT is set: check it together with the memory limit"
+    },
+    "bound": {
+      "min": "minimum",
+      "max": "maximum",
+      "ratio": "limit/request ratio"
+    },
+    "violation": {
+      "nodeAllocatable": "{{container}}: request {{resource}} {{request}} is above the allocatable of the largest node {{allocatable}}"
+    },
+    "chartFailed": "The chart could not be loaded",
+    "currentOnly": "Current values from metrics.k8s.io only: no history, the window does not apply",
+    "noPodUsage": "No usage data for this pod",
+    "sort": "Sort",
+    "sortRisk": "By risk",
+    "sortReserve": "By reserve",
+    "onlyActionable": "Only with recommendations",
+    "filter": "Workload name",
+    "collecting": "Collecting the project usage (up to 45 s)…",
+    "collected": "collected {{when}}",
+    "truncated": "The list of workloads or pods is incomplete: the totals cover only what was read.",
+    "quotas": "Quotas:",
+    "noWorkloads": "No workloads",
+    "moreRows": "Showing {{shown}} of {{total}}: narrow the list by name",
+    "risk": {
+      "throttled": "{{container}}: throttling {{value}} %",
+      "oom": "{{container}}: OOM {{count}}",
+      "memoryNearLimit": "{{container}}: memory {{max}} of {{limit}}"
+    },
+    "excess": {
+      "cpu": "{{container}}: CPU request {{request}} with p95 {{usage}}",
+      "memory": "{{container}}: memory request {{request}} with max {{usage}}"
     }
   }
 }

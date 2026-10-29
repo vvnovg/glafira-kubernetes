@@ -4,6 +4,9 @@ import { useEffect } from "react";
 import { api } from "../api/client";
 import type { AnnotationStatus, HealthView } from "../api/types";
 
+/** Статус, который человек ставит предложению: «Отклонить» или «Открыть снова». */
+type ProposalAction = "rejected" | "open";
+
 /** Событие из Rust (`crate::health::CHANGED_EVENT`): изменилась проверка или замечания подключения. */
 export const HEALTH_EVENT = "health://changed";
 export const healthKey = (connectionId: string) => ["health", connectionId] as const;
@@ -40,7 +43,7 @@ export function useHealthEvents(): void {
   }, [qc]);
 }
 
-/** Действия вкладки «Замечания»: каждое возвращает свежее состояние подключения. */
+/** Действия вкладки «Замечания» (находки, замечания и предложения LLM): каждое возвращает свежее состояние подключения. */
 export function useHealthActions(connectionId: string) {
   const qc = useQueryClient();
   const onSuccess = (v: HealthView) => qc.setQueryData(healthKey(connectionId), v);
@@ -56,5 +59,11 @@ export function useHealthActions(connectionId: string) {
     }),
     remove: useMutation({ mutationFn: (id: string) => api.deleteAnnotation(connectionId, id), onSuccess }),
     removeAll: useMutation({ mutationFn: () => api.deleteAllAnnotations(connectionId), onSuccess }),
+    setProposalStatus: useMutation({
+      mutationFn: (p: { id: string; status: ProposalAction; reason?: string }) => api.setProposalStatus(connectionId, p.id, p.status, p.reason ?? null),
+      onSuccess,
+    }),
+    removeProposal: useMutation({ mutationFn: (id: string) => api.deleteProposal(connectionId, id), onSuccess }),
+    removeAllProposals: useMutation({ mutationFn: () => api.deleteAllProposals(connectionId), onSuccess }),
   };
 }

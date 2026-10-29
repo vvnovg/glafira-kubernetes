@@ -1,6 +1,8 @@
 //! Общее для интеграционных тестов на kind: kubeconfig стенда и подключение из его контекста.
 #![allow(dead_code)]
 
+pub mod prometheus;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 

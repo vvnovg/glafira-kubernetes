@@ -12,6 +12,8 @@ use glafira_mcp_core::{
 };
 use glafira_mcp_kubernetes::health::*;
 use glafira_mcp_kubernetes::model::*;
+use glafira_mcp_kubernetes::proposals::*;
+use glafira_mcp_kubernetes::resources::*;
 use glafira_mcp_kubernetes::{GatewayOptions, INSTRUCTIONS};
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig, Implementation,
@@ -49,6 +51,9 @@ struct Fake {
     scope_after_check: Mutex<Option<(String, Option<BTreeSet<String>>)>>,
     /// Клиенты, о праве которых шлюз спрашивал приложение, по порядку (`None` — безымянный).
     asked: Mutex<Vec<Option<String>>>,
+    proposal_ops: Mutex<Vec<ProposalOp>>,
+    /// Ряды графиков такой длины, что ответ не помещается в 100 КБ.
+    big_series: AtomicBool,
 }
 
 impl Fake {
@@ -67,6 +72,8 @@ impl Fake {
             scope_overrides: Mutex::new(BTreeMap::new()),
             scope_after_check: Mutex::new(None),
             asked: Mutex::new(Vec::new()),
+            proposal_ops: Mutex::new(Vec::new()),
+            big_series: AtomicBool::new(false),
         })
     }
 
@@ -283,6 +290,113 @@ fn annotations() -> BTreeMap<String, String> {
     ])
 }
 
+fn quantities(cpu: &str, memory: &str) -> Resources {
+    Resources {
+        cpu: Some(cpu.into()),
+        memory: Some(memory.into()),
+    }
+}
+
+fn source() -> Source {
+    Source {
+        kind: "prometheus".into(),
+        origin: "auto".into(),
+        location: Some("monitoring/prometheus-k8s:9090".into()),
+        history: true,
+    }
+}
+
+fn sample_usage(window_days: u32, points: i64) -> ResourceUsage {
+    ResourceUsage {
+        window_days,
+        source: source(),
+        rejected: vec![],
+        coverage_percent: Some(95.0),
+        data_days: Some(7.0),
+        kube_state_metrics: true,
+        replicas: Some(2),
+        containers: vec![ContainerUsage {
+            name: "app".into(),
+            init: false,
+            requests: quantities("500m", "512Mi"),
+            limits: quantities("1", "1Gi"),
+            limit_range_defaults: vec![],
+            stats: UsageStats {
+                cpu_p95: Some("200m".into()),
+                memory_max: Some("400Mi".into()),
+                oom_count: Some(0),
+                ..Default::default()
+            },
+        }],
+        series: Some(UsageSeries {
+            step_seconds: 3024,
+            cpu_cores: vec![ContainerSeries {
+                container: "app".into(),
+                points: (0..points).map(|i| (i * 3024, 0.123_456_789)).collect(),
+            }],
+            memory_mib: vec![],
+            restarts: vec![],
+            ooms: vec![],
+        }),
+    }
+}
+
+fn sample_recommendation(window_days: u32) -> Recommendation {
+    Recommendation {
+        window_days,
+        source: source(),
+        rejected: vec![],
+        confidence: "high".into(),
+        coverage_percent: Some(95.0),
+        data_days: Some(7.0),
+        replicas: Some(2),
+        containers: vec![ContainerRecommendation {
+            name: "app".into(),
+            current_requests: quantities("500m", "512Mi"),
+            current_limits: quantities("1", "1Gi"),
+            recommended_requests: Some(quantities("230m", "352Mi")),
+            recommended_limits: Some(quantities("390m", "528Mi")),
+            notes: vec![],
+        }],
+        violations: vec![],
+        hpa: vec![],
+        totals: Totals::default(),
+    }
+}
+
+fn proposal_view(id: &str, ns: &str, updated: i64) -> ProposalView {
+    ProposalView {
+        id: id.into(),
+        severity: Severity::Warning,
+        title: "Scale out".into(),
+        rationale: "r".into(),
+        target: Target {
+            kind: TargetKind::Workload,
+            namespace: Some(ns.into()),
+            name: Some("web".into()),
+            workload_kind: Some(WorkloadKind::Deployment),
+        },
+        change: ChangeSpec::Scale {
+            namespace: ns.into(),
+            workload: WorkloadRef {
+                kind: WorkloadKind::Deployment,
+                name: "web".into(),
+            },
+            replicas: 3,
+        },
+        related_rule_id: None,
+        related_finding_key: None,
+        client: Some("claude-ai".into()),
+        status: "open".into(),
+        created_at_ms: 1,
+        updated_at_ms: updated,
+        closed_at_ms: None,
+        applied_as_proposed: None,
+        applied_change: None,
+        reject_reason: None,
+    }
+}
+
 impl Hooks for Fake {
     fn access(&self, session: &SessionView) -> SessionAccess {
         self.asked
@@ -474,8 +588,50 @@ impl Backend for Fake {
                     };
                     ReadOutput::WorkloadState(s)
                 }
+                ReadOp::ResourceUsage { window_days, .. } => {
+                    let points = if self.big_series.load(Ordering::SeqCst) {
+                        6000
+                    } else {
+                        2
+                    };
+                    ReadOutput::ResourceUsage(sample_usage(window_days, points))
+                }
+                ReadOp::RecommendResources { window_days, .. } => {
+                    ReadOutput::Recommendation(sample_recommendation(window_days))
+                }
                 _ => return Err(BackendError::unexpected()),
             })
+        })
+    }
+
+    fn proposals(&self, op: ProposalOp) -> BoxFuture<'_, Result<ProposalOutput, BackendError>> {
+        Box::pin(async move {
+            self.proposal_ops.lock().unwrap().push(op.clone());
+            match op {
+                ProposalOp::Propose { proposal, .. } => {
+                    if proposal.change.target_name() == "ghost" {
+                        return Err(BackendError::not_found("There is no workload team-a/ghost"));
+                    }
+                    Ok(ProposalOutput::Proposed {
+                        proposal_id: "p1".into(),
+                        created: true,
+                        read_only: false,
+                        warnings: vec!["The quota compute has no room for requests.memory".into()],
+                    })
+                }
+                ProposalOp::List { .. } => Ok(ProposalOutput::Proposals(vec![
+                    proposal_view("p0", "team-a", 10),
+                    proposal_view("p1", "team-b", 30),
+                    proposal_view("p2", "team-a", 20),
+                ])),
+                ProposalOp::Withdraw { proposal_id, .. } => match proposal_id.as_str() {
+                    "foreign" => Err(BackendError::new(
+                        "not_allowed",
+                        "This proposal belongs to another client",
+                    )),
+                    _ => Ok(ProposalOutput::Withdrawn),
+                },
+            }
         })
     }
 
@@ -624,6 +780,7 @@ async fn exposes_exactly_the_tools() {
             "get_cluster_overview",
             "get_network",
             "get_quotas",
+            "get_resource_usage",
             "health_check",
             "list_annotations",
             "list_connections",
@@ -631,15 +788,22 @@ async fn exposes_exactly_the_tools() {
             "list_nodes",
             "list_pods",
             "list_projects",
+            "list_proposals",
             "list_workloads",
             "observe_workload",
+            "propose_change",
+            "recommend_resources",
             "remove_annotation",
+            "withdraw_proposal",
         ]
     );
     for t in &tools {
         let a = t.annotations.as_ref().unwrap();
-        // Замечания пишутся в Glafira (не в кластер): только они не read-only.
-        let writes = matches!(t.name.as_ref(), "annotate" | "remove_annotation");
+        // Замечания и предложения пишутся в Glafira (не в кластер): только они не read-only.
+        let writes = matches!(
+            t.name.as_ref(),
+            "annotate" | "remove_annotation" | "propose_change" | "withdraw_proposal"
+        );
         assert_eq!(
             (a.read_only_hint, a.destructive_hint, a.open_world_hint),
             (Some(!writes), Some(false), Some(false)),
@@ -1313,6 +1477,10 @@ impl Backend for Odd {
             }
             Ok(out)
         })
+    }
+
+    fn proposals(&self, op: ProposalOp) -> BoxFuture<'_, Result<ProposalOutput, BackendError>> {
+        self.fake.proposals(op)
     }
 
     fn health(&self, op: HealthOp) -> BoxFuture<'_, Result<HealthOutput, BackendError>> {
@@ -2170,4 +2338,184 @@ async fn long_annotation_list_is_cut_to_the_newest() {
         .map(|i| format!("n{i}"))
         .collect();
     assert_eq!(ids, expected);
+}
+
+#[tokio::test]
+async fn resource_tools_check_the_window_and_the_scope() {
+    let fake = Fake::new();
+    let e = env(fake.clone()).await;
+    let c = client(&e.ep).await;
+    let w = json!({"kind": "Deployment", "name": "web"});
+    let v = ok(call(
+        &c,
+        "get_resource_usage",
+        json!({"connectionId": "c1", "namespace": "team-a", "workload": w}),
+    )
+    .await);
+    assert_eq!(v["windowDays"], 7, "окно по умолчанию — 7 дней");
+    assert_eq!(v["containers"][0]["stats"]["cpuP95"], "200m");
+    assert_eq!(
+        v["series"]["cpuCores"][0]["points"][1],
+        json!([3024, 0.123_456_789])
+    );
+    let v = ok(call(
+        &c,
+        "recommend_resources",
+        json!({"connectionId": "c1", "namespace": "team-a", "workload": w, "windowDays": 30}),
+    )
+    .await);
+    assert_eq!(v["windowDays"], 30);
+    assert_eq!(v["confidence"], "high");
+    assert_eq!(
+        v["containers"][0]["recommendedRequests"],
+        json!({"cpu": "230m", "memory": "352Mi"})
+    );
+    let msg = err(&call(
+        &c,
+        "recommend_resources",
+        json!({"connectionId": "c1", "namespace": "team-a", "workload": w, "windowDays": 3}),
+    )
+    .await);
+    assert!(
+        msg.starts_with("invalid_argument") && msg.contains("1, 7, 14 or 30"),
+        "{msg}"
+    );
+    let msg = err(&call(
+        &c,
+        "get_resource_usage",
+        json!({"connectionId": "c1", "namespace": "team-b", "workload": w}),
+    )
+    .await);
+    assert!(msg.starts_with("not_allowed"), "{msg}");
+    assert_eq!(
+        fake.ops
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|o| matches!(
+                o,
+                ReadOp::ResourceUsage { .. } | ReadOp::RecommendResources { .. }
+            ))
+            .count(),
+        2,
+        "окно и область проверены до бэкенда"
+    );
+}
+
+#[tokio::test]
+async fn usage_without_series_when_they_do_not_fit() {
+    let fake = Fake::new();
+    fake.big_series.store(true, Ordering::SeqCst);
+    let e = env(fake).await;
+    let c = client(&e.ep).await;
+    let v = ok(call(
+        &c,
+        "get_resource_usage",
+        json!({"connectionId": "c1", "namespace": "team-a", "workload": {"kind": "Deployment", "name": "web"}}),
+    )
+    .await);
+    assert!(v.get("series").is_none());
+    assert_eq!(
+        v["hint"],
+        "The series were omitted to fit the 100 KB response limit; the statistics are complete"
+    );
+    assert_eq!(v["containers"][0]["name"], "app");
+}
+
+#[tokio::test]
+async fn proposals_are_checked_scoped_and_listed() {
+    let fake = Fake::new();
+    let e = env(fake.clone()).await;
+    let c = client(&e.ep).await;
+    let change = |ns: &str, name: &str| json!({"kind": "scale", "namespace": ns, "workload": {"kind": "Deployment", "name": name}, "replicas": 3});
+    let propose = |change: Value, rationale: &str| {
+        json!({"connectionId": "c1", "severity": "warning", "title": "Scale out",
+            "rationale": rationale, "change": change, "relatedRuleId": "workload.singleReplica"})
+    };
+    let v = ok(call(
+        &c,
+        "propose_change",
+        propose(change("team-a", "web"), "One replica is a risk"),
+    )
+    .await);
+    assert_eq!(
+        v,
+        json!({"proposalId": "p1", "created": true, "readOnly": false,
+        "warnings": ["The quota compute has no room for requests.memory"]})
+    );
+    let msg = err(&call(&c, "propose_change", propose(change("team-a", "web"), "  ")).await);
+    assert!(
+        msg.starts_with("invalid_argument") && msg.contains("rationale"),
+        "{msg}"
+    );
+    let msg = err(&call(&c, "propose_change", propose(change("team-b", "web"), "r")).await);
+    assert!(msg.starts_with("not_allowed"), "{msg}");
+    let msg = err(&call(
+        &c,
+        "propose_change",
+        propose(change("team-a", "ghost"), "r"),
+    )
+    .await);
+    assert!(msg.starts_with("not_found"), "{msg}");
+    let delete = json!({"kind": "deletePod", "namespace": "team-a", "pod": "web-1"});
+    let r = call(&c, "propose_change", propose(delete, "r")).await;
+    assert_eq!(r.is_error, Some(true), "удаление пода предложить нельзя");
+    let typo = json!({"kind": "setResources", "namespace": "team-a",
+        "workload": {"kind": "Deployment", "name": "web"},
+        "containers": [{"name": "app", "limit": {"cpu": "1"}}]});
+    let r = call(&c, "propose_change", propose(typo, "r")).await;
+    assert_eq!(
+        r.is_error,
+        Some(true),
+        "опечатка limit вместо limits — ошибка аргументов"
+    );
+    assert_eq!(
+        fake.proposal_ops.lock().unwrap().len(),
+        2,
+        "до бэкенда дошли только верные"
+    );
+    // В журнал — без заголовка и обоснования.
+    let recent = e.audit.recent(20);
+    let entry = recent
+        .iter()
+        .find(|x| x["tool"] == "propose_change" && x["outcome"] == "ok")
+        .unwrap();
+    let logged = entry.to_string();
+    assert!(
+        !logged.contains("Scale out") && !logged.contains("One replica"),
+        "{logged}"
+    );
+    assert!(
+        logged.contains("scale") && logged.contains("web"),
+        "{logged}"
+    );
+
+    let v = ok(call(
+        &c,
+        "list_proposals",
+        json!({"connectionId": "c1", "status": "all"}),
+    )
+    .await);
+    let ids: Vec<&str> = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["p2", "p0"], "новые первыми, team-b не видно");
+    assert_eq!(v["items"][0]["change"]["kind"], "scale");
+    let v = ok(call(
+        &c,
+        "withdraw_proposal",
+        json!({"connectionId": "c1", "proposalId": "p2"}),
+    )
+    .await);
+    assert_eq!(v, json!({"withdrawn": true}));
+    let msg = err(&call(
+        &c,
+        "withdraw_proposal",
+        json!({"connectionId": "c1", "proposalId": "foreign"}),
+    )
+    .await);
+    assert!(msg.starts_with("not_allowed"), "{msg}");
 }

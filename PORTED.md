@@ -144,9 +144,9 @@
 | `crates/glafira-mcp-kubernetes/src/server/tools.rs` | `crates/glafira-mcp/src/server/tools.rs` | `8bbd0bd` | адаптирован: 13 инструментов чтения Kubernetes, маскировка в ответах |
 | `crates/glafira-mcp-kubernetes/tests/server.rs` | `crates/glafira-mcp/tests/server.rs` | `8bbd0bd` | адаптирован: фальшивый Backend Kubernetes, область LLM, маскировка |
 | `crates/glafira-mcp-kubernetes/src/server/health_tools.rs` | `crates/glafira-mcp/src/server/health_tools.rs` | `8bbd0bd` | адаптирован: проекты проверки, фильтр области LLM, объекты Kubernetes |
-| `src-tauri/src/health/store.rs` | `src-tauri/src/health/store.rs` | `8bbd0bd` | адаптирован: без предложений LLM (этап O3) и лага групп, проекты проверки, объекты Kubernetes |
+| `src-tauri/src/health/store.rs` | `src-tauri/src/health/store.rs` | `8bbd0bd` | адаптирован: без лага групп, проекты проверки, объекты Kubernetes; предложения LLM — с изменениями Kubernetes (`change::Change`) |
 | `src-tauri/src/health/service.rs` | `src-tauri/src/health/service.rs` | `8bbd0bd` | адаптирован: сборщик снимка Kubernetes, проекты проверки, без лага групп |
-| `src-tauri/src/commands/health.rs` | `src-tauri/src/commands/health.rs` | `8bbd0bd` | адаптирован: без предложений LLM (этап O3) |
+| `src-tauri/src/commands/health.rs` | `src-tauri/src/commands/health.rs` | `8bbd0bd` | адаптирован: отметка «применено» — по изменению Kubernetes (`change::Change`) |
 | `src-tauri/src/mcp/files.rs` | `src-tauri/src/mcp/files.rs` | `8bbd0bd` | адаптирован: ссылка на спеку |
 | `src-tauri/src/mcp/approvals.rs` | `src-tauri/src/mcp/approvals.rs` | `8bbd0bd` | адаптирован: крейт glafira-mcp-core, ссылка на спеку |
 | `src-tauri/src/mcp/backend.rs` | `src-tauri/src/mcp/backend.rs` | `8bbd0bd` | адаптирован: чтения Kubernetes через ReadClient, область llmNamespaces, проверка по проектам, объекты Kubernetes |
@@ -188,3 +188,14 @@
 | `src/components/common/ChunkBoundary.tsx` | `src/components/common/ChunkBoundary.tsx` | `c5446fc` | как есть |
 | `src/components/common/ExternalLink.tsx` | `src/components/common/ExternalLink.tsx` | `c5446fc` | как есть |
 | `docs/releases-repo/SUPPORT.md` | `docs/releases-repo/SUPPORT.md` | `c5446fc` | адаптирован: название продукта |
+| `src-tauri/src/guard.rs` | `src-tauri/src/guard.rs` | `8bbd0bd` | адаптирован: профиль подключения Kubernetes, ввод имени пода без контроллера |
+| `src-tauri/src/health/proposals.rs` | `src-tauri/src/health/proposals.rs` | `8bbd0bd` | адаптирован: модель, статусы и сроки предложения; вид изменения — `change::Change` (§9) |
+| `crates/glafira-mcp-kubernetes/src/proposals.rs` | `crates/glafira-mcp/src/proposals.rs` | `8bbd0bd` | адаптирован: виды изменения Kubernetes (§9), предупреждения проверки |
+| `crates/glafira-mcp-kubernetes/src/server/proposal_tools.rs` | `crates/glafira-mcp/src/server/proposal_tools.rs` | `8bbd0bd` | адаптирован: виды изменения Kubernetes, область LLM, предупреждения |
+| `src/components/common/ConfirmDialog.tsx` | `src/components/common/ConfirmDialog.tsx` | `8bbd0bd` | адаптирован: подписи — имя пода |
+| `src/components/common/ConfirmDialog.test.tsx` | `src/components/common/ConfirmDialog.test.tsx` | `8bbd0bd` | адаптирован: объекты Kubernetes в примерах |
+| `src/lib/useConnection.ts` | `src/lib/useConnection.ts` | `8bbd0bd` | как есть |
+| `src/components/health/ProposalItem.tsx` | `src/components/health/ProposalItem.tsx` | `8bbd0bd` | адаптирован: объект — всегда ссылка, описание изменений Kubernetes |
+| `src/components/health/ProposalItem.test.tsx` | `src/components/health/ProposalItem.test.tsx` | `8bbd0bd` | адаптирован: предложение о репликах |
+| `src/components/health/useActivePrefill.ts` | `src/components/health/useActivePrefill.ts` | `8bbd0bd` | как есть |
+| `src/components/health/proposals.ts` | `src/components/health/proposals.ts` | `8bbd0bd` | адаптирован: вкладка формы и описание изменений Kubernetes (§9) |

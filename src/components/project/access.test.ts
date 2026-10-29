@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { NamespaceAccess, Verbs } from "../../api/types";
 import { WORKLOAD_RESOURCES, canList } from "./access";
 
-const verbs = (list: boolean): Verbs => ({ get: list, list, watch: list });
+const verbs = (list: boolean): Verbs => ({ get: list, list, watch: list, patch: false, delete: false, create: false });
 const access = (resources: Record<string, Verbs>, incomplete = false): NamespaceAccess => ({ resources, incomplete });
 
 describe("canList", () => {

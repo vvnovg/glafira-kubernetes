@@ -6,6 +6,7 @@ pub const CHANGED_EVENT: &str = "health://changed";
 
 pub mod collect;
 pub mod model;
+pub mod proposals;
 pub mod rules;
 pub mod service;
 pub mod snapshot;

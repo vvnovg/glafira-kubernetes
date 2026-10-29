@@ -17,7 +17,7 @@ vi.mock("../../api/client", async (importOriginal) => {
   return {
     ...orig,
     api: {
-      getHealth: vi.fn().mockResolvedValue({ lastCheck: null, ignored: [], annotations: [] }),
+      getHealth: vi.fn().mockResolvedValue({ lastCheck: null, ignored: [], annotations: [], proposals: [] }),
       getNamespaceAccess: vi.fn(),
       listPods: vi.fn(),
       listWorkloads: vi.fn(),
@@ -104,7 +104,7 @@ describe("ProjectPanel", () => {
 
   it("подвкладки без прав на чтение не показываются", async () => {
     vi.mocked(api.getNamespaceAccess).mockResolvedValue({
-      resources: { pods: { get: true, list: true, watch: false }, events: { get: false, list: false, watch: false } },
+      resources: { pods: { get: true, list: true, watch: false, patch: false, delete: false, create: false }, events: { get: false, list: false, watch: false, patch: false, delete: false, create: false } },
       incomplete: false,
     });
     renderWithClient(<ProjectPanel connectionId="c1" namespace="team-a" />);
@@ -162,11 +162,11 @@ describe("права проекта: перечитывание", () => {
   afterEach(() => vi.useRealTimers());
 
   const READ_EVENTS_DENIED: NamespaceAccess = {
-    resources: { pods: { get: true, list: true, watch: true }, events: { get: false, list: false, watch: false } },
+    resources: { pods: { get: true, list: true, watch: true, patch: false, delete: false, create: false }, events: { get: false, list: false, watch: false, patch: false, delete: false, create: false } },
     incomplete: false,
   };
   const READ_EVENTS_GRANTED: NamespaceAccess = {
-    resources: { pods: { get: true, list: true, watch: true }, events: { get: true, list: true, watch: true } },
+    resources: { pods: { get: true, list: true, watch: true, patch: false, delete: false, create: false }, events: { get: true, list: true, watch: true, patch: false, delete: false, create: false } },
     incomplete: false,
   };
 

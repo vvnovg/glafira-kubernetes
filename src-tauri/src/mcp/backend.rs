@@ -44,7 +44,7 @@ pub type OnChange = Arc<dyn Fn(bool) + Send + Sync>;
 const POD_EVENTS: usize = 20;
 
 pub struct AppBackend {
-    state: AppState,
+    pub(super) state: AppState,
     approvals: Arc<Approvals>,
     on_change: OnChange,
 }
@@ -52,7 +52,7 @@ pub struct AppBackend {
 /// Код ошибки — как в приложении (`FORBIDDEN`, `NOT_FOUND`, `SESSION_EXPIRED`…), текст —
 /// английский. Подробности (`details`) LLM не получает, а тексты с данными профиля — адресом,
 /// командой плагина, именем пользователя — заменены фиксированной фразой (`map::llm_message`).
-fn to_backend(e: AppError) -> BackendError {
+pub(super) fn to_backend(e: AppError) -> BackendError {
     BackendError::new(code(&e), map::llm_message(&e))
 }
 
@@ -63,7 +63,7 @@ const BACKGROUND_FAILED: &str = "A background task in Glafira failed; retry the 
 
 /// Ошибки проверки и замечаний: сбой файла Glafira и паника фоновой задачи — `internal` с
 /// общим текстом; остальные (кластер, подключение) — как у чтений.
-fn health_to_backend(e: AppError) -> BackendError {
+pub(super) fn health_to_backend(e: AppError) -> BackendError {
     if ["errors.io", "errors.json"].contains(&e.key.as_str())
         || e.key.starts_with("errors.storage.")
     {
@@ -128,7 +128,7 @@ impl AppBackend {
     }
 
     /// Профиль подключения, открытого для LLM; нет подключения и доступ выключен — одна ошибка.
-    fn allowed(&self, id: &str) -> Result<ConnectionProfile, BackendError> {
+    pub(super) fn allowed(&self, id: &str) -> Result<ConnectionProfile, BackendError> {
         match self.state.connections.get(id) {
             Ok(p) if !p.llm_access.is_off() => Ok(p),
             _ => Err(not_allowed()),
@@ -136,7 +136,7 @@ impl AppBackend {
     }
 
     /// Проект в области LLM подключения (крейт проверяет это до вызова; здесь — ещё раз).
-    fn in_scope(p: &ConnectionProfile, namespace: &str) -> Result<(), BackendError> {
+    pub(super) fn in_scope(p: &ConnectionProfile, namespace: &str) -> Result<(), BackendError> {
         match &p.llm_namespaces {
             Some(list) if !list.iter().any(|n| n == namespace) => Err(not_allowed()),
             _ => Ok(()),
@@ -411,6 +411,71 @@ impl AppBackend {
                 .map_err(to_backend)?;
                 ReadOutput::WorkloadState(s)
             }
+            ReadOp::ResourceUsage {
+                connection_id,
+                namespace,
+                workload,
+                window_days,
+            } => {
+                let (st2, id, ns) = (st.clone(), connection_id.clone(), namespace.clone());
+                let r = Box::pin(st.read_in(&connection_id, &namespace, |c| async move {
+                    let sel = crate::metrics::select::for_connection(&st2, &id, &c, false).await?;
+                    if sel.history.is_none() && !sel.status.pod_metrics {
+                        return Ok(Err(sel.status.clone()));
+                    }
+                    let kind = workload_kind(workload.kind);
+                    crate::resources::usage::workload_usage(
+                        &c.reader(),
+                        &sel,
+                        &ns,
+                        kind,
+                        &workload.name,
+                        window_days,
+                        now,
+                    )
+                    .await
+                    .map(Ok)
+                }))
+                .await
+                .map_err(to_backend)?;
+                let u = r.map_err(|s| super::resources::metrics_unavailable(&s))?;
+                ReadOutput::ResourceUsage(super::resources::usage(&u, now))
+            }
+            ReadOp::RecommendResources {
+                connection_id,
+                namespace,
+                workload,
+                window_days,
+            } => {
+                let (st2, id, ns) = (st.clone(), connection_id.clone(), namespace.clone());
+                let r = Box::pin(st.read_in(&connection_id, &namespace, |c| async move {
+                    let sel = crate::metrics::select::for_connection(&st2, &id, &c, false).await?;
+                    if sel.history.is_none() && !sel.status.pod_metrics {
+                        return Ok(Err(sel.status.clone()));
+                    }
+                    let kind = workload_kind(workload.kind);
+                    let nodes = c.info.capabilities.list_nodes.then_some(&c.nodes);
+                    crate::resources::analyze(
+                        &c.reader(),
+                        &sel,
+                        &ns,
+                        kind,
+                        &workload.name,
+                        window_days,
+                        now,
+                        nodes,
+                    )
+                    .await
+                    .map(|a| Ok((a, sel.status.clone())))
+                }))
+                .await
+                .map_err(to_backend)?;
+                let (a, status) = r.map_err(|s| super::resources::metrics_unavailable(&s))?;
+                ReadOutput::Recommendation(super::resources::recommendation(
+                    &a.recommendation,
+                    &status,
+                ))
+            }
         };
         Ok(out)
     }
@@ -418,27 +483,33 @@ impl AppBackend {
 
 impl AppBackend {
     /// Автор замечаний и проверок: имя из диалога подтверждения.
-    fn author(&self, session: &SessionView) -> Author {
+    pub(super) fn author(&self, session: &SessionView) -> Author {
         Author {
             client: self.approvals.shown_name(&session.id),
             session_id: session.id.clone(),
         }
     }
 
-    /// Объект замечания есть в кластере (защита от придуманных имён). Проект проверяется по
-    /// имени: его самого пользователь без прав на `namespaces` прочитать не может.
+    /// Объект замечания есть в кластере (защита от придуманных имён). Объекты проекта читаются
+    /// через `read_in` (403 сбрасывает кэш прав проекта, как у вкладки); проект — по списку
+    /// проектов пользователя (`project_exists`).
     async fn target_exists(&self, connection_id: &str, t: &Target) -> Result<(), BackendError> {
         let ns = t.namespace.clone().unwrap_or_default();
         let name = t.name.clone().unwrap_or_default();
         let found = match t.kind {
             TargetKind::Cluster => true,
-            TargetKind::Project => is_valid_namespace(&ns),
+            TargetKind::Project => self.project_exists(connection_id, &ns).await?,
             _ => {
-                let t = t.clone();
-                let r = Box::pin(self.state.read(connection_id, |c| async move {
-                    exists(&c.reader(), &t, &ns, &name).await
-                }))
-                .await;
+                let node = t.kind == TargetKind::Node;
+                let (target, in_ns) = (t.clone(), ns.clone());
+                let read = |c: Arc<crate::k8s::pool::Connected>| async move {
+                    exists(&c.reader(), &target, &in_ns, &name).await
+                };
+                let r = if node {
+                    Box::pin(self.state.read(connection_id, read)).await
+                } else {
+                    Box::pin(self.state.read_in(connection_id, &ns, read)).await
+                };
                 match r {
                     Ok(found) => found,
                     Err(e) if e.code == ErrorCode::NotFound => false,
@@ -459,6 +530,22 @@ impl AppBackend {
                     .join("/")
             )))
         }
+    }
+
+    /// Проект есть среди проектов пользователя (как в дереве). Без права на их список (403)
+    /// проверить нельзя — тогда достаточно имени: так открывается проект из ручного списка.
+    async fn project_exists(&self, connection_id: &str, ns: &str) -> Result<bool, BackendError> {
+        if !is_valid_namespace(ns) {
+            return Ok(false);
+        }
+        let profile = self.allowed(connection_id)?;
+        let l = Box::pin(self.state.read(connection_id, |c| async move {
+            crate::k8s::projects::list_projects(&c.reader(), c.info.api_groups.projects, &profile)
+                .await
+        }))
+        .await
+        .map_err(to_backend)?;
+        Ok(l.error.is_some() || l.truncated || l.items.iter().any(|p| p.name == ns))
     }
 
     async fn health_impl(&self, op: mh::HealthOp) -> Result<mh::HealthOutput, BackendError> {
@@ -673,7 +760,10 @@ async fn exists(r: &ReadClient, t: &Target, ns: &str, name: &str) -> AppResult<b
 }
 
 /// Общие проверки текстов замечания: правило из каталога, непустой заголовок.
-fn check_note_texts(related_rule_id: Option<&str>, title: &str) -> Result<(), BackendError> {
+pub(super) fn check_note_texts(
+    related_rule_id: Option<&str>,
+    title: &str,
+) -> Result<(), BackendError> {
     if let Some(r) = related_rule_id
         && !rules::rule_ids().any(|id| id == r)
     {
@@ -771,6 +861,14 @@ impl Backend for AppBackend {
 
     fn health(&self, op: mh::HealthOp) -> BoxFuture<'_, Result<mh::HealthOutput, BackendError>> {
         Box::pin(self.health_impl(op))
+    }
+
+    fn proposals(
+        &self,
+        op: glafira_mcp_kubernetes::proposals::ProposalOp,
+    ) -> BoxFuture<'_, Result<glafira_mcp_kubernetes::proposals::ProposalOutput, BackendError>>
+    {
+        Box::pin(self.proposals_impl(op))
     }
 }
 
@@ -1063,6 +1161,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn project_notes_need_a_project_of_the_user() {
+        let (_d, b) = backend();
+        let ns = |name: &str| serde_json::json!({"metadata": {"name": name}});
+        pooled(&b, "all", move |s| match s.path() {
+            "/api/v1/namespaces" => list(vec![ns("team-a")]),
+            _ => status(404, "NotFound", "not found"),
+        });
+        let session = view("s1", Some("claude-ai"));
+        b.access(&session);
+        let annotate = |project: &str| {
+            b.health(mh::HealthOp::Annotate {
+                connection_id: "all".into(),
+                session: session.clone(),
+                note: note(Target::project(project), "Project note"),
+            })
+        };
+        assert!(annotate("team-a").await.is_ok());
+        let e = annotate("team-b").await.unwrap_err();
+        assert_eq!(e.code, "not_found", "{e:?}");
+        // Без права на список проектов проверить нельзя: достаточно имени.
+        pooled(&b, "all", |_| {
+            status(403, "Forbidden", "namespaces is forbidden")
+        });
+        assert!(annotate("team-b").await.is_ok());
+    }
+
+    #[tokio::test]
     async fn health_ops_need_llm_access() {
         let (_d, b) = backend();
         let e = b
@@ -1221,5 +1346,325 @@ mod tests {
         assert_eq!(to_backend(e.clone()).message, e.message);
         let e = crate::k8s::errors::from_transport_text("tls handshake eof");
         assert_eq!(to_backend(e.clone()).message, e.message);
+    }
+
+    fn workload_ref() -> m::WorkloadRef {
+        m::WorkloadRef {
+            kind: m::WorkloadKind::Deployment,
+            name: "web".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn resources_come_from_the_metrics_source_without_the_own_address() {
+        let (_d, b) = backend();
+        pooled(&b, "open", crate::resources::usage::tests::cluster);
+        let usage = || ReadOp::ResourceUsage {
+            connection_id: "open".into(),
+            namespace: "team-a".into(),
+            workload: workload_ref(),
+            window_days: 7,
+        };
+        // Prometheus через прокси нет (404), metrics.k8s.io есть — одна точка без истории.
+        let ReadOutput::ResourceUsage(u) = b.read(usage()).await.unwrap() else {
+            panic!("usage")
+        };
+        assert_eq!(u.source.kind, "metricsServer");
+        assert_eq!(u.containers[0].stats.cpu_max.as_deref(), Some("120m"));
+        assert_eq!(u.containers[0].requests.cpu.as_deref(), Some("500m"));
+        assert!(u.series.is_none());
+        assert_eq!(u.rejected.len(), 4, "кандидаты Prometheus с причинами");
+        let ReadOutput::Recommendation(r) = b
+            .read(ReadOp::RecommendResources {
+                connection_id: "open".into(),
+                namespace: "team-a".into(),
+                workload: workload_ref(),
+                window_days: 7,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("recommendation")
+        };
+        assert_eq!(r.confidence, "low");
+        assert_eq!(
+            r.containers[0]
+                .recommended_requests
+                .as_ref()
+                .unwrap()
+                .cpu
+                .as_deref(),
+            Some("140m")
+        );
+        // Свой источник без токена: модель не видит его адреса.
+        let mut p = b.state.connections.get("open").unwrap();
+        p.metrics = crate::storage::profile::MetricsConfig::Prometheus(
+            crate::storage::profile::MetricsEndpoint {
+                url: "https://secret-prometheus.corp.example".into(),
+                auth: crate::storage::profile::MetricsAuth::Bearer,
+                ca: crate::storage::profile::MetricsCa::Connection,
+            },
+        );
+        b.state.connections.upsert(p).unwrap();
+        pooled(&b, "open", crate::resources::usage::tests::cluster);
+        let e = b.read(usage()).await.unwrap_err();
+        assert_eq!(e.code, "metrics_unavailable");
+        assert!(!e.message.contains("secret-prometheus"), "{}", e.message);
+        assert!(e.message.contains("tokenMissing"), "{}", e.message);
+    }
+
+    /// Свой источник метрик работает и выбран: его адрес не попадает в ответы модели — ни в
+    /// `source`, ни где-либо ещё в `get_resource_usage` и `recommend_resources`.
+    #[tokio::test]
+    async fn a_working_own_source_is_used_without_its_address() {
+        let (base, seen) = crate::metrics::http::fake::server(|line| {
+            let body = if line.contains("vector%281%29") || line.contains("vector(1)&") {
+                r#"{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1,"1"]}]}}"#
+            } else if line.contains("/query_range") {
+                r#"{"status":"success","data":{"resultType":"matrix","result":[]}}"#
+            } else {
+                r#"{"status":"success","data":{"resultType":"vector","result":[]}}"#
+            };
+            (200, body.to_string())
+        })
+        .await;
+        let (_d, b) = backend();
+        let mut p = b.state.connections.get("open").unwrap();
+        p.proxy = crate::storage::profile::ProxyConfig::None;
+        p.metrics = crate::storage::profile::MetricsConfig::Prometheus(
+            crate::storage::profile::MetricsEndpoint {
+                url: base.to_string(),
+                auth: crate::storage::profile::MetricsAuth::None,
+                ca: crate::storage::profile::MetricsCa::Connection,
+            },
+        );
+        b.state.connections.upsert(p).unwrap();
+        pooled(&b, "open", crate::resources::usage::tests::cluster);
+        let address = format!("{}:{}", base.host_str().unwrap(), base.port().unwrap());
+        let ReadOutput::ResourceUsage(u) = b
+            .read(ReadOp::ResourceUsage {
+                connection_id: "open".into(),
+                namespace: "team-a".into(),
+                workload: workload_ref(),
+                window_days: 7,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("usage")
+        };
+        assert_eq!(
+            (u.source.kind.as_str(), u.source.origin.as_str()),
+            ("prometheus", "profile")
+        );
+        assert_eq!(u.source.location, None);
+        assert!(u.rejected.is_empty());
+        let text = serde_json::to_string(&u).unwrap();
+        assert!(
+            !text.contains(&address) && !text.contains("/prefix"),
+            "{text}"
+        );
+        let ReadOutput::Recommendation(r) = b
+            .read(ReadOp::RecommendResources {
+                connection_id: "open".into(),
+                namespace: "team-a".into(),
+                workload: workload_ref(),
+                window_days: 7,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("recommendation")
+        };
+        assert_eq!(r.source.location, None);
+        let text = serde_json::to_string(&r).unwrap();
+        assert!(
+            !text.contains(&address) && !text.contains("/prefix"),
+            "{text}"
+        );
+        assert!(
+            seen.lock().unwrap().len() > 1,
+            "источник действительно опрашивался"
+        );
+    }
+
+    /// Подключение только для чтения: предложение создаётся (применит человек, сняв флажок), ответ
+    /// говорит `readOnly: true`. Список HPA не прочитался (500): `scale` — не отказ, а предложение с
+    /// предупреждением; форма перепроверит HPA при применении (решение контроллера).
+    #[tokio::test]
+    async fn read_only_connection_and_an_unread_hpa_list_still_give_a_proposal() {
+        use glafira_mcp_kubernetes::proposals::{ProposalOp, ProposalOutput};
+        let (_d, b) = backend();
+        let mut p = b.state.connections.get("open").unwrap();
+        p.read_only = true;
+        b.state.connections.upsert(p).unwrap();
+        pooled(&b, "open", |s| match s.path() {
+            "/apis/autoscaling/v2/namespaces/team-a/horizontalpodautoscalers" => {
+                status(500, "InternalError", "boom")
+            }
+            p if p.ends_with("/limitranges") || p.ends_with("/resourcequotas") => list(vec![]),
+            _ => crate::resources::usage::tests::cluster(s),
+        });
+        let session = view("s1", Some("claude-ai"));
+        b.access(&session);
+        let out = b
+            .proposals(ProposalOp::Propose {
+                connection_id: "open".into(),
+                session,
+                proposal: proposal(serde_json::json!({"kind": "scale", "namespace": "team-a",
+                    "workload": {"kind": "Deployment", "name": "web"}, "replicas": 3})),
+            })
+            .await
+            .unwrap();
+        let ProposalOutput::Proposed {
+            created,
+            read_only,
+            warnings,
+            ..
+        } = out
+        else {
+            panic!("proposed")
+        };
+        assert!(created && read_only);
+        assert_eq!(
+            warnings,
+            [
+                "The HorizontalPodAutoscalers of the project could not be read, so the change was not checked against them"
+            ]
+        );
+    }
+
+    fn proposal(change: serde_json::Value) -> glafira_mcp_kubernetes::proposals::NewProposal {
+        glafira_mcp_kubernetes::proposals::NewProposal {
+            severity: mh::Severity::Warning,
+            title: "Fix".into(),
+            rationale: "r".into(),
+            change: serde_json::from_value(change).unwrap(),
+            related_rule_id: None,
+            related_finding_key: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn proposals_are_checked_against_the_cluster_and_kept_in_glafira() {
+        use glafira_mcp_kubernetes::proposals::{ProposalOp, ProposalOutput};
+        let (_d, b) = backend();
+        pooled(&b, "open", |s| match s.path() {
+            "/apis/autoscaling/v2/namespaces/team-a/horizontalpodautoscalers" => list(vec![
+                serde_json::json!({"metadata": {"name": "web-hpa"}, "spec": {"maxReplicas": 5,
+                    "scaleTargetRef": {"kind": "Deployment", "name": "web"}}}),
+            ]),
+            "/api/v1/namespaces/team-a/limitranges" => list(vec![serde_json::json!({
+                "metadata": {"name": "lr"},
+                "spec": {"limits": [{"type": "Container", "min": {"cpu": "100m"}}]}})]),
+            p if p.ends_with("/resourcequotas") => list(vec![]),
+            other => crate::resources::usage::tests::cluster(&Seen {
+                method: s.method.clone(),
+                uri: other.to_string(),
+                body: s.body.clone(),
+            }),
+        });
+        let session = view("s1", Some("claude-ai"));
+        b.access(&session);
+        let propose = |change: serde_json::Value| {
+            b.proposals(ProposalOp::Propose {
+                connection_id: "open".into(),
+                session: session.clone(),
+                proposal: proposal(change),
+            })
+        };
+        let w = serde_json::json!({"kind": "Deployment", "name": "web"});
+        let e = propose(serde_json::json!({"kind": "scale", "namespace": "team-a", "workload": w, "replicas": 3}))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, "invalid_argument");
+        assert!(e.message.contains("setHpaBounds"), "{}", e.message);
+        let e = propose(
+            serde_json::json!({"kind": "setResources", "namespace": "team-a", "workload": w,
+            "containers": [{"name": "ghost", "requests": {"cpu": "1"}}]}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.code, "invalid_argument");
+        assert!(e.message.contains("ghost"), "{}", e.message);
+        let e = propose(
+            serde_json::json!({"kind": "rolloutRestart", "namespace": "team-b", "workload": w}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e, not_allowed());
+        // Значение ниже минимума LimitRange — ошибка, а не предупреждение: поды новой ревизии
+        // отклонят позже, и выкладка встанет.
+        let e = propose(
+            serde_json::json!({"kind": "setResources", "namespace": "team-a", "workload": w,
+            "containers": [{"name": "app", "requests": {"cpu": "50m"}}]}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.code, "invalid_argument");
+        assert!(e.message.contains("LimitRange"), "{}", e.message);
+        assert!(e.message.contains("100m"), "{}", e.message);
+        let out = propose(
+            serde_json::json!({"kind": "setResources", "namespace": "team-a", "workload": w,
+            "containers": [{"name": "app", "requests": {"cpu": "150m"}}]}),
+        )
+        .await
+        .unwrap();
+        let ProposalOutput::Proposed {
+            proposal_id,
+            created,
+            read_only,
+            warnings,
+        } = out
+        else {
+            panic!("proposed")
+        };
+        assert!(created && !read_only);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let ProposalOutput::Proposals(items) = b
+            .proposals(ProposalOp::List {
+                connection_id: "open".into(),
+                status: mh::StatusFilter::Open,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("list")
+        };
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].change.kind_name(), "setResources");
+        assert_eq!(
+            items[0].target.workload_kind,
+            Some(m::WorkloadKind::Deployment)
+        );
+        let other = view("s2", Some("cursor"));
+        b.access(&other);
+        let e = b
+            .proposals(ProposalOp::Withdraw {
+                connection_id: "open".into(),
+                session: other,
+                proposal_id: proposal_id.clone(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, "not_allowed");
+        assert!(matches!(
+            b.proposals(ProposalOp::Withdraw {
+                connection_id: "open".into(),
+                session,
+                proposal_id,
+            })
+            .await
+            .unwrap(),
+            ProposalOutput::Withdrawn
+        ));
+        let e = b
+            .proposals(ProposalOp::List {
+                connection_id: "closed".into(),
+                status: mh::StatusFilter::All,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(e, not_allowed());
     }
 }

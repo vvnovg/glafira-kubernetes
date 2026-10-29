@@ -1,0 +1,61 @@
+# Поддельный Prometheus для автопоиска через прокси API-сервера (tests/it_metrics.rs). Service
+# monitoring/prometheus-k8s:9090 — первый кандидат списка (metrics/discovery.rs). Прокси API-сервера ведёт
+# только на адреса подов, поэтому за Service стоит под-заглушка с hostNetwork на ноде control-plane: её адрес —
+# адрес ноды. setup.sh перенаправляет порт 19090 этого адреса на рабочую машину (DNAT в ноде), где тест
+# отвечает записанными ответами Prometheus HTTP API: образов с HTTP-сервером на ноде нет. Deployment busy
+# в team-a — нагрузка этих ответов: явные requests и limits (правила resources.* сравнивают с ними).
+# Образ __HELPER_IMAGE__ — помощник local-path-provisioner (fixtures.yaml).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-k8s
+  namespace: monitoring
+spec:
+  selector: { app: prometheus-stub }
+  ports:
+    - { name: web, port: 9090, targetPort: 19090 }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: prometheus-stub
+  namespace: monitoring
+  labels: { app: prometheus-stub }
+spec:
+  hostNetwork: true
+  nodeSelector: { node-role.kubernetes.io/control-plane: "" }
+  tolerations: [{ operator: Exists }]
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: stub
+      image: __HELPER_IMAGE__
+      imagePullPolicy: IfNotPresent
+      command: ["bash", "-c", "exec 3<> <(:); read -u 3"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: busy
+  namespace: team-a
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: busy }
+  template:
+    metadata:
+      labels: { app: busy }
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: app
+          image: __HELPER_IMAGE__
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c", "exec 3<> <(:); read -u 3"]
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 50m, memory: 32Mi }

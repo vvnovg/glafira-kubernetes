@@ -22,7 +22,14 @@
       "hours": "{{n}} ч",
       "days": "{{n}} д"
     },
-    "copyFailed": "Не удалось скопировать в буфер обмена"
+    "copyFailed": "Не удалось скопировать в буфер обмена",
+    "confirm": {
+      "typeObject": "Для подтверждения введите {{label}} <code>{{name}}</code>",
+      "prodNotice": "Это prod-подключение. Введите его имя <code>{{name}}</code>",
+      "defaultLabel": "имя",
+      "objectAria": "Подтверждение: {{label}}",
+      "connectionAria": "Имя подключения"
+    }
   },
   "errors": {
     "generic": "{{message}}",
@@ -72,7 +79,9 @@
       "execForbidden": "Подключения с exec-плагином запрещены вашей организацией",
       "tokenNotUsed": "Это подключение входит не по токену",
       "pemContainsKey": "Поле сертификата содержит приватный ключ — перенесите ключ в поле ключа",
-      "credentialsInUrl": "Уберите имя пользователя и пароль из «{{url}}»: учётным данным не место в адресе (прокси с паролем задаётся системным HTTPS_PROXY)"
+      "credentialsInUrl": "Уберите имя пользователя и пароль из «{{url}}»: учётным данным не место в адресе (прокси с паролем задаётся системным HTTPS_PROXY)",
+      "badMetricsUrl": "Неверный адрес источника метрик «{{url}}»: используйте https://хост[:порт][/путь]",
+      "metricsHttpsRequired": "Источнику метрик с токеном нужен адрес https://"
     },
     "folders": {
       "notFound": "Папка {{id}} не найдена",
@@ -163,7 +172,9 @@
       "saveStopped": "Сохранение лога остановлено: подключение закрыто"
     },
     "health": {
-      "annotationNotFound": "Замечание удалено или истёк его срок"
+      "annotationNotFound": "Замечание удалено или истёк его срок",
+      "proposalNotFound": "Предложение удалено или истёк его срок",
+      "proposalClosed": "Предложение в статусе {{status}}, перевести его в {{to}} нельзя"
     },
     "mcp": {
       "startFailed": "MCP-сервер не запустился: {{error}}",
@@ -183,6 +194,39 @@
       "installFailed": "Не удалось установить обновление",
       "sessionsActive": "Подключено LLM-ассистентов по MCP: {{active}}. Обновление их отключит.",
       "none": "Обновлений нет"
+    },
+    "metrics": {
+      "badResponse": "Источник метрик вернул неожиданный ответ",
+      "httpStatus": "Источник метрик {{url}} ответил кодом {{status}}",
+      "tokenMissing": "Токен источника метрик не сохранён",
+      "unavailable": "Ни один источник метрик не доступен"
+    },
+    "resources": {
+      "badWindow": "Окно анализа — 1, 7, 14 или 30 дней, а не {{days}}"
+    },
+    "guard": {
+      "readOnly": "Подключение «{{name}}» только для чтения",
+      "prodConfirm": "Чтобы изменить prod-подключение, введите его имя «{{name}}»",
+      "typeToConfirm": "Введите «{{expected}}» для подтверждения"
+    },
+    "change": {
+      "badQuantity": "Контейнер {{container}}: «{{value}}» — не quantity для {{field}}",
+      "containersCount": "Укажите от 1 до {{max}} контейнеров",
+      "duplicateContainer": "Контейнер {{container}} указан дважды",
+      "nothingToChange": "Контейнер {{container}}: нечего менять",
+      "scaleKind": "Масштабировать можно только Deployment, StatefulSet и DeploymentConfig",
+      "replicas": "Реплик — от 0 до {{max}}",
+      "restartKind": "Job и CronJob перезапустить нельзя",
+      "limitBelowRequest": "Контейнер {{container}}: limit {{resource}} меньше request",
+      "hpaBounds": "Границы HPA: 1 ≤ minReplicas ≤ maxReplicas ≤ {{max}}",
+      "noContainer": "В шаблоне подов нет контейнера {{container}}",
+      "limitRangeMin": "Контейнер {{container}}: {{field}} ниже минимума LimitRange {{limit}}. API-сервер не проверяет шаблон, и поды новой ревизии не создадутся",
+      "limitRangeMax": "Контейнер {{container}}: {{field}} выше максимума LimitRange {{limit}}. API-сервер не проверяет шаблон, и поды новой ревизии не создадутся",
+      "resourcesKind": "Ресурсы Job изменить нельзя: шаблон его подов неизменяем"
+    },
+    "ops": {
+      "admissionDenied": "Кластер отклонил изменение: {{message}}",
+      "changed": "Объект изменился после предпросмотра: обновите и повторите"
     }
   },
   "messages": {
@@ -199,12 +243,26 @@
       "discoveryGroups": "{{platform}} · API-сервер {{version}} · найдены: {{groups}}",
       "projectsOk": "Доступных проектов: {{count}}",
       "projectsManual": "Кластер не отдаёт вам список проектов; проектов в профиле: {{count}}",
-      "authOkGroups": "Вход выполнен: {{user}}, группы: {{groups}}"
+      "authOkGroups": "Вход выполнен: {{user}}, группы: {{groups}}",
+      "metricsHistory": "История потребления: {{source}}",
+      "metricsCurrent": "Источника истории нет: только текущие значения из metrics.k8s.io"
     },
     "import": {
       "addressChanged": "«{{name}}»: адрес API меняется с {{from}} на {{to}}. Сохранённые учётные данные (токен, ключ или подтверждённый exec-плагин) будут отправлены на новый адрес.",
       "proxyChanged": "«{{name}}»: меняются настройки прокси. Сохранённые учётные данные (токен, ключ или подтверждённый exec-плагин) пойдут через новый прокси.",
       "tlsChanged": "«{{name}}»: меняются настройки проверки сертификата (CA или имя сервера TLS). Сохранённые учётные данные (токен, ключ или подтверждённый exec-плагин) будут использоваться с новыми настройками."
+    },
+    "metrics": {
+      "thanosForbidden": "{{source}}: нет прав на мониторинг кластера (нужна роль cluster-monitoring-view или аналог)",
+      "podMetricsForbidden": "{{source}}: нет прав на метрики подов",
+      "proxyForbidden": "{{source}}: нет прав на источник (через API-сервер — get services/proxy)",
+      "podMetricsMissing": "{{source}}: не установлен в кластере",
+      "notFound": "{{source}}: не найден",
+      "unavailable": "{{source}}: не отвечает",
+      "timeout": "{{source}}: не ответил вовремя",
+      "badResponse": "{{source}}: ответил, но не как Prometheus",
+      "tokenMissing": "{{source}}: токен не сохранён — введите его в настройках подключения",
+      "ownForbidden": "{{source}}: источник отклонил учётные данные — проверьте авторизацию в настройках подключения"
     }
   },
   "hints": {
@@ -225,7 +283,9 @@
       "manualNamespaces": "Если кластер не даёт вам список проектов, перечислите здесь те, с которыми работаете.",
       "test": "Проверяет по шагам: адрес, TLS, вход, платформу и проекты. Несохранённые поля тоже проверяются.",
       "llmAccess": "Что может читать LLM-ассистент, подключённый по MCP. Метаданные: объекты, статусы, события, квоты — без значений Secret, env и ConfigMap. Выключен: LLM не видит подключения.",
-      "llmScope": "Проекты, которые может читать LLM; пустой список — ни одного проекта. Кластер и ноды видны, если их можете читать вы. Настройка остаётся на этом компьютере: экспорт её не пишет."
+      "llmScope": "Проекты, которые может читать LLM; пустой список — ни одного проекта. Кластер и ноды видны, если их можете читать вы. Настройка остаётся на этом компьютере: экспорт её не пишет.",
+      "metrics": "Автоматически: Thanos Querier у OpenShift, Prometheus через API-сервер у остальных, затем metrics.k8s.io. Свой — адрес Thanos или Prometheus. В экспорт не попадает.",
+      "metricsAuth": "Токен подключения — токен этого подключения. Свой токен хранится в системном хранилище секретов. Токен уходит только по https."
     },
     "cluster": {
       "platform": "Определяется по группам API и версии: OpenShift или Kubernetes с дистрибутивом (EKS, GKE, AKS, Rancher, Deckhouse, k3s, RKE2).",
@@ -247,7 +307,12 @@
     },
     "health": {
       "check": "Запускает встроенные правила Glafira по кластеру, его нодам и не более чем 50 проектам. Строгость зависит от окружения подключения. Проверка только читает кластер.",
-      "hidden": "Находки, которые вы скрыли для конкретного объекта. Они не считаются в значках; LLM-ассистенты видят их с пометкой «скрыто»."
+      "hidden": "Находки, которые вы скрыли для конкретного объекта. Они не считаются в значках; LLM-ассистенты видят их с пометкой «скрыто».",
+      "proposals": "Изменение, которое предлагает LLM-ассистент. Ничего не применяется, пока вы не откроете его в форме и не подтвердите; значения можно сначала поправить."
+    },
+    "resources": {
+      "window": "Статистика за последние 1, 7, 14 или 30 дней, но не дольше срока хранения источника метрик. Перцентили считаются по каждому поду, затем берётся худший под.",
+      "confidence": "Высокая — окно и данные от 7 дней при покрытии от 80 %; средняя — данные от 24 часов при покрытии от 50 %; низкая — меньше либо только metrics.k8s.io."
     }
   },
   "connections": {
@@ -318,7 +383,8 @@
         "tls": "TLS",
         "auth": "Вход",
         "discovery": "Платформа",
-        "projects": "Проекты"
+        "projects": "Проекты",
+        "metrics": "Метрики"
       },
       "llmAccess": "Доступ LLM (MCP)",
       "llmAccessOff": "Выключен",
@@ -326,7 +392,27 @@
       "llmScope": "Проекты для LLM",
       "llmScopeAll": "Все доступные",
       "llmScopeList": "Только перечисленные",
-      "llmNamespaces": "Проекты LLM"
+      "llmNamespaces": "Проекты LLM",
+      "metrics": "Метрики",
+      "metricsMode": {
+        "auto": "Автоматически",
+        "thanos": "Свой Thanos Querier",
+        "prometheus": "Свой Prometheus"
+      },
+      "metricsUrl": "Адрес источника",
+      "metricsAuth": "Авторизация источника",
+      "metricsAuthMode": {
+        "connection": "Токен подключения",
+        "bearer": "Свой токен",
+        "none": "Без авторизации"
+      },
+      "metricsToken": "Токен источника",
+      "metricsCa": "CA источника",
+      "metricsCaMode": {
+        "connection": "Как у подключения",
+        "pem": "Сертификаты (PEM)"
+      },
+      "metricsCaPem": "Сертификаты CA источника (PEM)"
     }
   },
   "cluster": {
@@ -647,7 +733,8 @@
     "tabs": {
       "overview": "Обзор",
       "pods": "Поды",
-      "events": "События"
+      "events": "События",
+      "resources": "Ресурсы"
     },
     "watch": {
       "polling": "Нет прав на watch — список обновляется раз в 10 с"
@@ -989,7 +1076,10 @@
       "gatewayRoute.notAccepted": "Маршруты не приняты Gateway",
       "gatewayRoute.refsUnresolved": "Ссылки маршрутов не разрешены",
       "gateway.notProgrammed": "Gateway не настроены",
-      "check.partial": "Неполная проверка"
+      "check.partial": "Неполная проверка",
+      "resources.cpuThrottled": "Троттлинг CPU",
+      "resources.memoryNearLimit": "Память у лимита",
+      "resources.overProvisioned": "Лишние requests"
     },
     "rules": {
       "cluster.apiNotReady": {
@@ -1170,7 +1260,216 @@
         "details": "Часть объектов не проверена: {{parts}}. Находок по ним может не хватать.",
         "detailsUnknown": "Часть объектов не проверена: находок по ним может не хватать.",
         "fix": "Проверьте под пользователем с большими правами или проверяйте меньше проектов; права — на обзоре кластера."
+      },
+      "resources.cpuThrottled": {
+        "title": "{{object}}: троттлинг CPU",
+        "details": "Контейнеры с CPU limit в среднем за последние 24 часа упирались в лимит: {{containers}}.",
+        "fix": "Поднимите CPU limit или уберите его: лимит урезает процессорное время и замедляет ответы. На вкладке «Ресурсы» — потребление и рекомендация."
+      },
+      "resources.memoryNearLimit": {
+        "title": "{{object}}: память у лимита",
+        "details": "Контейнеры за последние 24 часа занимали 90% memory limit и больше (максимум / лимит): {{containers}}.",
+        "fix": "Поднимите memory limit или снизьте потребление: следующий всплеск может закончиться OOMKilled. На вкладке «Ресурсы» — потребление и рекомендация."
+      },
+      "resources.overProvisioned": {
+        "title": "{{object}}: requests намного больше потребления",
+        "details": "Requests намного больше потребления за последние 24 часа — CPU (request / p95): {{cpu}}; память (request / максимум): {{memory}}.",
+        "detailsCpu": "Requests намного больше потребления за последние 24 часа — CPU (request / p95): {{cpu}}.",
+        "detailsMemory": "Requests намного больше потребления за последние 24 часа — память (request / максимум): {{memory}}.",
+        "fix": "Снизьте requests ближе к потреблению: зарезервированное недоступно другим подам и занимает квоту. На вкладке «Ресурсы» — рекомендация."
       }
+    },
+    "proposals": {
+      "applying": "Применяется предложение LLM: {{title}}",
+      "title": "Предложения LLM",
+      "intro": "LLM-ассистенты, подключённые по MCP, могут предлагать здесь изменения. Ничего не применяется, пока вы не откроете предложение в форме и не подтвердите его.",
+      "none": "Предложений LLM нет.",
+      "by": "Предложение LLM · {{client}}",
+      "openForm": "Открыть в форме",
+      "readOnly": "Подключение только для чтения",
+      "reject": "Отклонить",
+      "reasonPlaceholder": "Причина (необязательно)",
+      "rejectConfirm": "Отклонить предложение",
+      "deleteAll": "Удалить все предложения LLM",
+      "deleteAllConfirm": "Удалить все предложения LLM у этого подключения?",
+      "status": {
+        "applied": "применено {{when}}",
+        "appliedEdited": "применено с правками {{when}}",
+        "rejected": "отклонено",
+        "rejectedWithReason": "отклонено: {{reason}}",
+        "withdrawn": "отозвано"
+      },
+      "appliedAs": "Применено: {{change}}",
+      "change": {
+        "setResources": "Ресурсы:",
+        "remove": "убрать",
+        "keep": "не менять",
+        "scale": "Реплик: {{replicas}}",
+        "rolloutRestart": "Перезапуск",
+        "setHpaBounds": "Границы HPA {{hpa}}: {{min}}–{{max}}"
+      }
+    }
+  },
+  "change": {
+    "warning": {
+      "unverified": "Не удалось прочитать {{what}}: изменение не проверено по этим данным",
+      "hpaManaged": "HPA {{hpa}} масштабирует этот workload и перезапишет число реплик",
+      "scaleToZero": "Подов не останется",
+      "quota": "Квоте {{quota}} не хватит {{resource}}: нужно {{needed}}, свободно {{free}} — поды новой ревизии не создадутся, выкладка встанет",
+      "orphan": "У пода нет контроллера: заново его никто не создаст"
+    },
+    "unverifiedWhat": {
+      "hpa": "HPA этого workload'а",
+      "limitRange": "LimitRange проекта",
+      "quota": "квоты проекта"
+    },
+    "title": {
+      "setResources": "Ресурсы контейнеров",
+      "scale": "Реплики",
+      "rolloutRestart": "Перезапуск",
+      "setHpaBounds": "Границы HPA",
+      "deletePod": "Удаление пода"
+    },
+    "action": {
+      "setResources": "Изменить ресурсы",
+      "scale": "Масштабировать",
+      "rolloutRestart": "Перезапустить",
+      "setHpaBounds": "Границы HPA",
+      "deletePod": "Удалить под"
+    },
+    "preview": "Проверить",
+    "apply": "Применить",
+    "delete": "Удалить",
+    "confirmTitle": "Применить изменение?",
+    "podName": "имя пода",
+    "refreshRetry": "Обновить и повторить",
+    "readOnly": "Подключение только для чтения: изменения недоступны",
+    "noRights": "Нет прав: {{verb}} {{resource}}",
+    "diffTitle": "Было → станет",
+    "noDiff": "Ничего не меняется",
+    "notSet": "не задано",
+    "col": {
+      "container": "Контейнер",
+      "field": "Поле",
+      "before": "Было",
+      "after": "Станет"
+    },
+    "diff": {
+      "requests": {
+        "cpu": "CPU request",
+        "memory": "Memory request"
+      },
+      "limits": {
+        "cpu": "CPU limit",
+        "memory": "Memory limit"
+      },
+      "replicas": "Реплики",
+      "minReplicas": "Минимум реплик",
+      "maxReplicas": "Максимум реплик",
+      "restartedAt": "Перезапуск",
+      "pod": "Под"
+    },
+    "dryRun": {
+      "passed": "API-сервер принял изменение (dry-run)",
+      "skipped": "У этого вызова нет dry-run: API-сервер проверит его при применении",
+      "rejected": "API-сервер отклонил изменение"
+    },
+    "replicas": "Реплики",
+    "minReplicas": "Минимум реплик",
+    "maxReplicas": "Максимум реплик",
+    "keep": "не менять",
+    "removed": "будет убрано",
+    "current": "сейчас {{value}}",
+    "remove": "Убрать значение",
+    "restartNote": "Поды пересоздаются по очереди по стратегии выкладки.",
+    "restartDc": "Запустится новая выкладка DeploymentConfig (oc rollout latest).",
+    "deleteNote": "Под удаляется штатно; его контроллер, если он есть, создаст новый.",
+    "fieldName": {
+      "cpuRequest": "CPU request",
+      "cpuLimit": "CPU limit",
+      "memoryRequest": "memory request",
+      "memoryLimit": "memory limit"
+    }
+  },
+  "resources": {
+    "window": "Окно",
+    "days": "{{count}} дн.",
+    "source": "Источник: {{source}}",
+    "coverage": "покрытие {{value}}",
+    "dataDays": "данные за {{count}} дн.",
+    "confidence": "уверенность: {{value}}",
+    "confidenceLabel": "Уверенность",
+    "confidenceLevel": {
+      "low": "низкая",
+      "medium": "средняя",
+      "high": "высокая"
+    },
+    "noKubeStateMetrics": "Нет kube-state-metrics: поды выбраны по имени, OOM и рестарты неизвестны.",
+    "applyRecommendation": "Применить рекомендацию",
+    "lowConfidence": "Уверенность рекомендации низкая: данных за окно мало. Проверьте значения перед применением.",
+    "init": "init",
+    "col": {
+      "cpu": "CPU p95 / max",
+      "memory": "Память max",
+      "throttling": "Троттлинг",
+      "oom": "OOM",
+      "restarts": "Рестарты",
+      "pod": "Под",
+      "memoryNow": "Память",
+      "workload": "Workload",
+      "pods": "Поды",
+      "requests": "Requests CPU / память",
+      "limits": "Limits CPU / память",
+      "usage": "Потребление p95 CPU / max памяти",
+      "reserve": "Резерв",
+      "risks": "Риски и избыток"
+    },
+    "totals": "На весь workload ({{replicas}} реплик): requests CPU {{requestsCpu}}, память {{requestsMemory}}; limits CPU {{limitsCpu}}, память {{limitsMemory}}",
+    "hpaShift": "HPA {{hpa}}: цель {{resource}} {{target}} % считается от request; чтобы масштабирование осталось прежним при новом request, поставьте {{equivalent}} %",
+    "chartCpu": "CPU, ядра",
+    "chartMemory": "Память",
+    "marks": "Рестарты и OOM",
+    "now": "Текущее потребление",
+    "note": {
+      "cpuLimitNotSet": "CPU limit не задан — троттлинга нет, limit не добавляется",
+      "cpuThrottled": "Троттлинг p95 — {{p95}} %: наблюдаемое потребление CPU ограничено лимитом, limit не меньше текущего × 1,5",
+      "oomKilled": "OOMKilled {{count}} раз за окно: наблюдаемое потребление памяти обрезано лимитом, limit не меньше текущего × 1,5",
+      "noData": "Данных за окно нет: рекомендации нет",
+      "limitRange": "{{field}} подтянут к границе LimitRange: {{bound}}",
+      "limitRangeDefault": "Текущий {{field}} — по умолчанию LimitRange, в шаблоне его нет",
+      "java": "Заданы опции Java: проверьте -Xmx или MaxRAMPercentage вместе с лимитом памяти",
+      "go": "Задан GOMEMLIMIT: проверьте его вместе с лимитом памяти"
+    },
+    "bound": {
+      "min": "минимум",
+      "max": "максимум",
+      "ratio": "отношение limit/request"
+    },
+    "violation": {
+      "nodeAllocatable": "{{container}}: request {{resource}} {{request}} больше allocatable самой крупной ноды {{allocatable}}"
+    },
+    "chartFailed": "График не загрузился",
+    "currentOnly": "Только текущие значения metrics.k8s.io: истории нет, окно не применяется",
+    "noPodUsage": "Нет данных о потреблении пода",
+    "sort": "Сортировка",
+    "sortRisk": "По риску",
+    "sortReserve": "По резерву",
+    "onlyActionable": "Только с рекомендациями",
+    "filter": "Имя workload'а",
+    "collecting": "Собираю потребление проекта (до 45 с)…",
+    "collected": "собрано {{when}}",
+    "truncated": "Список workloads или подов неполный: итоги — только по прочитанному.",
+    "quotas": "Квоты:",
+    "noWorkloads": "Workloads нет",
+    "moreRows": "Показаны {{shown}} из {{total}}: сузьте список по имени",
+    "risk": {
+      "throttled": "{{container}}: троттлинг {{value}} %",
+      "oom": "{{container}}: OOM {{count}}",
+      "memoryNearLimit": "{{container}}: память {{max}} из {{limit}}"
+    },
+    "excess": {
+      "cpu": "{{container}}: CPU request {{request}} при p95 {{usage}}",
+      "memory": "{{container}}: memory request {{request}} при max {{usage}}"
     }
   }
 }

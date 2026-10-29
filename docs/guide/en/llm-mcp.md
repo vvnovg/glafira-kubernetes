@@ -3,7 +3,7 @@
 Glafira can act as a gateway for an LLM assistant: Claude Desktop, Claude Code, Cursor or another client that
 supports MCP (Model Context Protocol). The assistant reads the metadata of the connections and projects you open for
 it, runs the cluster check and helps you find the causes of problems: restart loops, unavailable workloads, network,
-quotas. It cannot change anything in a cluster through Glafira: you make changes yourself.
+quotas, resources. It cannot change anything in a cluster through Glafira: it proposes changes, and you apply them.
 
 ## How it works {#how-it-works}
 
@@ -66,7 +66,9 @@ the cluster and the nodes — if you can read them:
   (a value in the spec, a ConfigMap, a Secret, a field), without values; `command` and `args` with secrets hidden;
 - annotations — without the copy of the whole object (`last-applied-configuration`), with the values of secret keys
   hidden;
-- cluster check findings and its own notes.
+- cluster check findings, its own notes and proposals;
+- the resource usage of a workload over a window and the recommendation of requests and limits — from the same metrics
+  source as the Resources tabs; the assistant does not get the address of your own metrics source.
 
 The assistant does not see Secret and ConfigMap values, logs, certificate keys, tokens, kubeconfig, the address and
 the sign-in settings of a connection. By a secret name (`password`, `token`, `secret`, `apikey`, `credentials`,
@@ -105,6 +107,12 @@ The assistant can run Glafira's built-in cluster check (the `health_check` tool)
 also leave notes about objects: they appear on the [[ui:sidebar.findings]] tab and on the object screens, and the
 cluster is not changed. See [Cluster check and notes](health-check.md#with-llm).
 
+The assistant looks at resources with the `get_resource_usage` and `recommend_resources` tools (a window of 1, 7, 14
+or 30 days) and proposes a change with `propose_change`; `list_proposals` shows what happened to its proposals,
+`withdraw_proposal` withdraws its own. You apply a proposal with a Glafira form — see
+[Cluster check and notes](health-check.md#proposals). Ask, for example: "Look at the resources of web over a week and
+propose requests and limits."
+
 ## If it does not work {#troubleshooting}
 
 The client shows a message from Glafira:
@@ -115,4 +123,6 @@ The client shows a message from Glafira:
   [[ui:settings.mcp.section]];
 - `Invalid MCP token` — restart the MCP server in the client: Glafira issues a new token every time it starts;
 - `not_allowed` — the connection or project does not exist, LLM access to it is off, or the project is not in
-  [[ui:connections.form.llmScope]].
+  [[ui:connections.form.llmScope]];
+- `metrics_unavailable` — there is no metrics source: check the [[ui:connections.form.step.metrics]] step of the
+  connection test (see [Connections](connections.md#metrics)).

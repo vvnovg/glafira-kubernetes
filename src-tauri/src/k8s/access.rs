@@ -1,6 +1,7 @@
 //! Права пользователя в проекте (спец. §5.4): `SelfSubjectRulesReview` при открытии проекта,
 //! кэш на 5 минут, сброс при ответе 403. По ним интерфейс не показывает вкладки и разделы,
-//! которые не читаются; окончательно решает API-сервер.
+//! которые не читаются, и делает неактивными кнопки изменений (§9); окончательно решает
+//! API-сервер.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
@@ -42,6 +43,11 @@ pub const RESOURCES: &[(&str, &str)] = &[
     ("batch", "cronjobs"),
     ("apps.openshift.io", "deploymentconfigs"),
     ("", "replicationcontrollers"),
+    // Подресурсы изменений (§9): масштаб и выкладка DeploymentConfig.
+    ("apps", "deployments/scale"),
+    ("apps", "statefulsets/scale"),
+    ("apps.openshift.io", "deploymentconfigs/scale"),
+    ("apps.openshift.io", "deploymentconfigs/instantiate"),
 ];
 
 /// Сколько живут права проекта в кэше.
@@ -53,6 +59,12 @@ pub struct Verbs {
     pub get: bool,
     pub list: bool,
     pub watch: bool,
+    /// Изменения (§9): ресурсы, перезапуск, масштаб, границы HPA.
+    pub patch: bool,
+    /// Удаление пода.
+    pub delete: bool,
+    /// `instantiate` DeploymentConfig.
+    pub create: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -113,6 +125,9 @@ pub fn access_from_rules(rules: &[ResourceRule], incomplete: bool) -> NamespaceA
                         get: can("get"),
                         list: can("list"),
                         watch: can("watch"),
+                        patch: can("patch"),
+                        delete: can("delete"),
+                        create: can("create"),
                     },
                 )
             })
@@ -251,8 +266,16 @@ mod tests {
             Verbs {
                 get: false,
                 list: true,
-                watch: false
+                watch: false,
+                patch: false,
+                delete: false,
+                create: false,
             }
+        );
+        assert!(a.resources["jobs.batch"].patch && a.resources["jobs.batch"].delete);
+        assert!(
+            !a.resources["deployments/scale.apps"].patch,
+            "list подресурсу не даёт patch"
         );
         assert!(a.resources["pods/log"].get);
         assert!(!a.resources["secrets"].list);

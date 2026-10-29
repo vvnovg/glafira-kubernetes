@@ -12,6 +12,8 @@ export type ErrorCode =
   | "INVALID_INPUT"
   | "READ_ONLY"
   | "CONFIRMATION_REQUIRED"
+  | "METRICS_UNAVAILABLE"
+  | "ADMISSION_DENIED"
   | "INTERNAL";
 
 /** Текст из Rust: ключ словаря, параметры и английский текст (запасной вариант). */
@@ -85,7 +87,23 @@ export interface ConnectionProfile {
   llmAccess?: LlmAccess;
   /** Проекты для LLM; null или нет поля — все доступные. */
   llmNamespaces?: string[] | null;
+  /** Источник метрик; локальное поле: экспорт его не пишет. Нет поля — `auto`. */
+  metrics?: MetricsConfig;
 }
+
+/** Источник метрик (спец. §7.1): автопоиск или свой Thanos Querier / Prometheus. */
+export type MetricsConfig = { mode: "auto" } | ({ mode: "thanos" } & MetricsEndpoint) | ({ mode: "prometheus" } & MetricsEndpoint);
+export type MetricsMode = MetricsConfig["mode"];
+
+export interface MetricsEndpoint {
+  url: string;
+  auth: MetricsAuth;
+  ca: MetricsCa;
+}
+
+/** Токен подключения, свой bearer-токен (keychain) или без авторизации. */
+export type MetricsAuth = "connection" | "bearer" | "none";
+export type MetricsCa = { mode: "connection" } | { mode: "pem"; pem: string };
 
 /** Уровень доступа LLM: `logs` — этап O4. */
 export type LlmAccess = "off" | "metadata";
@@ -94,6 +112,7 @@ export type LlmAccess = "off" | "metadata";
 export interface SecretsInput {
   token?: string | null;
   clientKey?: string | null;
+  metricsToken?: string | null;
 }
 
 export interface ConnectionFolder {
@@ -140,13 +159,15 @@ export interface TreeItemRef {
   id: string;
 }
 
-export type TestStepName = "config" | "tcp" | "exec" | "tls" | "auth" | "discovery" | "projects";
+export type TestStepName = "config" | "tcp" | "exec" | "tls" | "auth" | "discovery" | "projects" | "metrics";
 
 export interface TestStep {
   name: TestStepName;
   ok: boolean;
   message: LocalizedText;
   error?: AppError;
+  /** Пояснения под шагом: у «Метрик» — отвергнутые источники и причины. */
+  notes?: LocalizedText[];
 }
 
 export interface TestReport {
@@ -485,6 +506,12 @@ export interface Verbs {
   get: boolean;
   list: boolean;
   watch: boolean;
+  /** Изменения (§9): ресурсы, перезапуск, масштаб, границы HPA. */
+  patch: boolean;
+  /** Удаление пода. */
+  delete: boolean;
+  /** `instantiate` DeploymentConfig. */
+  create: boolean;
 }
 
 /** Права в проекте: `ресурс.группа` (`pods`, `deployments.apps`, `pods/log`) → права. */
@@ -984,9 +1011,319 @@ export interface Annotation {
   closedAtMs?: number;
 }
 
-/** Последняя проверка, ключи скрытых находок и замечания LLM подключения. */
+/** Последняя проверка, ключи скрытых находок, замечания и предложения LLM подключения. */
 export interface HealthView {
   lastCheck: CheckRun | null;
   ignored: string[];
   annotations: Annotation[];
+  proposals: Proposal[];
+}
+
+/** Источник метрик (спец. §7.1). */
+export type MetricsSourceKind = "thanos" | "prometheus" | "metricsServer";
+
+export interface MetricsSourceInfo {
+  kind: MetricsSourceKind;
+  /** `auto` — найден автопоиском, `profile` — свой из настроек подключения. */
+  origin: "auto" | "profile";
+  /** Маршрут или сервис кластера, у своего источника — адрес. */
+  location: string;
+  history: boolean;
+}
+
+export type MetricsRejectReason = "forbidden" | "notFound" | "unavailable" | "timeout" | "badResponse" | "tokenMissing";
+
+export interface MetricsRejected {
+  source: MetricsSourceInfo;
+  reason: MetricsRejectReason;
+  message: LocalizedText;
+  error: AppError;
+}
+
+/** Какой источник выбран и почему отвергнуты остальные. */
+export interface MetricsSourceStatus {
+  mode: MetricsMode;
+  selected: MetricsSourceInfo | null;
+  rejected: MetricsRejected[];
+  /** Группа metrics.k8s.io есть: без истории — текущие значения (только в режиме auto). */
+  podMetrics: boolean;
+  checkedAtMs: number;
+}
+
+// --- Ресурсы, изменения и предложения (этап O3). CPU — в ядрах, память — в байтах, время — секунды Unix.
+
+/** CPU и память; `null` — не задано или нет данных. */
+export interface Amounts {
+  cpu: number | null;
+  memory: number | null;
+}
+
+/** Действующие requests и limits контейнера из шаблона и значения `LimitRange` по умолчанию у работающих подов. */
+export interface ContainerCurrent {
+  name: string;
+  init: boolean;
+  sidecar: boolean;
+  requests: Amounts;
+  limits: Amounts;
+  limitRangeRequests: Amounts;
+  limitRangeLimits: Amounts;
+  envNames: string[];
+}
+
+export interface ContainerStats {
+  cpu: { p50: number | null; p95: number | null; p99: number | null; max: number | null };
+  memory: { p95: number | null; p99: number | null; max: number | null };
+  /** Доля периодов CFS с троттлингом, 0–1. */
+  throttling: { mean: number | null; p95: number | null };
+  /** `null` — нет kube-state-metrics. */
+  oomCount: number | null;
+  oomLast: number | null;
+  restarts: number | null;
+}
+
+export type ContainerUsage = ContainerCurrent & { stats: ContainerStats };
+
+export interface ChartSeries {
+  container: string;
+  /** [секунды Unix, значение]. */
+  points: [number, number][];
+}
+
+export interface ChartMarker {
+  container: string;
+  time: number;
+  count: number;
+}
+
+export interface Charts {
+  start: number;
+  end: number;
+  stepSeconds: number;
+  cpu: ChartSeries[];
+  memory: ChartSeries[];
+  restarts: ChartMarker[];
+  ooms: ChartMarker[];
+}
+
+export interface ContainerNow {
+  name: string;
+  cpu: number | null;
+  memory: number | null;
+}
+
+export interface PodNow {
+  pod: string;
+  containers: ContainerNow[];
+}
+
+/** Статистика workload'а за окно (спец. §7.2). */
+export interface WorkloadUsage {
+  namespace: string;
+  kind: WorkloadKind;
+  name: string;
+  windowDays: number;
+  source: MetricsSourceInfo;
+  sourceStatus: MetricsSourceStatus;
+  /** Доля шагов окна с данными, 0–1; у metrics.k8s.io — `null`. */
+  coverage: number | null;
+  dataSeconds: number | null;
+  ownerMetrics: boolean;
+  replicas: number | null;
+  surge: number;
+  containers: ContainerUsage[];
+  charts: Charts | null;
+  /** Только metrics.k8s.io: текущее потребление подов. */
+  podsNow: PodNow[];
+}
+
+export interface PodUsage {
+  source: MetricsSourceInfo;
+  sourceStatus: MetricsSourceStatus;
+  containers: ContainerNow[];
+}
+
+export type Confidence = "low" | "medium" | "high";
+export type ResourceField = "cpuRequest" | "cpuLimit" | "memoryRequest" | "memoryLimit";
+export type LimitBound = "min" | "max" | "ratio";
+
+export type RecommendationNote =
+  | { code: "cpuLimitNotSet" }
+  | { code: "cpuThrottled"; p95: number }
+  | { code: "oomKilled"; count: number }
+  | { code: "noData" }
+  | { code: "limitRange"; field: ResourceField; bound: LimitBound }
+  | { code: "limitRangeDefault"; field: ResourceField }
+  | { code: "java" }
+  | { code: "go" };
+
+export type Violation =
+  | { code: "quota"; quota: string; resource: string; needed: number; free: number }
+  | { code: "nodeAllocatable"; container: string; resource: string; request: number; allocatable: number };
+
+export interface HpaShift {
+  hpa: string;
+  resource: string;
+  target: number;
+  equivalent: number;
+}
+
+export interface ResourceSet {
+  requests: Amounts;
+  limits: Amounts;
+}
+
+export interface ContainerRecommendation {
+  name: string;
+  current: ResourceSet;
+  /** `null` — данных нет. */
+  recommended: ResourceSet | null;
+  notes: RecommendationNote[];
+}
+
+/** Рекомендация requests и limits (спец. §7.3). */
+export interface Recommendation {
+  namespace: string;
+  kind: WorkloadKind;
+  name: string;
+  windowDays: number;
+  source: MetricsSourceInfo;
+  confidence: Confidence;
+  coverage: number | null;
+  dataSeconds: number | null;
+  replicas: number | null;
+  containers: ContainerRecommendation[];
+  violations: Violation[];
+  hpa: HpaShift[];
+  /** Рекомендовано минус сейчас, × реплик. */
+  totals: ResourceSet;
+}
+
+export interface Analysis {
+  usage: WorkloadUsage;
+  recommendation: Recommendation;
+}
+
+export type Risk =
+  | { code: "throttled"; container: string; mean: number }
+  | { code: "oom"; container: string; count: number }
+  | { code: "memoryNearLimit"; container: string; max: number; limit: number };
+
+export interface Excess {
+  container: string;
+  resource: "cpu" | "memory";
+  request: number;
+  usage: number;
+}
+
+/** Workload во вкладке «Ресурсы» проекта: суммы по работающим подам. */
+export interface WorkloadResources {
+  kind: WorkloadKind;
+  name: string;
+  pods: number;
+  requests: Amounts;
+  limits: Amounts;
+  usage: Amounts;
+  reserve: Amounts;
+  risks: Risk[];
+  excess: Excess[];
+}
+
+export interface QuotaRoom {
+  quota: string;
+  resource: string;
+  hard: number;
+  used: number;
+}
+
+export interface ProjectUsage {
+  namespace: string;
+  windowDays: number;
+  source: MetricsSourceInfo;
+  sourceStatus: MetricsSourceStatus;
+  workloads: WorkloadResources[];
+  errors: KindError[];
+  truncated: boolean;
+  quotas: QuotaRoom[];
+  collectedAtMs: number;
+}
+
+export type ProjectUsageEvent = { kind: "done"; usage: ProjectUsage } | { kind: "failed"; error: AppError };
+
+/** Значение quantity строкой; `null` — убрать; нет поля — не менять. */
+export interface ResourceValues {
+  cpu?: string | null;
+  memory?: string | null;
+}
+
+export interface ContainerResources {
+  name: string;
+  requests: ResourceValues;
+  limits: ResourceValues;
+}
+
+/** Изменение кластера (спец. §9): одна форма у интерфейса, предложений и LLM. */
+export type Change =
+  | { kind: "setResources"; namespace: string; workload: WorkloadRef; containers: ContainerResources[] }
+  | { kind: "scale"; namespace: string; workload: WorkloadRef; replicas: number }
+  | { kind: "rolloutRestart"; namespace: string; workload: WorkloadRef }
+  | { kind: "setHpaBounds"; namespace: string; hpa: string; minReplicas?: number; maxReplicas: number }
+  | { kind: "deletePod"; namespace: string; pod: string };
+
+export type ChangeKind = Change["kind"];
+
+/** Подтверждение изменения (`ConfirmDialog`): имя prod-подключения и введённое имя объекта (пода). */
+export interface Confirmation {
+  confirm: string | null;
+  typedName: string | null;
+}
+
+/** Поле «было → станет»: `requests.cpu`, `replicas`, `restartedAt`, `pod`… */
+export interface FieldChange {
+  container: string | null;
+  field: string;
+  before: string | null;
+  after: string | null;
+}
+
+export type ChangeWarning =
+  | { code: "hpaManaged"; hpa: string }
+  | { code: "scaleToZero" }
+  | { code: "quota"; quota: string; resource: string; needed: number; free: number }
+  | { code: "orphan" }
+  | { code: "unverified"; what: "hpa" | "limitRange" | "quota" };
+
+export type DryRun = { status: "passed" } | { status: "rejected"; error: AppError } | { status: "skipped" };
+
+export interface ChangePreview {
+  change: Change;
+  /** Версия объекта: g<generation>, без generation — s<хэш spec> (HPA до Kubernetes 1.37), у пода u<uid>; без неё применение — CONFLICT. */
+  version: string | null;
+  diff: FieldChange[];
+  warnings: ChangeWarning[];
+  dryRun: DryRun;
+  /** Под без контроллера: при применении нужно ввести его имя. */
+  confirmPodName: boolean;
+}
+
+export type ProposalStatus = "open" | "applied" | "rejected" | "withdrawn";
+
+/** Предложение LLM (спец. §10.5): изменение, которое человек применяет формой. */
+export interface Proposal {
+  id: string;
+  severity: Severity;
+  title: string;
+  rationale: string;
+  target: HealthTarget;
+  change: Change;
+  relatedRuleId?: string;
+  relatedFindingKey?: string;
+  client: string | null;
+  sessionId?: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+  status: ProposalStatus;
+  closedAtMs?: number;
+  appliedAsProposed?: boolean;
+  appliedChange?: Change;
+  rejectReason?: string;
 }

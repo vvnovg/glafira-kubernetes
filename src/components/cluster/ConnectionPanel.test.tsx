@@ -11,7 +11,7 @@ vi.mock("../../api/client", async (importOriginal) => {
   return {
     ...orig,
     api: {
-      getHealth: vi.fn().mockResolvedValue({ lastCheck: null, ignored: [], annotations: [] }),
+      getHealth: vi.fn().mockResolvedValue({ lastCheck: null, ignored: [], annotations: [], proposals: [] }),
       listConnections: vi.fn(),
       connect: vi.fn(),
       startOauthLogin: vi.fn(),

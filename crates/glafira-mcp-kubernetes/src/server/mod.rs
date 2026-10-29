@@ -1,6 +1,6 @@
-//! Обработчик MCP одной сессии (спец. §10): инструменты, инструкции сервера, проверка области
-//! доступа LLM перед каждой операцией. Транспорт, сессии, право, лимиты и журнал —
-//! `glafira_mcp_core::server`.
+//! Обработчик MCP одной сессии (спец. §10): инструменты чтения, проверки, ресурсов и
+//! предложений, инструкции сервера, проверка области доступа LLM перед каждой операцией.
+//! Транспорт, сессии, право, лимиты и журнал — `glafira_mcp_core::server`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,18 +18,26 @@ use crate::mask::Masker;
 use crate::model::{Backend, ReadOp, ReadOutput, Scope, not_allowed};
 
 mod health_tools;
+mod proposal_tools;
+mod resource_tools;
 mod tools;
 
 pub const INSTRUCTIONS: &str = "\
 Glafira is a gateway to Kubernetes clusters (including OpenShift and Platform V DropApp) that the \
 user explicitly allowed. It reads metadata: the cluster overview, nodes, projects (namespaces), \
-workloads, pods, events, quotas and network objects. Nothing in the clusters can be changed through \
-it: when a change is needed, describe it in the chat — the user applies changes in Glafira \
-themselves. Call list_connections first to get connection ids, then list_projects: you see only \
-the projects the user allowed for LLM access.
+workloads, pods, events, quotas, network objects and the resource usage from the cluster metrics. \
+Nothing in the clusters can be changed through it: propose a change with propose_change — the user \
+sees it next to the object in Glafira, opens it as a pre-filled form and applies or rejects it \
+themselves. Do not wait for the result in the same call; check the user's decision later with \
+list_proposals. If a proposal comes back with readOnly: true, ask the user to lift read-only for the \
+connection in Glafira instead of looking for a workaround. Deleting objects and changes other than \
+the four kinds of propose_change can only be described in the chat. Call list_connections first to \
+get connection ids, then list_projects: you see only the projects the user allowed for LLM access.
 
 To review a cluster or a project, start with health_check: it runs Glafira's deterministic rules. \
-Take the facts from it, then explain them, set priorities and find connections between them. \
+For requests and limits, start with recommend_resources: it computes them from the actual usage. \
+Take the facts from these tools, then explain them, set priorities and find connections between \
+them. When a recommendation has confidence: \"low\", tell the user and do not present it as precise. \
 Findings with ignored: true were dismissed by the user. You can leave notes with annotate: the \
 user sees them next to the objects in Glafira (the clusters are not changed). Do not repeat \
 findings as notes; add your conclusions and link them with relatedRuleId.
@@ -109,7 +117,10 @@ impl KubeServer {
             session,
             backend,
             options,
-            tool_router: Self::tool_router() + Self::health_router(),
+            tool_router: Self::tool_router()
+                + Self::health_router()
+                + Self::resource_router()
+                + Self::proposal_router(),
         }
     }
 

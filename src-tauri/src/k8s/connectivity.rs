@@ -1,5 +1,5 @@
 //! Пошаговая проверка подключения (спец. §5.3): конфигурация → TCP → [exec-плагин] → TLS → вход →
-//! discovery → проекты. Останавливается на первом неуспешном шаге и называет его.
+//! discovery → проекты → метрики. Останавливается на первом неуспешном шаге и называет его.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,6 +24,9 @@ pub struct TestStep {
     pub message: LocalizedText,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<AppError>,
+    /// Пояснения под шагом: у шага «Метрики» — отвергнутые источники и причины.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<LocalizedText>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -39,6 +42,7 @@ fn passed(name: &'static str, message: LocalizedText) -> TestStep {
         ok: true,
         message,
         error: None,
+        notes: Vec::new(),
     }
 }
 
@@ -48,6 +52,7 @@ fn failed_step(name: &'static str, e: AppError) -> TestStep {
         ok: false,
         message: e.text(),
         error: Some(e),
+        notes: Vec::new(),
     }
 }
 
@@ -195,11 +200,12 @@ fn is_transport_failure(e: &AppError) -> bool {
 }
 
 /// Шаги после TCP на готовом клиенте: TLS и вход (одним запросом «кто я»), discovery, проекты.
+/// Всё прошло — сведения discovery (по ним выбирается источник метрик).
 pub async fn check_cluster(
     steps: &mut Vec<TestStep>,
     client: &kube::Client,
     p: &ConnectionProfile,
-) -> bool {
+) -> Option<Discovered> {
     let limit = request_timeout(p);
     let tls_ok = if p.ca == CaConfig::Insecure {
         ltext!(
@@ -220,27 +226,27 @@ pub async fn check_cluster(
         // Ошибка транспорта: ответа сервера не было, значит, не прошёл TLS (или связь).
         Err(e) if is_transport_failure(&e) => {
             steps.push(failed_step("tls", e));
-            return false;
+            return None;
         }
         // Любой ответ сервера (401, 403, 404, 400/422 или не-API страница) доказывает, что
         // TLS-рукопожатие прошло, — виноват вход.
         Err(e) => {
             steps.push(passed("tls", tls_ok));
             steps.push(failed_step("auth", e));
-            return false;
+            return None;
         }
     }
-    let projects_api = match discover(client, limit).await {
+    let discovered = match discover(client, limit).await {
         Ok(d) => {
             steps.push(passed("discovery", discovery_message(&d)));
-            d.api_groups.projects
+            d
         }
         Err(e) => {
             steps.push(failed_step("discovery", e));
-            return false;
+            return None;
         }
     };
-    match list_project_names(client, limit, projects_api).await {
+    match list_project_names(client, limit, discovered.api_groups.projects).await {
         Ok((names, more)) => {
             let count = if more {
                 format!("{}+", names.len())
@@ -255,7 +261,7 @@ pub async fn check_cluster(
                     count = count
                 ),
             ));
-            true
+            Some(discovered)
         }
         Err(e) if e.code == ErrorCode::Forbidden && !p.manual_namespaces.is_empty() => {
             steps.push(passed(
@@ -266,13 +272,53 @@ pub async fn check_cluster(
                     count = p.manual_namespaces.len()
                 ),
             ));
-            true
+            Some(discovered)
         }
         Err(e) => {
             steps.push(failed_step("projects", e));
-            false
+            None
         }
     }
+}
+
+/// Шаг «Метрики»: какой источник выбран бы и почему отвергнуты остальные (спец. §5.3, §7.1).
+/// Без источника истории, но с `metrics.k8s.io` шаг проходит: текущие значения есть.
+pub async fn metrics_step(steps: &mut Vec<TestStep>, inputs: &crate::metrics::select::Inputs) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    let s = crate::metrics::select::select(inputs, now).await;
+    let notes = s
+        .status
+        .rejected
+        .iter()
+        .map(|r| r.message.clone())
+        .collect();
+    let mut step = match (&s.status.selected, s.status.pod_metrics) {
+        (Some(info), _) => passed(
+            "metrics",
+            ltext!(
+                "messages.connectionTest.metricsHistory",
+                "History of resource usage: {{source}}",
+                source = info.label()
+            ),
+        ),
+        (None, true) => passed(
+            "metrics",
+            ltext!(
+                "messages.connectionTest.metricsCurrent",
+                "No history source: only current values from metrics.k8s.io"
+            ),
+        ),
+        // Причины — в пояснениях (переводятся); английский перечень из `details` их бы дублировал.
+        (None, false) => {
+            let mut e = s.status.unavailable();
+            e.details = None;
+            failed_step("metrics", e)
+        }
+    };
+    step.notes = notes;
+    steps.push(step);
 }
 
 /// Exec-плагин без подтверждённой строки запуска не запускается и при проверке.
@@ -322,11 +368,12 @@ pub async fn test_connection(
 ) -> TestReport {
     let mut steps = Vec::new();
     let profile = p.clone();
+    let config_secrets = secrets.clone();
     let config = match ensure_allowed(p, policy).and_then(|()| ensure_exec_approved(p)) {
         Err(e) => Err(e),
         Ok(()) => tokio::task::spawn_blocking(move || {
             crate::storage::profile::validate_profile(&profile)?;
-            build_kube_config(&profile, secrets.as_ref(), &process_env)
+            build_kube_config(&profile, config_secrets.as_ref(), &process_env)
         })
         .await
         .unwrap_or_else(|e| Err(AppError::internal_with(e.to_string()))),
@@ -379,6 +426,7 @@ pub async fn test_connection(
         }
     }
 
+    let connection_token = config.auth_info.token.clone();
     let client = match kube::Client::try_from(config) {
         Ok(c) => c,
         Err(e) => {
@@ -386,13 +434,48 @@ pub async fn test_connection(
             return report(steps);
         }
     };
-    check_cluster(&mut steps, &client, p).await;
+    let Some(discovered) = check_cluster(&mut steps, &client, p).await else {
+        return report(steps);
+    };
+    let metrics_token = metrics_token(p, secrets).await;
+    let inputs = crate::metrics::select::Inputs {
+        reader: crate::k8s::read::ReadClient::new(client, request_timeout(p)),
+        profile: p.clone(),
+        platform: discovered.platform,
+        connection_token,
+        metrics_token,
+    };
+    metrics_step(&mut steps, &inputs).await;
     report(steps)
 }
 
+/// Свой токен источника метрик (форма или keychain), если он нужен профилю.
+async fn metrics_token(
+    p: &ConnectionProfile,
+    secrets: Arc<dyn SecretStore>,
+) -> Option<secrecy::SecretString> {
+    use crate::storage::profile::MetricsAuth;
+    if !p
+        .metrics
+        .endpoint()
+        .is_some_and(|e| e.auth == MetricsAuth::Bearer)
+    {
+        return None;
+    }
+    let key = crate::secrets::secret_key(&p.id, crate::secrets::METRICS_TOKEN);
+    tokio::task::spawn_blocking(move || secrets.get(&key))
+        .await
+        .ok()?
+        .ok()?
+        .filter(|t| !t.trim().is_empty())
+        .map(secrecy::SecretString::from)
+}
+
+/// Итог — по шагам, без которых подключение не работает. «Метрики» — предупреждение: без
+/// источника недоступны только история потребления и рекомендации.
 fn report(steps: Vec<TestStep>) -> TestReport {
     TestReport {
-        ok: steps.iter().all(|s| s.ok),
+        ok: steps.iter().all(|s| s.ok || s.name == "metrics"),
         steps,
     }
 }
@@ -413,7 +496,11 @@ mod tests {
     async fn all_cluster_steps_pass_on_openshift() {
         let (client, _server) = mock_client(fixtures::openshift);
         let mut steps = Vec::new();
-        assert!(check_cluster(&mut steps, &client, &sample_profile("a")).await);
+        assert!(
+            check_cluster(&mut steps, &client, &sample_profile("a"))
+                .await
+                .is_some()
+        );
         assert_eq!(
             names(&steps),
             [
@@ -457,7 +544,11 @@ mod tests {
             _ => fixtures::openshift(s),
         });
         let mut steps = Vec::new();
-        assert!(check_cluster(&mut steps, &client, &sample_profile("a")).await);
+        assert!(
+            check_cluster(&mut steps, &client, &sample_profile("a"))
+                .await
+                .is_some()
+        );
         assert_eq!(steps[2].message.key, "messages.connectionTest.discovery");
         assert_eq!(steps[2].message.params["platform"], "Kubernetes 1.32");
         assert_eq!(steps[3].message.params["count"], "2");
@@ -489,7 +580,11 @@ mod tests {
     async fn rejected_token_fails_auth_after_tls() {
         let (client, _server) = mock_client(|_| status(401, "Unauthorized", "Unauthorized"));
         let mut steps = Vec::new();
-        assert!(!check_cluster(&mut steps, &client, &sample_profile("a")).await);
+        assert!(
+            check_cluster(&mut steps, &client, &sample_profile("a"))
+                .await
+                .is_none()
+        );
         assert_eq!(names(&steps), [("tls", true), ("auth", false)]);
         assert_eq!(
             steps[1].error.as_ref().unwrap().code,
@@ -509,14 +604,14 @@ mod tests {
         });
         let mut p = sample_profile("a");
         let mut steps = Vec::new();
-        assert!(!check_cluster(&mut steps, &client, &p).await);
+        assert!(check_cluster(&mut steps, &client, &p).await.is_none());
         assert_eq!(
             steps[3].error.as_ref().unwrap().key,
             "errors.k8s.forbiddenCluster"
         );
         p.manual_namespaces = vec!["team-a".into()];
         let mut steps = Vec::new();
-        assert!(check_cluster(&mut steps, &client, &p).await);
+        assert!(check_cluster(&mut steps, &client, &p).await.is_some());
         assert_eq!(
             steps[3].message.key,
             "messages.connectionTest.projectsManual"
@@ -530,7 +625,7 @@ mod tests {
     ) -> (bool, Vec<TestStep>) {
         let (client, _server) = mock_client(move |_| answer.clone());
         let mut steps = Vec::new();
-        let ok = check_cluster(&mut steps, &client, p).await;
+        let ok = check_cluster(&mut steps, &client, p).await.is_some();
         (ok, steps)
     }
 
@@ -678,7 +773,11 @@ mod tests {
         ] {
             let client = failing_client(text);
             let mut steps = Vec::new();
-            assert!(!check_cluster(&mut steps, &client, &sample_profile("a")).await);
+            assert!(
+                check_cluster(&mut steps, &client, &sample_profile("a"))
+                    .await
+                    .is_none()
+            );
             assert_eq!(names(&steps), [("tls", false)], "{text}");
             let e = steps[0].error.as_ref().unwrap();
             assert_eq!((e.code, e.key.as_str()), (code, key), "{text}");
@@ -785,6 +884,80 @@ mod tests {
             r.steps[0].error.as_ref().unwrap().key,
             "errors.exec.notApproved"
         );
+    }
+
+    fn metrics_inputs(
+        handler: impl Fn(&crate::k8s::testing::Seen) -> (u16, serde_json::Value) + Send + 'static,
+    ) -> crate::metrics::select::Inputs {
+        let (client, _) = mock_client(handler);
+        crate::metrics::select::Inputs {
+            reader: crate::k8s::read::ReadClient::new(client, Duration::from_secs(5)),
+            profile: sample_profile("a"),
+            platform: crate::platform::detect(&Default::default()),
+            connection_token: None,
+            metrics_token: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn metrics_step_names_the_source_and_the_rejected_ones() {
+        let mut steps = Vec::new();
+        metrics_step(
+            &mut steps,
+            &metrics_inputs(|s| {
+                if s.path().contains("prometheus-operated:9090") {
+                    (
+                        200,
+                        serde_json::json!({"status": "success", "data": {"resultType": "vector",
+                            "result": [{"metric": {}, "value": [1, "1"]}]}}),
+                    )
+                } else {
+                    status(403, "Forbidden", "no")
+                }
+            }),
+        )
+        .await;
+        assert_eq!(names(&steps), [("metrics", true)]);
+        assert_eq!(
+            steps[0].message.params["source"],
+            "Prometheus monitoring/prometheus-operated:9090"
+        );
+        assert_eq!(steps[0].notes.len(), 1);
+        assert_eq!(steps[0].notes[0].key, "messages.metrics.proxyForbidden");
+
+        let mut steps = Vec::new();
+        metrics_step(
+            &mut steps,
+            &metrics_inputs(|s| match s.path() {
+                "/apis/metrics.k8s.io/v1beta1" => (200, serde_json::json!({})),
+                _ => status(404, "NotFound", "no"),
+            }),
+        )
+        .await;
+        assert_eq!(names(&steps), [("metrics", true)]);
+        assert_eq!(
+            steps[0].message.key,
+            "messages.connectionTest.metricsCurrent"
+        );
+        assert_eq!(steps[0].notes.len(), 4);
+
+        let mut steps = Vec::new();
+        metrics_step(
+            &mut steps,
+            &metrics_inputs(|_| status(404, "NotFound", "no")),
+        )
+        .await;
+        assert_eq!(names(&steps), [("metrics", false)]);
+        assert_eq!(
+            steps[0].error.as_ref().unwrap().key,
+            "errors.metrics.unavailable"
+        );
+        assert_eq!(steps[0].notes.len(), 5, "и metrics.k8s.io");
+        assert!(
+            steps[0].error.as_ref().unwrap().details.is_none(),
+            "причины в пояснениях, не в подробностях ошибки"
+        );
+        assert!(report(steps).ok, "без метрик подключение работает");
     }
 
     #[tokio::test]

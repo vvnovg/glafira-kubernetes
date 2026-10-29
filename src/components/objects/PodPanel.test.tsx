@@ -12,7 +12,7 @@ vi.mock("@tanstack/react-virtual", () => ({
 
 vi.mock("../../api/client", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../../api/client")>();
-  return { ...orig, api: { getHealth: vi.fn().mockResolvedValue({ lastCheck: null, ignored: [], annotations: [] }), getPod: vi.fn(), listEvents: vi.fn(), getYaml: vi.fn() } };
+  return { ...orig, api: { getHealth: vi.fn().mockResolvedValue({ lastCheck: null, ignored: [], annotations: [], proposals: [] }), getPod: vi.fn(), listConnections: vi.fn().mockResolvedValue([]), listEvents: vi.fn(), getYaml: vi.fn() } };
 });
 
 import { api } from "../../api/client";

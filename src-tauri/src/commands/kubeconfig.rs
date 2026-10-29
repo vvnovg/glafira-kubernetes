@@ -172,6 +172,7 @@ fn prepare(
         secrets: SecretsInput {
             token,
             client_key: Some(imported.client_key.unwrap_or_default()),
+            metrics_token: None,
         },
         confirm_exec,
     })

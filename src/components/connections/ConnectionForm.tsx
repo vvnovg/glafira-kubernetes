@@ -2,14 +2,14 @@ import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, toAppError } from "../../api/client";
-import type { AppError, AuthConfig, AuthMethod, CaMode, ConnectionProfile, Environment, ExecAuth, LlmAccess, ProxyMode, SecretsInput, TestReport } from "../../api/types";
+import type { AppError, AuthConfig, AuthMethod, CaMode, ConnectionProfile, Environment, ExecAuth, LlmAccess, MetricsAuth, MetricsConfig, MetricsMode, ProxyMode, SecretsInput, TestReport } from "../../api/types";
 import { tr } from "../../i18n/text";
 import { restartSessions } from "../../lib/afterSignIn";
 import { useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Hint } from "../common/Hint";
 import { formatArgs, formatEnv, hasSecretValues, launchKey, launchLine, maskArgs, maskEnv, needsExecConfirmation, newExec, parseArgs, parseEnv } from "./exec";
-import { formatNamespaces, parseNamespaces, withAuthMethod, withCaMode, withProxyMode } from "./profile";
+import { formatNamespaces, newMetricsEndpoint, parseNamespaces, withAuthMethod, withCaMode, withMetricsMode, withProxyMode } from "./profile";
 import { ProjectListInput } from "./ProjectListInput";
 import { folderPaths } from "./tree/folderTree";
 
@@ -18,6 +18,8 @@ const AUTH_METHODS: AuthMethod[] = ["browser", "token", "clientCert", "exec"];
 const CA_MODES: CaMode[] = ["system", "pem", "insecure"];
 const PROXY_MODES: ProxyMode[] = ["system", "none", "url"];
 const LLM_ACCESS: LlmAccess[] = ["off", "metadata"];
+const METRICS_MODES: MetricsMode[] = ["auto", "thanos", "prometheus"];
+const METRICS_AUTH: MetricsAuth[] = ["connection", "bearer", "none"];
 
 export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile; tabId: string }) {
   const { t } = useTranslation();
@@ -25,6 +27,7 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
   // Секреты из формы: пустое поле — оставить сохранённый (у нового подключения его нет).
   const [token, setToken] = useState("");
   const [clientKey, setClientKey] = useState("");
+  const [metricsToken, setMetricsToken] = useState("");
   const [favorites, setFavorites] = useState(formatNamespaces(initial.favoriteNamespaces));
   const [manual, setManual] = useState(formatNamespaces(initial.manualNamespaces));
   // Проекты для LLM: «все доступные» (null) или список; список не теряется при переключении туда и обратно.
@@ -34,6 +37,7 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
   const [lastCert, setLastCert] = useState(initial.auth.method === "clientCert" ? initial.auth.certificatePem : "");
   const [lastCa, setLastCa] = useState(initial.ca.mode === "pem" ? initial.ca.pem : "");
   const [lastProxy, setLastProxy] = useState(initial.proxy.mode === "url" ? initial.proxy.url : "");
+  const [lastMetrics, setLastMetrics] = useState(initial.metrics && initial.metrics.mode !== "auto" ? initial.metrics : newMetricsEndpoint());
   // Exec-плагин: аргументы и переменные редактируются текстом, по строке на значение.
   const initialExec: ExecAuth = initial.auth.method === "exec" ? initial.auth : newExec();
   const [lastExec, setLastExec] = useState(initialExec);
@@ -90,6 +94,8 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
   const secrets = (): SecretsInput => ({
     token: profile.auth.method === "token" && token.trim() ? token : null,
     clientKey: profile.auth.method === "clientCert" && clientKey.trim() ? clientKey : null,
+    // Без своего источника токена метрик нет: Rust удаляет сохранённый сам.
+    ...(metrics.mode !== "auto" && { metricsToken: metrics.auth === "bearer" && metricsToken.trim() ? metricsToken : null }),
   });
   // Строку запуска подтверждает человек: новая, изменённая или неподтверждённая требует галочки.
   const execKey = profile.auth.method === "exec" ? launchKey(currentAuth() as ExecAuth) : null;
@@ -164,6 +170,10 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
   const auth = profile.auth;
   const ca = profile.ca;
   const proxy = profile.proxy;
+  const metrics: MetricsConfig = profile.metrics ?? { mode: "auto" };
+  const updateMetrics = (patch: Partial<Omit<Extract<MetricsConfig, { mode: "thanos" }>, "mode">>) => {
+    if (metrics.mode !== "auto") update({ metrics: { ...metrics, ...patch } });
+  };
 
   return (
     <div className="page">
@@ -443,6 +453,83 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
         />
 
         <span className="field-label">
+          <label htmlFor="cf-metrics">{t("connections.form.metrics")}</label>
+          <Hint k="hints.connections.metrics" label={t("connections.form.metrics")} />
+        </span>
+        <select
+          id="cf-metrics"
+          value={metrics.mode}
+          onChange={(e) => {
+            if (metrics.mode !== "auto") setLastMetrics(metrics);
+            update({ metrics: withMetricsMode(metrics, e.target.value as MetricsMode, lastMetrics) });
+          }}
+        >
+          {METRICS_MODES.map((m) => (
+            <option key={m} value={m}>
+              {t(`connections.form.metricsMode.${m}`)}
+            </option>
+          ))}
+        </select>
+        {metrics.mode !== "auto" && (
+          <>
+            <label htmlFor="cf-metrics-url">{t("connections.form.metricsUrl")}</label>
+            <input
+              id="cf-metrics-url"
+              placeholder={metrics.mode === "thanos" ? "https://thanos-querier.apps.example.com" : "https://prometheus.example.com"}
+              value={metrics.url}
+              onChange={(e) => updateMetrics({ url: e.target.value })}
+            />
+            <span className="field-label">
+              <label htmlFor="cf-metrics-auth">{t("connections.form.metricsAuth")}</label>
+              <Hint k="hints.connections.metricsAuth" label={t("connections.form.metricsAuth")} />
+            </span>
+            <select id="cf-metrics-auth" value={metrics.auth} onChange={(e) => updateMetrics({ auth: e.target.value as MetricsAuth })}>
+              {METRICS_AUTH.map((a) => (
+                <option key={a} value={a}>
+                  {t(`connections.form.metricsAuthMode.${a}`)}
+                </option>
+              ))}
+            </select>
+            {metrics.auth === "bearer" && (
+              <>
+                <label htmlFor="cf-metrics-token">{t("connections.form.metricsToken")}</label>
+                <input
+                  id="cf-metrics-token"
+                  type="password"
+                  autoComplete="off"
+                  placeholder={keepPlaceholder}
+                  value={metricsToken}
+                  onChange={(e) => setMetricsToken(e.target.value)}
+                />
+              </>
+            )}
+            <label htmlFor="cf-metrics-ca">{t("connections.form.metricsCa")}</label>
+            <select
+              id="cf-metrics-ca"
+              value={metrics.ca.mode}
+              onChange={(e) =>
+                updateMetrics({
+                  ca: e.target.value === "pem" ? { mode: "pem", pem: lastMetrics.ca.mode === "pem" ? lastMetrics.ca.pem : "" } : { mode: "connection" },
+                })
+              }
+            >
+              <option value="connection">{t("connections.form.metricsCaMode.connection")}</option>
+              <option value="pem">{t("connections.form.metricsCaMode.pem")}</option>
+            </select>
+            {metrics.ca.mode === "pem" && (
+              <textarea
+                className="full"
+                aria-label={t("connections.form.metricsCaPem")}
+                rows={4}
+                placeholder="-----BEGIN CERTIFICATE-----"
+                value={metrics.ca.pem}
+                onChange={(e) => updateMetrics({ ca: { mode: "pem", pem: e.target.value } })}
+              />
+            )}
+          </>
+        )}
+
+        <span className="field-label">
           <label htmlFor="cf-llm">{t("connections.form.llmAccess")}</label>
           <Hint k="hints.connections.llmAccess" label={t("connections.form.llmAccess")} />
         </span>
@@ -518,8 +605,15 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
         <ul className="steps">
           {report.steps.map((s) => (
             <li key={s.name}>
-              {s.ok ? "✅" : "❌"} <strong>{t(`connections.form.step.${s.name}`)}:</strong> <span>{tr(s.message)}</span>
+              {s.ok ? "✅" : s.name === "metrics" ? "⚠️" : "❌"} <strong>{t(`connections.form.step.${s.name}`)}:</strong> <span>{tr(s.message)}</span>
               {s.error?.details && <pre className="muted">{s.error.details}</pre>}
+              {s.notes && s.notes.length > 0 && (
+                <ul className="muted">
+                  {s.notes.map((n, i) => (
+                    <li key={i}>{tr(n)}</li>
+                  ))}
+                </ul>
+              )}
             </li>
           ))}
         </ul>

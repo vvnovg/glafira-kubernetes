@@ -27,6 +27,19 @@
     "health.object.gateway",
     "health.object.pvc",
     "health.object.hpa",
-    "health.object.quota"
+    "health.object.quota",
+    "change.diff.requests.cpu",
+    "change.diff.requests.memory",
+    "change.diff.limits.cpu",
+    "change.diff.limits.memory",
+    "change.fieldName.cpuRequest",
+    "change.fieldName.cpuLimit",
+    "change.fieldName.memoryRequest",
+    "change.fieldName.memoryLimit",
+    "resources.init",
+    "resources.col.cpu",
+    "resources.col.oom",
+    "resources.col.workload",
+    "resources.risk.oom"
   ]
 }

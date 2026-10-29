@@ -378,6 +378,37 @@ pub fn english(f: &Finding) -> (String, String) {
                 because(f)
             ),
         ),
+        "resources.cpuThrottled" => (
+            format!("{o}: CPU is throttled"),
+            format!(
+                "Containers with a CPU limit were throttled on average over the last 24 h: {}. The limit cuts their CPU time, so responses slow down.",
+                list(f, "containers")
+            ),
+        ),
+        "resources.memoryNearLimit" => (
+            format!("{o}: memory close to the limit"),
+            format!(
+                "Containers used 90% or more of their memory limit over the last 24 h (max / limit): {}. The next spike may end in OOMKilled.",
+                list(f, "containers")
+            ),
+        ),
+        "resources.overProvisioned" => {
+            // Пустой список не называется, как у `container.noRequests`.
+            let parts: Vec<String> = [("CPU (request / p95)", "cpu"), ("memory (request / max)", "memory")]
+                .into_iter()
+                .filter_map(|(what, name)| {
+                    let l = list(f, name);
+                    (!l.is_empty()).then(|| format!("{what}: {l}"))
+                })
+                .collect();
+            (
+                format!("{o}: requests far above the usage"),
+                format!(
+                    "Requests are much higher than the usage over the last 24 h — {}. The reserved capacity is unavailable to other pods.",
+                    parts.join("; ")
+                ),
+            )
+        }
         "check.partial" => (
             "The check is incomplete".into(),
             {

@@ -53,9 +53,9 @@ export function TabContent({ tab }: { tab: Tab }) {
     case "findings":
       return <FindingsPanel connectionId={tab.connectionId} />;
     case "project":
-      return <ProjectPanel connectionId={tab.connectionId} namespace={tab.namespace} />;
+      return <ProjectPanel connectionId={tab.connectionId} namespace={tab.namespace} proposal={tab.proposal} />;
     case "workload":
-      return <WorkloadPanel connectionId={tab.connectionId} namespace={tab.namespace} kind={tab.workloadKind} name={tab.name} />;
+      return <WorkloadPanel connectionId={tab.connectionId} namespace={tab.namespace} kind={tab.workloadKind} name={tab.name} proposal={tab.proposal} />;
     case "pod":
       return <PodPanel connectionId={tab.connectionId} namespace={tab.namespace} name={tab.name} />;
   }

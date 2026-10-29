@@ -239,6 +239,7 @@ mod tests {
                 name: "web".into(),
                 readiness_probe: true,
             }],
+            cron: None,
         }
     }
 

@@ -39,6 +39,14 @@ fn from_reqwest(e: &reqwest::Error) -> AppError {
 /// SNI и имени для проверки сертификата, оно берётся из адреса. Кластеру, которому нужно
 /// другое имя, вход через браузер не подойдёт.
 pub fn http_client(p: &ConnectionProfile) -> AppResult<reqwest::Client> {
+    http_client_with(p, |b| b)
+}
+
+/// Как `http_client`, но `tune` меняет сборщик перед сборкой (например, политику переадресаций).
+pub fn http_client_with(
+    p: &ConnectionProfile,
+    tune: impl FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
+) -> AppResult<reqwest::Client> {
     crate::tls::ensure_crypto_provider();
     let mut b = reqwest::Client::builder()
         .connect_timeout(Duration::from_millis(p.connect_timeout_ms))
@@ -76,7 +84,8 @@ pub fn http_client(p: &ConnectionProfile) -> AppResult<reqwest::Client> {
             )
         })?),
     };
-    b.build()
+    tune(b)
+        .build()
         .map_err(|e| AppError::internal_with(format!("http client: {}", chain_text(&e))))
 }
 

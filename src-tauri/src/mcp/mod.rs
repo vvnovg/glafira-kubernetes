@@ -6,7 +6,11 @@ pub mod approvals;
 pub mod backend;
 pub mod controller;
 pub mod files;
+#[cfg(test)]
+mod guard;
 pub mod map;
+pub mod proposals;
+pub mod resources;
 pub mod shim;
 
 use std::ffi::OsString;
@@ -131,40 +135,5 @@ mod tests {
         );
         assert_eq!(launch_path(exe, None), exe.to_path_buf());
         assert_eq!(launch_path(exe, Some("".into())), exe.to_path_buf());
-    }
-}
-
-/// Сторожок «через MCP кластер не изменить» (спец. §4.1, §17): код `mcp/` не берёт клиент `kube`
-/// мимо `ReadClient` и не знает изменяющих операций. Шаблоны собраны из частей, чтобы этот файл
-/// сам под них не попадал.
-#[cfg(test)]
-mod guard {
-    #[test]
-    fn mcp_never_reaches_writes_or_the_raw_client() {
-        let forbidden: Vec<String> = [
-            ["ops", "::"],
-            ["Cluster", "Writer"],
-            ["kube_", "client("],
-            ["kube::", "Client"],
-            ["kube::", "Api"],
-            ["kube::api::", "Api<"],
-            ["Post", "Params"],
-            ["Patch", "Params"],
-            ["Delete", "Params"],
-        ]
-        .iter()
-        .map(|p| p.concat())
-        .collect();
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/mcp");
-        let mut checked = 0;
-        for entry in std::fs::read_dir(&dir).unwrap() {
-            let path = entry.unwrap().path();
-            let text = std::fs::read_to_string(&path).unwrap();
-            for f in &forbidden {
-                assert!(!text.contains(f.as_str()), "{}: {f}", path.display());
-            }
-            checked += 1;
-        }
-        assert!(checked >= 7, "файлы mcp/: {checked}");
     }
 }
