@@ -80,6 +80,7 @@ pub const LLM_TEXT_KEYS: &[&str] = &[
     "errors.change.noContainer",
     "errors.change.limitRangeMin",
     "errors.change.limitRangeMax",
+    "errors.change.resourcesKind",
     "errors.internal",
 ];
 
@@ -888,6 +889,18 @@ mod tests {
             llm_message(&e),
             "Container app: the CPU limit is below the request"
         );
+    }
+
+    #[test]
+    fn the_job_resources_refusal_reaches_the_model_with_its_text() {
+        let job: crate::change::Change = serde_json::from_value(serde_json::json!({
+            "kind": "setResources", "namespace": "team-a",
+            "workload": {"kind": "Job", "name": "once"},
+            "containers": [{"name": "app", "requests": {"cpu": "1"}}]}))
+        .unwrap();
+        let e = crate::change::validate_form(&job).unwrap_err();
+        assert_eq!(e.key, "errors.change.resourcesKind");
+        assert_eq!(llm_message(&e), e.message);
     }
 
     #[test]

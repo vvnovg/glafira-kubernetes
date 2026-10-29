@@ -102,6 +102,13 @@ fn admission(e: AppError) -> AppError {
 impl ClusterWriter for KubeWriter {
     fn send<'a>(&'a self, w: &'a Write, dry_run: bool) -> BoxFuture<'a, AppResult<()>> {
         Box::pin(async move {
+            // Вызов без dry-run (`instantiate` DeploymentConfig) `dryRun=All` может проигнорировать
+            // и выполнить по-настоящему: такой запрос не уходит вовсе.
+            if dry_run && !w.dry_run {
+                return Err(AppError::internal_with(
+                    "this request does not accept a dry-run",
+                ));
+            }
             // У DELETE с телом API-сервер берёт параметры только из `DeleteOptions`: строку
             // запроса он не читает, и `dryRun` в ней удалил бы объект по-настоящему.
             let mut body = w.body.clone();
@@ -412,6 +419,19 @@ fn raced(e: &AppError) -> bool {
     e.key == "errors.k8s.conflict"
 }
 
+/// Ответ API-сервера, который предпросмотр показывает как результат dry-run: отказ по правам или
+/// admission, неверное значение, гонка со статусом. Остальное (таймаут, обрыв связи, 401, 5xx) —
+/// ошибка команды: `read_in` сбросит сломанный клиент и кэш прав.
+fn rejects(e: &AppError) -> bool {
+    matches!(
+        e.code,
+        ErrorCode::Forbidden
+            | ErrorCode::AdmissionDenied
+            | ErrorCode::InvalidInput
+            | ErrorCode::Conflict
+    )
+}
+
 /// Предпросмотр: форма, объект, проверка, «было → станет», dry-run.
 pub async fn preview(
     r: &ReadClient,
@@ -433,6 +453,9 @@ pub async fn preview(
                 continue;
             }
             if let Err(error) = w.send(&write, true).await {
+                if !rejects(&error) {
+                    return Err(error);
+                }
                 dry_run = DryRun::Rejected { error };
                 break;
             }
@@ -457,7 +480,9 @@ pub async fn preview(
 
 /// Применение после стражей подключения: объект перечитывается и сверяется с версией
 /// предпросмотра `expected` (spec изменился — `CONFLICT`), под без контроллера требует ввода
-/// имени (`confirm_pod`). Возвращает применённое изменение.
+/// имени (`confirm_pod`). Без версии предпросмотра (`None`) или без версии прочитанного объекта
+/// запись не уходит: сверять не с чем, это тоже `CONFLICT` («Обновить и повторить»). Возвращает
+/// применённое изменение.
 pub async fn apply(
     r: &ReadClient,
     w: &dyn ClusterWriter,
@@ -478,10 +503,11 @@ pub async fn apply(
         {
             crate::guard::ensure_name_confirmed(pod, confirm_pod)?;
         }
-        if let (Some(e), Some(v)) = (expected, facts.version())
-            && e != v
-        {
-            return Err(changed());
+        // Версия обязательна с обеих сторон: иначе пересозданный под с тем же именем удалился бы
+        // вслепую.
+        match (expected, facts.version()) {
+            (Some(e), Some(v)) if e == v => {}
+            _ => return Err(changed()),
         }
         let mut sent = Ok(());
         for write in writes(&change, &facts, now)? {
@@ -710,7 +736,7 @@ pub(crate) mod tests {
             namespace: "team-a".into(),
             workload: workload(WorkloadKind::Deployment),
         };
-        apply(&r, &w, restart, None, None, "2026-10-28T12:00:00Z")
+        apply(&r, &w, restart, Some("2"), None, "2026-10-28T12:00:00Z")
             .await
             .unwrap();
         let dc = Change::RolloutRestart {
@@ -722,7 +748,7 @@ pub(crate) mod tests {
             matches!(p.dry_run, DryRun::Skipped),
             "instantiate без dry-run"
         );
-        apply(&r, &w, dc, None, None, "now").await.unwrap();
+        apply(&r, &w, dc, Some("7"), None, "now").await.unwrap();
         let hpa = Change::SetHpaBounds {
             namespace: "team-a".into(),
             hpa: "web".into(),
@@ -769,10 +795,16 @@ pub(crate) mod tests {
         };
         let p = preview(&r, &w, pod.clone(), "now").await.unwrap();
         assert!(p.confirm_pod_name);
+        let before = w.sent.lock().unwrap().len();
         let e = apply(&r, &w, pod.clone(), Some("u-solo"), None, "now")
             .await
             .unwrap_err();
         assert_eq!(e.key, "errors.guard.typeToConfirm");
+        assert_eq!(
+            w.sent.lock().unwrap().len(),
+            before,
+            "без имени в кластер ничего не ушло"
+        );
         apply(&r, &w, pod, Some("u-solo"), Some("solo"), "now")
             .await
             .unwrap();
@@ -815,6 +847,10 @@ pub(crate) mod tests {
             (e.code, e.key.as_str()),
             (ErrorCode::Conflict, "errors.ops.changed")
         );
+        assert!(
+            w.sent.lock().unwrap().iter().all(|(_, dry)| *dry),
+            "после чужой версии запись не ушла"
+        );
         // Гонка со статусом (409) — объект перечитывается, dry-run и запись повторяются; не больше
         // трёх раз.
         let racing = || {
@@ -843,7 +879,7 @@ pub(crate) mod tests {
                     .with_code(409),
             ))
         });
-        let e = apply(&reader(), &busy, c, None, None, "now")
+        let e = apply(&reader(), &busy, c, Some("2"), None, "now")
             .await
             .unwrap_err();
         assert_eq!(
@@ -895,5 +931,105 @@ pub(crate) mod tests {
             json!({"preconditions": {"uid": "u1"}, "dryRun": ["All"]})
         );
         assert_eq!(seen[2].body, json!({"preconditions": {"uid": "u1"}}));
+    }
+
+    #[tokio::test]
+    async fn a_call_without_dry_run_support_is_never_sent_as_a_dry_run() {
+        let (client, server) = mock_client(|_| (200, json!({})));
+        let w = KubeWriter::new(client, StdDuration::from_secs(5));
+        let instantiate = Write {
+            verb: Verb::Post,
+            path: "/apis/apps.openshift.io/v1/namespaces/team-a/deploymentconfigs/web/instantiate"
+                .into(),
+            body: json!({"kind": "DeploymentRequest", "name": "web", "latest": true}),
+            dry_run: false,
+        };
+        // `dryRun=All` OpenShift у этого вызова может проигнорировать и начать выкладку.
+        let e = w.send(&instantiate, true).await.unwrap_err();
+        assert_eq!(e.code, ErrorCode::Internal);
+        w.send(&instantiate, false).await.unwrap();
+        drop(w);
+        let seen = server.await.unwrap();
+        assert_eq!(seen.len(), 1, "dry-run в кластер не ушёл");
+        assert_eq!(seen[0].method, http::Method::POST);
+        assert!(!seen[0].uri.contains("dryRun"), "{}", seen[0].uri);
+    }
+
+    #[tokio::test]
+    async fn apply_goes_only_with_the_version_of_the_preview() {
+        let w = FakeWriter::new(|_, _| Ok(()));
+        let r = reader();
+        let scale = Change::Scale {
+            namespace: "team-a".into(),
+            workload: workload(WorkloadKind::Deployment),
+            replicas: 4,
+        };
+        let pod = Change::DeletePod {
+            namespace: "team-a".into(),
+            pod: "solo".into(),
+        };
+        // У CronJob в ответе кластера нет `metadata.generation`: версии объекта нет.
+        let cron = set("CronJob", json!([{"name": "app", "limits": {"cpu": "1"}}]));
+        let cases = [
+            // Без версии предпросмотра: под удаляется с его именем, чтобы упереться в версию.
+            (scale.clone(), None, None),
+            (pod.clone(), None, Some("solo")),
+            // Другая версия: объект пересоздан или изменён.
+            (pod.clone(), Some("u-other"), Some("solo")),
+            // У прочитанного объекта версии нет.
+            (cron, Some("1"), None),
+        ];
+        for (change, expected, confirm_pod) in cases {
+            let e = apply(&r, &w, change, expected, confirm_pod, "now")
+                .await
+                .unwrap_err();
+            assert_eq!(
+                (e.code, e.key.as_str()),
+                (ErrorCode::Conflict, "errors.ops.changed")
+            );
+        }
+        assert!(
+            w.sent.lock().unwrap().is_empty(),
+            "в кластер ничего не ушло"
+        );
+        apply(&r, &w, scale, Some("2"), None, "now").await.unwrap();
+        assert_eq!(w.sent.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn only_a_refusal_of_the_api_server_is_a_rejected_dry_run() {
+        let c = set(
+            "Deployment",
+            json!([{"name": "app", "requests": {"cpu": "1"}}]),
+        );
+        let failure = |code: u16| {
+            crate::k8s::errors::from_status(
+                &kube::core::Status::failure("boom", "Reason").with_code(code),
+            )
+        };
+        // Неверное значение и непрекращающаяся гонка со статусом показываются в предпросмотре.
+        for (error, attempts) in [(failure(422), 1), (failure(409), WRITE_ATTEMPTS)] {
+            let code = error.code;
+            let w = FakeWriter::new(move |_, _| Err(error.clone()));
+            let p = preview(&reader(), &w, c.clone(), "now").await.unwrap();
+            let DryRun::Rejected { error } = p.dry_run else {
+                panic!("{:?}", p.dry_run)
+            };
+            assert_eq!(error.code, code);
+            assert_eq!(w.sent.lock().unwrap().len(), attempts);
+        }
+        // Сбой связи, таймаут, 401 и 5xx — ошибка команды: `read_in` сбросит сломанный клиент.
+        for error in [
+            failure(500),
+            failure(401),
+            crate::k8s::errors::timeout(),
+            crate::k8s::errors::from_transport_text("connection refused"),
+        ] {
+            let (code, key) = (error.code, error.key.clone());
+            let w = FakeWriter::new(move |_, _| Err(error.clone()));
+            let e = preview(&reader(), &w, c.clone(), "now").await.unwrap_err();
+            assert_eq!((e.code, e.key), (code, key));
+            assert_eq!(w.sent.lock().unwrap().len(), 1, "без повторов");
+        }
     }
 }
