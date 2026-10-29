@@ -29,6 +29,8 @@ pub struct AppState {
     pub access: Arc<crate::k8s::access::AccessCache>,
     /// Проверка кластера, скрытые находки и замечания LLM (`health/<id>.json`).
     pub health: Arc<crate::health::service::HealthService>,
+    /// Собранное по проектам для вкладки «Ресурсы» (кэш на 5 минут).
+    pub resources: Arc<crate::resources::project::ProjectCache>,
 }
 
 impl AppState {
@@ -43,6 +45,7 @@ impl AppState {
             sessions: Arc::new(crate::sessions::Sessions::default()),
             access: Arc::new(crate::k8s::access::AccessCache::default()),
             health: Arc::new(crate::health::service::HealthService::open(data_dir)),
+            resources: Arc::new(Default::default()),
         })
     }
 

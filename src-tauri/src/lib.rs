@@ -159,6 +159,7 @@ pub fn run() {
             commands::resources::get_workload_usage,
             commands::resources::get_pod_usage,
             commands::resources::recommend_resources,
+            commands::resources::get_project_usage,
             commands::health::run_health_check,
             commands::health::get_health,
             commands::health::set_finding_ignored,

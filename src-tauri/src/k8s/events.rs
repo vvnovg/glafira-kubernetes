@@ -169,6 +169,13 @@ fn is_child(parent: &str, child: &str, rest: &str) -> bool {
     }
 }
 
+/// Под `pod` по форме имени порождён workload'ом вида `kind` (`Deployment`, `CronJob`…) с именем
+/// `workload` — так сопоставляются с workload'ами и поды, которых уже нет (метрики за окно).
+pub fn pod_of(kind: &str, workload: &str, pod: &str) -> bool {
+    pod.strip_prefix(&format!("{workload}-"))
+        .is_some_and(|rest| is_child(kind, "Pod", rest))
+}
+
 /// Относится ли событие к объекту `o`: это он сам или его ребёнок.
 pub fn concerns(row: &EventRow, o: &EventObject) -> bool {
     if row.object.kind == o.kind && row.object.name == o.name {

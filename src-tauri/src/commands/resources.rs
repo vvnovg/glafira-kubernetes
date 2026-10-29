@@ -1,13 +1,17 @@
 //! Ресурсы (спец. §4.2, §7): источник метрик подключения, статистика workload'а и текущее
 //! потребление пода. Чтение в проекте идёт через `read_in`: 403 сбрасывает кэш прав проекта.
 
+use serde::Serialize;
 use tauri::State;
+use tauri::ipc::Channel;
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::k8s::workloads::WorkloadKind;
 use crate::metrics::select::SourceStatus;
 use crate::resources::Analysis;
+use crate::resources::project::{PROJECT_DEADLINE, ProjectUsage};
 use crate::resources::usage::{PodUsage, WorkloadUsage};
+use crate::sessions::{SessionGuard, Sink};
 use crate::state::AppState;
 
 pub(crate) fn now_s() -> i64 {
@@ -109,4 +113,170 @@ pub async fn recommend_resources(
             .await
         })
         .await
+}
+
+/// Итог сессии сбора по проекту.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ProjectUsageEvent {
+    Done { usage: Box<ProjectUsage> },
+    Failed { error: AppError },
+}
+
+/// Ресурсы проекта (вкладка «Ресурсы» проекта): фоновая сессия с дедлайном 45 с; итог — в
+/// `on_event`, собранное живёт в кэше 5 минут (`refresh` — собрать заново). Возвращает id
+/// сессии для `stop_session`.
+#[tauri::command]
+pub async fn get_project_usage(
+    state: State<'_, AppState>,
+    connection_id: String,
+    namespace: String,
+    window_days: u32,
+    refresh: bool,
+    on_event: Channel<ProjectUsageEvent>,
+) -> AppResult<String> {
+    get_project_usage_impl(
+        state.inner(),
+        connection_id,
+        namespace,
+        window_days,
+        refresh,
+        on_event,
+    )
+    .await
+}
+
+pub async fn get_project_usage_impl(
+    st: &AppState,
+    connection_id: String,
+    namespace: String,
+    days: u32,
+    refresh: bool,
+    sink: impl Sink<ProjectUsageEvent>,
+) -> AppResult<String> {
+    crate::k8s::read::check_namespace(&namespace)?;
+    crate::resources::usage::check_window(days)?;
+    let (id, cancel) = st.sessions.register(&connection_id);
+    let guard = SessionGuard {
+        sessions: st.sessions.clone(),
+        id: id.clone(),
+    };
+    let st = st.clone();
+    tokio::spawn(async move {
+        let _guard = guard;
+        let work = async {
+            if !refresh && let Some(u) = st.resources.get(&connection_id, &namespace, days) {
+                return Ok(u);
+            }
+            let (s, cid, ns) = (st.clone(), connection_id.clone(), namespace.clone());
+            let read = st.read_in(&connection_id, &namespace, |c| async move {
+                let sel = crate::metrics::select::for_connection(&s, &cid, &c, false).await?;
+                let groups = c.info.api_groups;
+                crate::resources::project::project_usage(
+                    &c.reader(),
+                    &sel,
+                    &groups,
+                    &ns,
+                    days,
+                    now_s(),
+                )
+                .await
+            });
+            let u = tokio::time::timeout(PROJECT_DEADLINE, Box::pin(read))
+                .await
+                .map_err(|_| crate::k8s::errors::timeout())??;
+            st.resources.put(&connection_id, &u);
+            Ok::<_, AppError>(u)
+        };
+        tokio::select! {
+            _ = cancel.cancelled() => {}
+            r = work => {
+                sink.send(match r {
+                    Ok(u) => ProjectUsageEvent::Done { usage: Box::new(u) },
+                    Err(error) => ProjectUsageEvent::Failed { error },
+                });
+            }
+        }
+    });
+    Ok(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use super::*;
+    use crate::sessions::Collect;
+
+    async fn done(sink: &Collect<ProjectUsageEvent>, n: usize) -> Vec<ProjectUsageEvent> {
+        let wait = async {
+            while sink.items().len() < n {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), wait)
+            .await
+            .unwrap();
+        sink.items()
+    }
+
+    #[tokio::test]
+    async fn project_usage_is_collected_once_and_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let st =
+            AppState::new(dir.path(), Arc::new(crate::secrets::MemoryStore::default())).unwrap();
+        st.connections
+            .upsert(crate::storage::profile::sample_profile("a"))
+            .unwrap();
+        let pods = Arc::new(AtomicUsize::new(0));
+        let seen = pods.clone();
+        let connected = crate::k8s::pool::test_connected(move |s| {
+            let list = |kind: &str| {
+                (
+                    200,
+                    serde_json::json!({"apiVersion": "v1", "kind": kind, "metadata": {}, "items": []}),
+                )
+            };
+            match s.path() {
+                "/apis/metrics.k8s.io/v1beta1" => (200, serde_json::json!({})),
+                "/api/v1/namespaces/team-a/pods" => {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    list("PodList")
+                }
+                p if p.ends_with("/proxy/api/v1/query") => {
+                    crate::k8s::testing::status(404, "NotFound", "no")
+                }
+                _ => list("List"),
+            }
+        });
+        assert!(
+            st.pool
+                .insert_if_current("a", st.pool.generation("a"), connected)
+        );
+        let sink: Collect<ProjectUsageEvent> = Collect::default();
+        get_project_usage_impl(&st, "a".into(), "team-a".into(), 7, false, sink.clone())
+            .await
+            .unwrap();
+        let events = done(&sink, 1).await;
+        let ProjectUsageEvent::Done { usage } = &events[0] else {
+            panic!("{events:?}")
+        };
+        assert_eq!(usage.source.location, "metrics.k8s.io");
+        get_project_usage_impl(&st, "a".into(), "team-a".into(), 7, false, sink.clone())
+            .await
+            .unwrap();
+        done(&sink, 2).await;
+        assert_eq!(pods.load(Ordering::SeqCst), 1, "второй раз — из кэша");
+        get_project_usage_impl(&st, "a".into(), "team-a".into(), 7, true, sink.clone())
+            .await
+            .unwrap();
+        done(&sink, 3).await;
+        assert_eq!(pods.load(Ordering::SeqCst), 2, "«Обновить» собирает заново");
+        let e = get_project_usage_impl(&st, "a".into(), "team-a".into(), 3, false, sink)
+            .await
+            .unwrap_err();
+        assert_eq!(e.key, "errors.resources.badWindow");
+    }
 }
