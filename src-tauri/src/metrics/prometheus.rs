@@ -303,15 +303,25 @@ pub async fn query_range(
 
 /// Проверка источника: `vector(1)` отвечает единицей.
 pub async fn probe(s: &dyn MetricsSource, time: i64) -> Result<(), Failure> {
-    let body = s
-        .get(
-            PromApi::Query,
-            vec![
-                ("query".into(), "vector(1)".into()),
-                ("time".into(), time.to_string()),
-            ],
-        )
-        .await?;
+    probe_in(s, time, None).await
+}
+
+/// Проверка в проекте пользователя: tenancy-endpoint без `namespace` отвечает 400, поэтому у
+/// такого источника проверка идёт с проектом. Без проекта (`None`) — как `probe`.
+pub async fn probe_in(
+    s: &dyn MetricsSource,
+    time: i64,
+    namespace: Option<&str>,
+) -> Result<(), Failure> {
+    let params = vec![
+        ("query".to_string(), "vector(1)".to_string()),
+        ("time".to_string(), time.to_string()),
+    ];
+    let params = match namespace {
+        Some(namespace) => with_namespace(s, namespace, params),
+        None => params,
+    };
+    let body = s.get(PromApi::Query, params).await?;
     match parse_vector(&body)?.first() {
         Some(v) if v.value == 1.0 => Ok(()),
         _ => Err(Failure::bad_response("vector(1) did not return 1")),
@@ -334,6 +344,12 @@ impl SourceInfo {
 pub fn reason_text(r: Reason, info: &SourceInfo) -> LocalizedText {
     let source = info.label();
     match (r, info.kind) {
+        // Свой источник опрашивается напрямую, не через API-сервер: права на прокси ни при чём.
+        (Reason::Forbidden, _) if info.origin == SourceOrigin::Profile => crate::ltext!(
+            "messages.metrics.ownForbidden",
+            "{{source}}: the source rejected the credentials — check the authorization in the connection settings",
+            source = source
+        ),
         (Reason::Forbidden, SourceKind::Thanos) => crate::ltext!(
             "messages.metrics.thanosForbidden",
             "{{source}}: no rights to cluster monitoring (the cluster-monitoring-view role or similar is needed)",
@@ -595,6 +611,71 @@ mod tests {
         assert_eq!(
             probe(&wrong, 1).await.unwrap_err().reason,
             Reason::BadResponse
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_in_passes_the_project_only_to_a_tenancy_source() {
+        let mut s = FakeSource::new(|_, _| Ok(vector(&[(&[], 1.0)])));
+        probe_in(&s, 1, Some("team-a")).await.unwrap();
+        s.tenancy = true;
+        probe_in(&s, 1, Some("team-a")).await.unwrap();
+        probe_in(&s, 1, None).await.unwrap();
+        probe(&s, 1).await.unwrap();
+        let seen = s.seen.lock().unwrap();
+        let has_namespace = |i: usize| seen[i].1.contains(&("namespace".into(), "team-a".into()));
+        assert!(!has_namespace(0), "у обычного источника проекта нет");
+        assert!(has_namespace(1));
+        assert!(
+            !has_namespace(2) && !has_namespace(3),
+            "без проекта — как probe"
+        );
+    }
+
+    #[test]
+    fn forbidden_text_depends_on_where_the_source_is() {
+        let info = |kind, origin| SourceInfo {
+            kind,
+            origin,
+            location: "x".into(),
+            history: true,
+        };
+        for (kind, origin, key) in [
+            (
+                SourceKind::Prometheus,
+                SourceOrigin::Profile,
+                "messages.metrics.ownForbidden",
+            ),
+            (
+                SourceKind::Thanos,
+                SourceOrigin::Profile,
+                "messages.metrics.ownForbidden",
+            ),
+            (
+                SourceKind::Prometheus,
+                SourceOrigin::Auto,
+                "messages.metrics.proxyForbidden",
+            ),
+            (
+                SourceKind::Thanos,
+                SourceOrigin::Auto,
+                "messages.metrics.thanosForbidden",
+            ),
+            (
+                SourceKind::MetricsServer,
+                SourceOrigin::Auto,
+                "messages.metrics.podMetricsForbidden",
+            ),
+        ] {
+            let text = reason_text(Reason::Forbidden, &info(kind, origin));
+            assert_eq!(text.key, key, "{kind:?} {origin:?}");
+            assert_eq!(text.params["source"], info(kind, origin).label());
+        }
+        // Остальные причины от происхождения не зависят.
+        let own = info(SourceKind::Prometheus, SourceOrigin::Profile);
+        assert_eq!(
+            reason_text(Reason::NotFound, &own).key,
+            "messages.metrics.notFound"
         );
     }
 }

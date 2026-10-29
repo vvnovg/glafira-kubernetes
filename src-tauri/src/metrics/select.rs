@@ -14,7 +14,8 @@ use tokio::time::Instant;
 use super::discovery::{ProxySource, THANOS_ROUTE, candidates, thanos_url};
 use super::http::{HttpSource, client};
 use super::prometheus::{
-    Failure, MetricsSource, Reason, SourceInfo, SourceKind, SourceOrigin, probe, reason_text,
+    Failure, MetricsSource, Reason, SourceInfo, SourceKind, SourceOrigin, probe, probe_in,
+    reason_text,
 };
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::i18n::LocalizedText;
@@ -220,18 +221,45 @@ async fn own(i: &Inputs, now_s: i64, tried: &mut Vec<Rejected>) -> Option<Arc<dy
             ))
         });
     match built {
-        Ok(src) => match probe(&src, now_s).await {
-            Ok(()) => Some(Arc::new(src)),
-            Err(f) => {
-                tried.push(rejected(info, f));
+        Ok(src) => {
+            // Tenancy-endpoint без `namespace` отвечает 400: его проверка идёт в проекте
+            // пользователя. Future чтения списка проектов держится в куче (стек debug-сборки).
+            let namespace = if src.tenancy() {
+                Box::pin(probe_namespace(i)).await
+            } else {
                 None
+            };
+            match probe_in(&src, now_s, namespace.as_deref()).await {
+                Ok(()) => Some(Arc::new(src)),
+                Err(f) => {
+                    tried.push(rejected(info, f));
+                    None
+                }
             }
-        },
+        }
         Err(f) => {
             tried.push(rejected(info, f));
             None
         }
     }
+}
+
+/// Проект пользователя для проверки tenancy-источника: первый из списков профиля (избранные,
+/// затем заданные вручную), иначе первый, который отдаёт кластер. Нет ни того ни другого —
+/// `None`: проверка пойдёт без проекта, и источник сам скажет, что ему нужен проект.
+async fn probe_namespace(i: &Inputs) -> Option<String> {
+    let listed = i
+        .profile
+        .favorite_namespaces
+        .iter()
+        .chain(&i.profile.manual_namespaces)
+        .next();
+    if let Some(name) = listed {
+        return Some(name.clone());
+    }
+    let projects_api = i.platform.kind == PlatformKind::Openshift;
+    let (names, _) = i.reader.project_names(projects_api).await.ok()?;
+    names.into_iter().next()
 }
 
 /// Выбор, который живёт в подключении. Одновременные вызовы ждут один выбор.
@@ -427,6 +455,126 @@ mod tests {
         assert_eq!(s.status.rejected[0].reason, Reason::TokenMissing);
         assert_eq!(s.status.rejected[0].source.origin, SourceOrigin::Profile);
         assert!(!s.status.rejected[0].source.location.contains("pw"));
+    }
+
+    /// Свой Thanos на tenancy-endpoint: без `namespace` отвечает 400, с ним — 200.
+    async fn tenancy_endpoint() -> (url::Url, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        crate::metrics::http::fake::server(|line| {
+            if line.contains("namespace=team-a") {
+                (200, ok_vector().1.to_string())
+            } else {
+                (
+                    400,
+                    r#"{"status":"error","errorType":"bad_data","error":"The namespace parameter is required."}"#
+                        .into(),
+                )
+            }
+        })
+        .await
+    }
+
+    /// Профиль со своим Thanos по адресу `base`, без авторизации и прокси.
+    fn own_thanos(i: &mut Inputs, base: &url::Url) {
+        i.profile.proxy = crate::storage::profile::ProxyConfig::None;
+        i.profile.metrics = MetricsConfig::Thanos(MetricsEndpoint {
+            url: base.to_string(),
+            auth: MetricsAuth::None,
+            ca: MetricsCa::Connection,
+        });
+    }
+
+    /// Ответ списка проектов OpenShift и число таких запросов.
+    fn projects(
+        names: &'static [&'static str],
+    ) -> (
+        impl Fn(&crate::k8s::testing::Seen) -> (u16, serde_json::Value) + Send + 'static,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let listed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = listed.clone();
+        let handler = move |s: &crate::k8s::testing::Seen| {
+            if s.path() == "/apis/project.openshift.io/v1/projects" {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let items: Vec<_> = names
+                    .iter()
+                    .map(|n| serde_json::json!({"metadata": {"name": n}}))
+                    .collect();
+                (
+                    200,
+                    serde_json::json!({"apiVersion": "project.openshift.io/v1",
+                        "kind": "ProjectList", "metadata": {}, "items": items}),
+                )
+            } else {
+                status(403, "Forbidden", "no")
+            }
+        };
+        (handler, listed)
+    }
+
+    #[tokio::test]
+    async fn own_thanos_on_a_tenancy_endpoint_is_probed_in_a_project_of_the_user() {
+        // Проекта в профиле нет: берётся первый из списка кластера.
+        let (base, log) = tenancy_endpoint().await;
+        let (handler, listed) = projects(&["team-a", "team-b"]);
+        let mut i = inputs(PlatformKind::Openshift, handler);
+        own_thanos(&mut i, &base);
+        let s = select(&i, 100).await;
+        let sel = s.status.selected.expect("свой Thanos выбран");
+        assert_eq!(
+            (sel.kind, sel.origin),
+            (SourceKind::Thanos, SourceOrigin::Profile)
+        );
+        assert_eq!(s.status.mode, Mode::Thanos);
+        assert!(s.history.is_some() && s.status.rejected.is_empty());
+        assert_eq!(listed.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let seen = log.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert!(
+            seen[0].starts_with(
+                "GET /prefix/api/v1/query?query=vector%281%29&time=100&namespace=team-a "
+            ),
+            "{}",
+            seen[0]
+        );
+
+        // Проект есть в профиле: избранные раньше заданных вручную, кластер не спрашивают.
+        let (base, log) = tenancy_endpoint().await;
+        let (handler, listed) = projects(&["team-b"]);
+        let mut i = inputs(PlatformKind::Openshift, handler);
+        own_thanos(&mut i, &base);
+        i.profile.manual_namespaces = vec!["team-b".into()];
+        i.profile.favorite_namespaces = vec!["team-a".into()];
+        assert!(select(&i, 100).await.history.is_some());
+        assert_eq!(listed.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(log.lock().unwrap()[0].contains("namespace=team-a"));
+    }
+
+    #[tokio::test]
+    async fn own_thanos_without_any_project_is_probed_without_one_and_rejected() {
+        let (base, log) = tenancy_endpoint().await;
+        let mut i = inputs(PlatformKind::Openshift, |_| {
+            status(403, "Forbidden", "projects are forbidden")
+        });
+        own_thanos(&mut i, &base);
+        let s = select(&i, 100).await;
+        assert!(s.history.is_none() && !s.status.pod_metrics);
+        assert_eq!(s.status.rejected.len(), 1);
+        assert_eq!(s.status.rejected[0].reason, Reason::BadResponse);
+        assert!(!log.lock().unwrap()[0].contains("namespace="));
+    }
+
+    #[tokio::test]
+    async fn own_source_that_rejects_the_credentials_is_not_sent_to_the_api_proxy() {
+        let (base, _) = crate::metrics::http::fake::server(|_| (403, "forbidden".into())).await;
+        let mut i = inputs(PlatformKind::Kubernetes, |_| ok_vector());
+        own_thanos(&mut i, &base);
+        i.profile.favorite_namespaces = vec!["team-a".into()];
+        let s = select(&i, 100).await;
+        assert_eq!(s.status.rejected[0].reason, Reason::Forbidden);
+        assert_eq!(
+            s.status.rejected[0].message.key,
+            "messages.metrics.ownForbidden"
+        );
     }
 
     #[tokio::test]

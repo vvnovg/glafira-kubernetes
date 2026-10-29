@@ -32,14 +32,19 @@ impl std::fmt::Debug for HttpSource {
 }
 
 /// HTTP-клиент источника: TLS, прокси и таймауты профиля; CA источника — свой или как у
-/// подключения.
+/// подключения. Переадресациям клиент не следует: за ними токен ушёл бы по другому пути, а
+/// источник делает только GET к `/api/v1/query` и `/api/v1/query_range`.
 pub fn client(profile: &ConnectionProfile, ca: &MetricsCa) -> AppResult<reqwest::Client> {
+    let no_redirects = |b: reqwest::ClientBuilder| b.redirect(reqwest::redirect::Policy::none());
     match ca {
-        MetricsCa::Connection => crate::auth::oauth::http_client(profile),
-        MetricsCa::Pem { pem } => crate::auth::oauth::http_client(&ConnectionProfile {
-            ca: CaConfig::Pem { pem: pem.clone() },
-            ..profile.clone()
-        }),
+        MetricsCa::Connection => crate::auth::oauth::http_client_with(profile, no_redirects),
+        MetricsCa::Pem { pem } => crate::auth::oauth::http_client_with(
+            &ConnectionProfile {
+                ca: CaConfig::Pem { pem: pem.clone() },
+                ..profile.clone()
+            },
+            no_redirects,
+        ),
     }
 }
 
@@ -77,6 +82,10 @@ impl HttpSource {
         let body = resp.text().await.map_err(|e| transport(&e))?;
         match status {
             200..=299 => Ok(body),
+            // Переадресация не выполняется: источник с ней — не Prometheus API по этому адресу.
+            300..=399 => Err(Failure::bad_response(format!(
+                "redirects are not followed (HTTP {status})"
+            ))),
             // У Prometheus ошибка запроса — 400/422 с телом `{"status":"error",…}`.
             400 | 422 => Err(Failure::bad_response(
                 body.chars().take(300).collect::<String>(),
@@ -140,19 +149,16 @@ fn http_failure(status: u16, base: &url::Url) -> Failure {
     }
 }
 
+/// Локальный HTTP-сервер для тестов источников: свой адрес и свой Thanos в `select`.
 #[cfg(test)]
-mod tests {
+pub mod fake {
     use std::sync::{Arc, Mutex};
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use super::*;
-    use crate::metrics::prometheus::{SourceKind, SourceOrigin, probe, query};
-    use crate::storage::profile::sample_profile;
-
-    /// HTTP-сервер для тестов: ответ `(код, тело)` по первой строке запроса; запросы с
-    /// заголовками записываются.
-    async fn server(
+    /// Ответ `(код, тело)` по первой строке запроса; запросы с заголовками записываются.
+    /// Коды 3xx идут с `Location`: без него клиент переадресацию не выполнит.
+    pub async fn server(
         answer: impl Fn(&str) -> (u16, String) + Send + Sync + 'static,
     ) -> (url::Url, Arc<Mutex<Vec<String>>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -179,8 +185,13 @@ mod tests {
                     let line = head.lines().next().unwrap_or_default().to_string();
                     seen.lock().unwrap().push(head);
                     let (code, body) = answer(&line);
+                    let location = if (300..400).contains(&code) {
+                        "Location: /elsewhere\r\n"
+                    } else {
+                        ""
+                    };
                     let resp = format!(
-                        "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        "HTTP/1.1 {code} X\r\n{location}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     );
                     let _ = s.write_all(resp.as_bytes()).await;
@@ -189,6 +200,14 @@ mod tests {
         });
         (base, log)
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fake::server;
+    use super::*;
+    use crate::metrics::prometheus::{SourceKind, SourceOrigin, probe, query};
+    use crate::storage::profile::sample_profile;
 
     fn source(base: url::Url, token: Option<&str>, tenancy: bool) -> HttpSource {
         let mut p = sample_profile("a");
@@ -234,6 +253,21 @@ mod tests {
             seen[1]
         );
         assert!(!format!("{s:?}").contains("secret"), "{s:?}");
+    }
+
+    #[tokio::test]
+    async fn redirects_are_not_followed() {
+        let (base, log) = server(|_| (302, String::new())).await;
+        let s = source(base, Some("sha256~secret"), false);
+        let f = probe(&s, 1).await.unwrap_err();
+        assert_eq!(f.reason, Reason::BadResponse);
+        assert_eq!(f.error.key, "errors.metrics.badResponse");
+        assert!(f.error.details.unwrap().contains("302"));
+        assert_eq!(
+            log.lock().unwrap().len(),
+            1,
+            "за переадресацией с токеном не ходят"
+        );
     }
 
     #[tokio::test]

@@ -225,7 +225,8 @@
       "unavailable": "{{source}}: does not respond",
       "timeout": "{{source}}: did not respond in time",
       "badResponse": "{{source}}: answered, but not as Prometheus",
-      "tokenMissing": "{{source}}: the token is not saved — enter it in the connection settings"
+      "tokenMissing": "{{source}}: the token is not saved — enter it in the connection settings",
+      "ownForbidden": "{{source}}: the source rejected the credentials — check the authorization in the connection settings"
     }
   },
   "hints": {

@@ -310,7 +310,12 @@ pub async fn metrics_step(steps: &mut Vec<TestStep>, inputs: &crate::metrics::se
                 "No history source: only current values from metrics.k8s.io"
             ),
         ),
-        (None, false) => failed_step("metrics", s.status.unavailable()),
+        // Причины — в пояснениях (переводятся); английский перечень из `details` их бы дублировал.
+        (None, false) => {
+            let mut e = s.status.unavailable();
+            e.details = None;
+            failed_step("metrics", e)
+        }
     };
     step.notes = notes;
     steps.push(step);
@@ -948,6 +953,10 @@ mod tests {
             "errors.metrics.unavailable"
         );
         assert_eq!(steps[0].notes.len(), 5, "и metrics.k8s.io");
+        assert!(
+            steps[0].error.as_ref().unwrap().details.is_none(),
+            "причины в пояснениях, не в подробностях ошибки"
+        );
         assert!(report(steps).ok, "без метрик подключение работает");
     }
 
