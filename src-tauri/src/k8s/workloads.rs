@@ -116,6 +116,8 @@ struct Parsed {
     latest_version: Option<i64>,
     /// StatefulSet: ControllerRevision, на которой работают поды (`status.currentRevision`).
     current_revision: Option<String>,
+    /// Сколько подов сверх желаемого создаёт выкладка (`maxSurge`); без выкладки с запасом — 0.
+    surge: i32,
 }
 
 fn row(kind: WorkloadKind, meta: &ObjectMeta, template: Option<&PodTemplateSpec>) -> WorkloadRow {
@@ -163,6 +165,21 @@ fn rollout_problem(
     }
 }
 
+/// `maxSurge` подами: число как есть, проценты — от желаемых реплик с округлением вверх, как
+/// у контроллера; по умолчанию 25 %.
+fn surge_pods(max_surge: Option<&IntOrString>, replicas: i32) -> i32 {
+    match max_surge {
+        Some(IntOrString::Int(n)) => (*n).max(0),
+        Some(IntOrString::String(s)) => s
+            .strip_suffix('%')
+            .and_then(|p| p.trim().parse::<i64>().ok())
+            .map_or(0, |p| {
+                ((i64::from(replicas.max(0)) * p.max(0) + 99) / 100) as i32
+            }),
+        None => (replicas.max(0) + 3) / 4,
+    }
+}
+
 fn rolling(max_surge: Option<&IntOrString>, max_unavailable: Option<&IntOrString>) -> String {
     let v = |x: Option<&IntOrString>| x.map_or_else(|| "25%".into(), int_or_string);
     format!(
@@ -196,6 +213,14 @@ fn parse_deployment(d: &Deployment) -> Parsed {
         }
     });
     let selector = spec.map(|s| selector_string(&s.selector));
+    let surge = match spec.and_then(|s| s.strategy.as_ref()) {
+        Some(st) if st.type_.as_deref() == Some("Recreate") => 0,
+        st => surge_pods(
+            st.and_then(|s| s.rolling_update.as_ref())
+                .and_then(|r| r.max_surge.as_ref()),
+            r.desired.unwrap_or(1),
+        ),
+    };
     Parsed {
         row: r,
         meta: d.metadata.clone(),
@@ -206,6 +231,7 @@ fn parse_deployment(d: &Deployment) -> Parsed {
         active_jobs: vec![],
         latest_version: None,
         current_revision: None,
+        surge,
     }
 }
 
@@ -232,6 +258,7 @@ fn parse_stateful_set(s: &StatefulSet) -> Parsed {
         active_jobs: vec![],
         latest_version: None,
         current_revision: status.and_then(|s| s.current_revision.clone()),
+        surge: 0,
     }
 }
 
@@ -258,6 +285,7 @@ fn parse_daemon_set(d: &DaemonSet) -> Parsed {
         active_jobs: vec![],
         latest_version: None,
         current_revision: None,
+        surge: 0,
     }
 }
 
@@ -283,6 +311,7 @@ fn parse_job(j: &Job) -> Parsed {
         active_jobs: vec![],
         latest_version: None,
         current_revision: None,
+        surge: 0,
     }
 }
 
@@ -311,6 +340,7 @@ fn parse_cron_job(c: &CronJob) -> Parsed {
         active_jobs: active,
         latest_version: None,
         current_revision: None,
+        surge: 0,
     }
 }
 
@@ -335,9 +365,17 @@ struct DcSpec {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct DcStrategy {
     #[serde(rename = "type")]
     kind: Option<String>,
+    rolling_params: Option<DcRollingParams>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DcRollingParams {
+    max_surge: Option<IntOrString>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -367,6 +405,14 @@ fn parse_deployment_config(o: &DynamicObject) -> AppResult<Parsed> {
     r.updated = Some(dc.status.updated_replicas.unwrap_or(0));
     let conds = conditions(&dc.status.conditions);
     r.problem = rollout_problem(&conds, r.desired, r.available);
+    let surge = match dc.spec.strategy.as_ref() {
+        Some(st) if st.kind.as_deref() == Some("Recreate") => 0,
+        st => surge_pods(
+            st.and_then(|s| s.rolling_params.as_ref())
+                .and_then(|p| p.max_surge.as_ref()),
+            r.desired.unwrap_or(1),
+        ),
+    };
     Ok(Parsed {
         row: r,
         meta: o.metadata.clone(),
@@ -377,6 +423,7 @@ fn parse_deployment_config(o: &DynamicObject) -> AppResult<Parsed> {
         active_jobs: vec![],
         latest_version: dc.status.latest_version,
         current_revision: None,
+        surge,
     })
 }
 
@@ -889,6 +936,38 @@ pub async fn get_workload(
     })
 }
 
+/// Шаблон подов workload'а и то, что нужно анализу ресурсов и изменениям (спец. §7.3, §9).
+#[derive(Debug, Clone)]
+pub struct WorkloadSpec {
+    pub row: WorkloadRow,
+    /// Селектор подов строкой.
+    pub selector: Option<String>,
+    pub template: Option<PodTemplateSpec>,
+    /// Подов сверх желаемого при выкладке (`maxSurge`); у StatefulSet, DaemonSet, Job и
+    /// CronJob — 0.
+    pub surge: i32,
+    pub resource_version: Option<String>,
+    /// `metadata.generation`: растёт только при изменении spec, не статуса.
+    pub generation: Option<i64>,
+}
+
+pub async fn get_spec(
+    r: &ReadClient,
+    namespace: &str,
+    kind: WorkloadKind,
+    workload: &str,
+) -> AppResult<WorkloadSpec> {
+    let p = parsed(r, namespace, kind, workload).await?;
+    Ok(WorkloadSpec {
+        resource_version: p.meta.resource_version.clone(),
+        generation: p.meta.generation,
+        row: p.row,
+        selector: p.selector,
+        template: p.template,
+        surge: p.surge,
+    })
+}
+
 /// Строка workload'а и селектор его подов без HPA, PDB и истории — для частого чтения
 /// (наблюдение MCP за workload'ом).
 pub async fn get_row(
@@ -931,6 +1010,43 @@ pub(crate) mod fixtures {
 mod tests {
     use super::fixtures::*;
     use super::*;
+
+    #[test]
+    fn surge_counts_extra_pods_of_a_rollout() {
+        let int = |n| IntOrString::Int(n);
+        let pct = |p: &str| IntOrString::String(p.into());
+        assert_eq!(surge_pods(None, 4), 1, "25 % по умолчанию");
+        assert_eq!(surge_pods(None, 1), 1, "вверх");
+        assert_eq!(surge_pods(Some(&pct("50%")), 3), 2);
+        assert_eq!(surge_pods(Some(&pct("0%")), 3), 0);
+        assert_eq!(surge_pods(Some(&int(2)), 10), 2);
+        assert_eq!(surge_pods(Some(&pct("x")), 3), 0);
+    }
+
+    #[tokio::test]
+    async fn spec_carries_template_surge_and_resource_version() {
+        let (client, _) = mock_client(|s| match s.path() {
+            "/apis/apps/v1/namespaces/team-a/deployments/web" => (
+                200,
+                serde_json::json!({"apiVersion": "apps/v1", "kind": "Deployment",
+                    "metadata": {"name": "web", "namespace": "team-a", "resourceVersion": "42", "generation": 3},
+                    "spec": {"replicas": 4, "selector": {"matchLabels": {"app": "web"}},
+                        "strategy": {"type": "RollingUpdate", "rollingUpdate": {"maxSurge": "50%"}},
+                        "template": fixtures::template("web", "web:1")}}),
+            ),
+            _ => status(404, "NotFound", "no"),
+        });
+        let r = ReadClient::new(client, std::time::Duration::from_secs(5));
+        let s = get_spec(&r, "team-a", WorkloadKind::Deployment, "web")
+            .await
+            .unwrap();
+        assert_eq!(s.surge, 2);
+        assert_eq!(s.resource_version.as_deref(), Some("42"));
+        assert_eq!(s.generation, Some(3));
+        assert_eq!(s.selector.as_deref(), Some("app=web"));
+        assert_eq!(s.row.desired, Some(4));
+        assert!(s.template.is_some());
+    }
     use crate::k8s::testing::{mock_client, status};
     use std::time::Duration;
 

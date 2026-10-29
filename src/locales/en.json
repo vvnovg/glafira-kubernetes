@@ -191,6 +191,9 @@
       "httpStatus": "The metrics source {{url}} answered with code {{status}}",
       "tokenMissing": "The metrics source token is not saved",
       "unavailable": "No metrics source is available"
+    },
+    "resources": {
+      "badWindow": "The analysis window must be 1, 7, 14 or 30 days, not {{days}}"
     }
   },
   "messages": {

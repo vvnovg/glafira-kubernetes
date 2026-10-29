@@ -14,6 +14,7 @@ pub mod metrics;
 pub mod platform;
 pub mod policy;
 pub mod product;
+pub mod resources;
 pub mod secrets;
 pub mod sessions;
 pub mod settings;
@@ -155,6 +156,8 @@ pub fn run() {
             commands::objects::get_quotas,
             commands::objects::get_yaml,
             commands::resources::get_metrics_source_status,
+            commands::resources::get_workload_usage,
+            commands::resources::get_pod_usage,
             commands::health::run_health_check,
             commands::health::get_health,
             commands::health::set_finding_ignored,

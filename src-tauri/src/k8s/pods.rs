@@ -336,53 +336,56 @@ pub async fn list_pods(
     namespace: &str,
     workload: Option<&WorkloadRef>,
 ) -> AppResult<Listed<PodRow>> {
-    let ns = Some(namespace);
     match workload {
         None => Ok(r
-            .list::<Pod>(ns, &ListParams::default())
+            .list::<Pod>(Some(namespace), &ListParams::default())
             .await?
             .map(|p| pod_row(&p))),
-        Some(w) if w.kind == WorkloadKind::CronJob => {
-            let all_jobs = r.list::<Job>(ns, &ListParams::default()).await?;
-            let jobs: BTreeSet<String> = all_jobs
+        Some(w) => Ok(workload_pods(r, namespace, w).await?.map(|p| pod_row(&p))),
+    }
+}
+
+/// Поды workload'а целиком: по селектору workload'а, а у CronJob — поды его Job.
+pub async fn workload_pods(
+    r: &ReadClient,
+    namespace: &str,
+    w: &WorkloadRef,
+) -> AppResult<Listed<Pod>> {
+    let ns = Some(namespace);
+    if w.kind == WorkloadKind::CronJob {
+        let all_jobs = r.list::<Job>(ns, &ListParams::default()).await?;
+        let jobs: BTreeSet<String> = all_jobs
+            .items
+            .into_iter()
+            .filter(|j| {
+                j.metadata
+                    .owner_references
+                    .iter()
+                    .flatten()
+                    .any(|o| o.kind == "CronJob" && o.name == w.name)
+            })
+            .filter_map(|j| j.metadata.name)
+            .collect();
+        let pods = r.list::<Pod>(ns, &ListParams::default()).await?;
+        return Ok(Listed {
+            truncated: all_jobs.truncated || pods.truncated,
+            items: pods
                 .items
                 .into_iter()
-                .filter(|j| {
-                    j.metadata
-                        .owner_references
-                        .iter()
-                        .flatten()
-                        .any(|o| o.kind == "CronJob" && o.name == w.name)
-                })
-                .filter_map(|j| j.metadata.name)
-                .collect();
-            let pods = r.list::<Pod>(ns, &ListParams::default()).await?;
-            let rows: Vec<PodRow> = pods
-                .items
-                .iter()
                 .filter(|p| owner_of(p).is_some_and(|o| o.kind == "Job" && jobs.contains(&o.name)))
-                .map(pod_row)
-                .collect();
-            Ok(Listed {
-                items: rows,
-                truncated: all_jobs.truncated || pods.truncated,
-            })
-        }
-        Some(w) => {
-            let selector = pod_selector(r, namespace, w.kind, &w.name).await?;
-            // Без селектора поды workload'а определить нечем; пустой селектор подошёл бы всем
-            // подам проекта, а это чужие поды.
-            let Some(selector) = selector.filter(|s| !s.is_empty()) else {
-                return Ok(Listed {
-                    items: Vec::new(),
-                    truncated: false,
-                });
-            };
-            Ok(r.list::<Pod>(ns, &by_labels(Some(&selector)))
-                .await?
-                .map(|p| pod_row(&p)))
-        }
+                .collect(),
+        });
     }
+    let selector = pod_selector(r, namespace, w.kind, &w.name).await?;
+    // Без селектора поды workload'а определить нечем; пустой селектор подошёл бы всем
+    // подам проекта, а это чужие поды.
+    let Some(selector) = selector.filter(|s| !s.is_empty()) else {
+        return Ok(Listed {
+            items: Vec::new(),
+            truncated: false,
+        });
+    };
+    r.list::<Pod>(ns, &by_labels(Some(&selector))).await
 }
 
 /// Состояние контейнера: работает, ждёт или завершён — с причиной, кодом выхода и временем.

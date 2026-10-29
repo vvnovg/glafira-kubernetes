@@ -343,6 +343,26 @@ pub fn workload_events_series(p: &Pods, step_seconds: u64) -> String {
     ])
 }
 
+/// Текущее потребление контейнеров пода (вкладка «Ресурсы» пода): CPU (`stat="cpu"`, ядра)
+/// и память (`stat="memory"`, байты).
+pub fn pod_now(namespace: &str, pod: &str) -> String {
+    let m = format!(
+        "namespace={}, pod={}, {CONTAINERS}",
+        quote(namespace),
+        quote(pod)
+    );
+    either(&[
+        stat(
+            "cpu",
+            &format!("max by (container) (rate(container_cpu_usage_seconds_total{{{m}}}[{STEP}]))"),
+        ),
+        stat(
+            "memory",
+            &format!("max by (container) (container_memory_working_set_bytes{{{m}}})"),
+        ),
+    ])
+}
+
 /// Агрегаты проекта по поду и контейнеру (вкладка «Ресурсы» проекта и правила `resources.*`):
 /// без выбора workload'а — поды сопоставляет с workload'ами Rust, по имени и владельцу.
 fn by_pod(expr: &str) -> String {
@@ -592,6 +612,15 @@ mod tests {
                 && e.contains("\"event\", \"restart\"")
                 && e.contains("\"event\", \"oom\""),
             "{e}"
+        );
+    }
+
+    #[test]
+    fn pod_now_reads_cpu_and_memory_of_one_pod() {
+        assert_eq!(
+            pod_now("team-a", "web-1"),
+            "label_replace(max by (container) (rate(container_cpu_usage_seconds_total{namespace=\"team-a\", pod=\"web-1\", container!=\"\", container!=\"POD\"}[5m])), \"stat\", \"cpu\", \"\", \"\") \
+             or label_replace(max by (container) (container_memory_working_set_bytes{namespace=\"team-a\", pod=\"web-1\", container!=\"\", container!=\"POD\"}), \"stat\", \"memory\", \"\", \"\")"
         );
     }
 
