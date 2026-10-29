@@ -14,17 +14,41 @@ use super::map::reshape;
 use crate::change::facts::{Warning, check, read_facts};
 use crate::change::{Change, validate_form};
 use crate::commands::blocking;
-use crate::health::proposals::{Proposal, ProposalStatus};
+use crate::health::proposals::{MAX_RELATED_KEY_CHARS, Proposal, ProposalStatus};
 use crate::health::service::now_ms;
-use crate::health::store::{NewProposal, Proposed, Withdrawn};
+use crate::health::store::{MAX_BODY_CHARS, NewProposal, Proposed, Withdrawn, sanitize};
 
-/// Ошибка проверки изменения — `invalid_argument` с английским текстом (ключи `errors.change.*`
-/// и `errors.k8s.badName` несут только то, что прислала модель); объекта нет — `not_found`.
+/// Ошибка проверки изменения — `invalid_argument` с английским текстом; объекта нет —
+/// `not_found`. Текст проходит тот же фильтр, что у остальных ошибок (`llm_message`): как есть —
+/// только ключи `LLM_TEXT_KEYS` (`errors.change.*` и `errors.k8s.badName` несут то, что прислала
+/// модель) не длиннее `MAX_LLM_ERROR_CHARS`, любой другой ключ — фиксированная фраза.
 fn invalid(e: crate::error::AppError) -> BackendError {
     match e.code {
-        crate::error::ErrorCode::InvalidInput => BackendError::invalid_argument(e.message),
+        crate::error::ErrorCode::InvalidInput => {
+            BackendError::invalid_argument(super::map::llm_message(&e))
+        }
         _ => to_backend(e),
     }
+}
+
+/// Тексты предложения сверх общих (`check_note_texts`): обоснование после очистки не пусто (из
+/// одних управляющих символов — как пустое), ключ находки не длиннее `MAX_RELATED_KEY_CHARS`
+/// приложения — сам файл Glafira не полагается на проверку крейта.
+fn check_proposal_texts(
+    rationale: &str,
+    related_finding_key: Option<&str>,
+) -> Result<(), BackendError> {
+    if sanitize(rationale, MAX_BODY_CHARS).is_empty() {
+        return Err(BackendError::invalid_argument(
+            "rationale must not be empty: explain the change to the user",
+        ));
+    }
+    if related_finding_key.is_some_and(|k| k.chars().count() > MAX_RELATED_KEY_CHARS) {
+        return Err(BackendError::invalid_argument(format!(
+            "relatedFindingKey is longer than {MAX_RELATED_KEY_CHARS} characters"
+        )));
+    }
+    Ok(())
 }
 
 fn view(p: Proposal) -> Option<mp::ProposalView> {
@@ -68,6 +92,7 @@ impl AppBackend {
                     proposal.related_rule_id.as_deref(),
                     &proposal.title,
                 )?;
+                check_proposal_texts(&proposal.rationale, proposal.related_finding_key.as_deref())?;
                 let change: Change = reshape(&proposal.change)
                     .ok_or_else(|| BackendError::invalid_argument("change cannot be read"))?;
                 let change = change.trimmed();
@@ -179,5 +204,60 @@ impl AppBackend {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::{AppError, ErrorCode};
+
+    #[test]
+    fn rationale_of_control_characters_and_a_long_finding_key_are_refused() {
+        assert!(check_proposal_texts("Two replicas are safer", Some("k")).is_ok());
+        let e = check_proposal_texts("\u{7}\u{1b}\t\r", None).unwrap_err();
+        assert_eq!(e.code, "invalid_argument");
+        assert!(e.message.contains("rationale"), "{}", e.message);
+        let key = "k".repeat(MAX_RELATED_KEY_CHARS);
+        assert!(check_proposal_texts("r", Some(&key)).is_ok());
+        let e = check_proposal_texts("r", Some(&format!("{key}k"))).unwrap_err();
+        assert_eq!(e.code, "invalid_argument");
+        assert!(e.message.contains("relatedFindingKey"), "{}", e.message);
+    }
+
+    /// Ошибка проверки с ключом не из `LLM_TEXT_KEYS` (в ней могли бы оказаться данные профиля)
+    /// уходит модели фиксированной фразой, длинный текст разрешённого ключа — урезанным.
+    #[test]
+    fn invalid_input_reaches_the_model_through_the_llm_filter() {
+        let hidden = AppError::localized(
+            ErrorCode::InvalidInput,
+            crate::i18n::LocalizedText::raw("https://user:secret@api.corp.example:6443"),
+        );
+        let e = invalid(hidden);
+        assert_eq!(e.code, "invalid_argument");
+        assert!(!e.message.contains("secret"), "{}", e.message);
+        assert_eq!(
+            e.message,
+            "The operation failed; the user can see the details in Glafira"
+        );
+        let long = AppError::localized(
+            ErrorCode::InvalidInput,
+            crate::ltext!(
+                "errors.change.noContainer",
+                "There is no container {{container}} in the pod template",
+                container = "x".repeat(2000)
+            ),
+        );
+        let e = invalid(long);
+        assert_eq!(e.code, "invalid_argument");
+        assert!(
+            e.message.starts_with("There is no container xxx"),
+            "{}",
+            e.message
+        );
+        assert_eq!(
+            e.message.chars().count(),
+            crate::mcp::map::MAX_LLM_ERROR_CHARS
+        );
     }
 }

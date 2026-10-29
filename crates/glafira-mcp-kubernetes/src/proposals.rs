@@ -19,8 +19,10 @@ fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D:
 }
 
 /// CPU and memory of requests or limits: quantity strings like "250m" or "512Mi"; null removes the value; omit a field to keep the current value.
+// Неизвестное поле — ошибка аргументов, а не молча потерянное значение (`cpus`, `mem`): форма
+// модели строже хранимой формы приложения (`change::ResourceValues` неизвестное пропускает).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResourceValuesSpec {
     #[serde(
         default,
@@ -37,8 +39,9 @@ pub struct ResourceValuesSpec {
 }
 
 /// New requests and limits of one container of the pod template.
+// Опечатка `limit` вместо `limits` — ошибка аргументов: иначе модель решила бы, что limit задан.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContainerResourcesSpec {
     /// Container name from describe_workload.
     pub name: String,
@@ -231,6 +234,25 @@ mod tests {
             .is_err(),
             "удаление пода предложить нельзя"
         );
+    }
+
+    /// Опечатка модели в полях ресурсов (`limit` вместо `limits`, `cpus`) — ошибка аргументов,
+    /// а не молча потерянное значение; схема говорит то же (`additionalProperties: false`).
+    #[test]
+    fn unknown_resource_fields_are_refused() {
+        let with = |container: serde_json::Value| {
+            serde_json::from_value::<ChangeSpec>(json!({
+                "kind": "setResources", "namespace": "team-a",
+                "workload": {"kind": "Deployment", "name": "web"},
+                "containers": [container]
+            }))
+        };
+        assert!(with(json!({"name": "app", "limits": {"cpu": "1"}})).is_ok());
+        let e = with(json!({"name": "app", "limit": {"cpu": "1"}})).unwrap_err();
+        assert!(e.to_string().contains("limit"), "{e}");
+        assert!(with(json!({"name": "app", "requests": {"cpus": "1"}})).is_err());
+        let schema = serde_json::to_value(schemars::schema_for!(ContainerResourcesSpec)).unwrap();
+        assert_eq!(schema["additionalProperties"], false, "{schema}");
     }
 
     #[test]

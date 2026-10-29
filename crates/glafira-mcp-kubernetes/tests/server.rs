@@ -2415,7 +2415,10 @@ async fn usage_without_series_when_they_do_not_fit() {
     )
     .await);
     assert!(v.get("series").is_none());
-    assert!(v["hint"].as_str().unwrap().contains("100 KB"));
+    assert_eq!(
+        v["hint"],
+        "The series were omitted to fit the 100 KB response limit; the statistics are complete"
+    );
     assert_eq!(v["containers"][0]["name"], "app");
 }
 
@@ -2457,6 +2460,15 @@ async fn proposals_are_checked_scoped_and_listed() {
     let delete = json!({"kind": "deletePod", "namespace": "team-a", "pod": "web-1"});
     let r = call(&c, "propose_change", propose(delete, "r")).await;
     assert_eq!(r.is_error, Some(true), "удаление пода предложить нельзя");
+    let typo = json!({"kind": "setResources", "namespace": "team-a",
+        "workload": {"kind": "Deployment", "name": "web"},
+        "containers": [{"name": "app", "limit": {"cpu": "1"}}]});
+    let r = call(&c, "propose_change", propose(typo, "r")).await;
+    assert_eq!(
+        r.is_error,
+        Some(true),
+        "опечатка limit вместо limits — ошибка аргументов"
+    );
     assert_eq!(
         fake.proposal_ops.lock().unwrap().len(),
         2,

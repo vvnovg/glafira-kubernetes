@@ -17,9 +17,10 @@ use super::KubeServer;
 use crate::model::{ReadOp, ReadOutput, WorkloadRef};
 use crate::resources::{WINDOW_DEFAULT, WINDOWS};
 
-/// Ряды не поместились в предел ответа.
+/// Ряды не поместились в предел ответа. Ряд всегда не длиннее 200 точек, размер ответа зависит
+/// от числа контейнеров, а не от окна: совет «окно короче» был бы ложным.
 const SERIES_OMITTED_HINT: &str =
-    "The series were omitted to fit the 100 KB response limit; ask for a shorter window";
+    "The series were omitted to fit the 100 KB response limit; the statistics are complete";
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

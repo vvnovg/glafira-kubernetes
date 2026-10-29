@@ -2,15 +2,17 @@
 //! мимо `ReadClient`, не знает изменяющих операций (`ops`, команды изменений) и не ходит в сеть
 //! сам. Проверка — по разбору кода, а не по подстрокам: комментарии и содержимое литералов
 //! вырезаются, `use`-деревья раскрываются (`use kube::{Api, Client}` — это пути `kube::Api` и
-//! `kube::Client`), псевдонимы (`as`), `self` и `super` разрешаются, пробелы вокруг `::` не мешают.
-//! Строки примеров в тестах этого модуля — литералы, поэтому сам модуль под проверку не попадает.
+//! `kube::Client`), псевдонимы (`as`) разрешаются в любом порядке строк `use`, `self` и `super` —
+//! от модуля, пробелы вокруг `::` не мешают. Код из другого файла (`include!`, `#[path = …]`)
+//! в `mcp/` не подключается: его сторожок не видит. Строки примеров в тестах этого модуля —
+//! литералы, поэтому сам модуль под проверку не попадает.
 
 use std::collections::HashMap;
 use std::path::Path;
 
 /// Слова кода, которых в `mcp/` нет ни в каком виде: клиент и `Api` из `kube`, запись в кластер
 /// (`ClusterWriter`, `Connected::writer`, `Connected::kube_client`, параметры запросов записи),
-/// команды изменений.
+/// команды изменений и `include!` (код другого файла сторожок не видит).
 const FORBIDDEN_WORDS: &[&str] = &[
     "Api",
     "Client",
@@ -24,6 +26,7 @@ const FORBIDDEN_WORDS: &[&str] = &[
     "DeleteParams",
     "apply_change",
     "preview_change",
+    "include",
 ];
 
 /// Пути, начало которых запрещено: изменяющие операции, команды изменений, клиенты HTTP.
@@ -87,8 +90,9 @@ fn tokens(src: &str) -> Vec<Tok> {
             i += 1;
         } else if ch == '\'' {
             if next == Some('\\') {
-                // Символ с экранированием: '\n', '\'', '\u{1F600}'.
-                i += 2;
+                // Символ с экранированием: '\n', '\'', '\u{1F600}'. Кавычка, обратная косая и
+                // экранированный символ пропускаются вместе: у '\'' он сам — кавычка.
+                i += 3;
                 while i < c.len() && c[i] != '\'' {
                     i += 1;
                 }
@@ -242,11 +246,14 @@ fn module_of(rel: &Path) -> Vec<String> {
     m
 }
 
-/// Полный путь: `self`, `super` и `crate` — от модуля, псевдоним `use` — его путём.
+/// Полный путь: `self`, `super` и `crate` — от модуля, псевдоним `use` — его путём. `own` —
+/// имя, которое вводит сам разрешаемый `use`: его псевдоним к своему же пути не применяется
+/// (в `use foo::foo;` первый `foo` — не он сам).
 fn resolve(
     path: &[String],
     module: &[String],
     aliases: &HashMap<String, Vec<String>>,
+    own: Option<&str>,
 ) -> Vec<String> {
     let Some(first) = path.first() else {
         return Vec::new();
@@ -266,13 +273,58 @@ fn resolve(
             m.extend(path[k..].iter().cloned());
             return m;
         }
-        other => match aliases.get(other) {
+        other => match aliases.get(other).filter(|_| own != Some(other)) {
             Some(full) => full.clone(),
             None => vec![other.to_string()],
         },
     };
     base.extend(path[1..].iter().cloned());
     base
+}
+
+/// Имя, под которым `use` виден в файле; `None` — у `*` и `_`.
+fn use_name(u: &UsePath) -> Option<String> {
+    if u.glob {
+        return None;
+    }
+    u.alias
+        .clone()
+        .or_else(|| u.segments.last().cloned())
+        .filter(|n| n != "_")
+}
+
+/// Псевдонимы всех `use` файла. Путь каждого разрешается через псевдонимы остальных, в каком бы
+/// порядке ни шли строки: `use c::ops::apply;` до `use crate as c;` — тоже `crate::ops::apply`.
+/// Проходы повторяются, пока псевдонимы меняются (цепочка не длиннее числа `use`).
+fn aliases_of(uses: &[(Vec<String>, UsePath)]) -> HashMap<String, Vec<String>> {
+    let mut aliases: HashMap<String, Vec<String>> = HashMap::new();
+    for _ in 0..=uses.len() {
+        let mut next = HashMap::new();
+        for (here, u) in uses {
+            if let Some(name) = use_name(u) {
+                let full = resolve(&u.segments, here, &aliases, Some(&name));
+                next.insert(name, full);
+            }
+        }
+        if next == aliases {
+            break;
+        }
+        aliases = next;
+    }
+    aliases
+}
+
+/// Атрибут `#[path = …]` (и `#![path = …]`): модуль из файла, которого сторожок не видит.
+fn path_attribute(t: &[Tok]) -> bool {
+    t.windows(5).any(|w| {
+        let [hash, a, b, c, d] = w else {
+            return false;
+        };
+        let path_eq = |x: &Tok, y: &Tok| x == &Tok::Ident("path".into()) && y == &Tok::Punct('=');
+        *hash == Tok::Punct('#')
+            && ((*a == Tok::Punct('[') && path_eq(b, c))
+                || (*a == Tok::Punct('!') && *b == Tok::Punct('[') && path_eq(c, d)))
+    })
 }
 
 fn starts_with(path: &[String], prefix: &str) -> bool {
@@ -293,6 +345,9 @@ fn violations(module: &[String], src: &str) -> Vec<String> {
         if tok == &Tok::Ident("extern".into()) {
             out.push("extern crate".into());
         }
+    }
+    if path_attribute(&t) {
+        out.push("attribute #[path]".into());
     }
     // Модули внутри файла (`mod tests { … }`): `super` в них — от их собственного пути.
     let mut uses = Vec::new();
@@ -358,20 +413,15 @@ fn violations(module: &[String], src: &str) -> Vec<String> {
             _ => i += 1,
         }
     }
-    let mut aliases: HashMap<String, Vec<String>> = HashMap::new();
+    // Сначала все псевдонимы, затем пути: порядок строк `use` не прячет путь.
+    let aliases = aliases_of(&uses);
     let mut resolved = Vec::new();
     for (here, u) in &uses {
-        let full = resolve(&u.segments, here, &aliases);
-        if let Some(name) = u.alias.clone().or_else(|| u.segments.last().cloned())
-            && !u.glob
-            && name != "_"
-        {
-            aliases.insert(name, full.clone());
-        }
-        resolved.push((full, u.glob));
+        let own = use_name(u);
+        resolved.push((resolve(&u.segments, here, &aliases, own.as_deref()), u.glob));
     }
     for (here, p) in &paths {
-        resolved.push((resolve(p, here, &aliases), false));
+        resolved.push((resolve(p, here, &aliases, None), false));
     }
     for (path, glob) in resolved {
         let text = path.join("::") + if glob { "::*" } else { "" };
@@ -439,6 +489,16 @@ fn use_trees_aliases_and_spacing_do_not_hide_the_raw_client() {
         "fn f(c: &Connected) { let _ = c.kube_client(); }",
         "extern crate kube;",
         "fn f() -> http::Request<()> { todo!() }",
+        // Экранированный символ '\'' не прячет код за собой в «строку».
+        "fn f() { let _ = ['\\'','\"']; crate::ops::apply(); }",
+        // Псевдоним объявлен после пути, который через него идёт.
+        "use c::ops::apply;\nuse crate as c;",
+        "use commands::changes::preview;\nuse crate::commands;",
+        "use b::ops;\nuse a as b;\nuse crate as a;",
+        // Код из другого файла.
+        "include!(\"../ops/mod.rs\");",
+        "#[path = \"../ops/mod.rs\"]\nmod w;",
+        "#![path = \"../ops\"]",
     ] {
         assert!(!violations(&m, bad).is_empty(), "not found: {bad}");
     }
@@ -459,6 +519,12 @@ fn comments_literals_and_allowed_paths_pass() {
         "use crate::k8s::read::ReadClient;\nfn f() { let _ = super::files::load(); }",
         "mod tests {\n use super::*;\n}",
         "fn f() { let stdin_writer = 1; let _ = stdin_writer; }",
+        "fn f() { let _ = ['\\'', 'a']; let _ = super::files::load(); }",
+        "use glafira_mcp_core::fit;\nuse fit::MAX_RESPONSE_BYTES;",
+        "use foo::foo;\nfn f() { foo::bar(); }",
+        "fn f(path: &str, include_hidden: bool) -> bool { path.is_empty() && include_hidden }",
+        "#[serde(rename = \"path\")]\nstruct S;",
+        "fn f() { let _ = include_str!(\"x.txt\"); }",
     ] {
         assert!(
             violations(&m, good).is_empty(),

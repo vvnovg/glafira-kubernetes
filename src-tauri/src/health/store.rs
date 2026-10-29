@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use super::model::{Finding, Severity, Target};
 use super::proposals::{
-    MAX_OPEN_PROPOSALS, MAX_REJECT_REASON_CHARS, PROPOSAL_TTL_MS, Proposal, ProposalStatus,
+    MAX_OPEN_PROPOSALS, MAX_REJECT_REASON_CHARS, MAX_RELATED_KEY_CHARS, PROPOSAL_TTL_MS, Proposal,
+    ProposalStatus,
 };
 use crate::change::{Change, applied_as_proposed};
 use crate::error::{AppError, AppResult, ErrorCode};
@@ -524,6 +525,12 @@ impl HealthStore {
     ) -> AppResult<Proposed> {
         let title = sanitize(&new.title, MAX_TITLE_CHARS);
         let rationale = sanitize(&new.rationale, MAX_BODY_CHARS);
+        // Ключ находки приходит от модели: без управляющих символов и не длиннее предела; пустой
+        // после очистки — как не заданный.
+        let related_finding_key = new
+            .related_finding_key
+            .map(|k| sanitize(&k, MAX_RELATED_KEY_CHARS))
+            .filter(|k| !k.is_empty());
         let change = new.change.trimmed();
         let target = change.target();
         self.update(connection_id, now_ms, |f| {
@@ -538,7 +545,7 @@ impl HealthStore {
                 p.rationale = rationale;
                 p.change = change;
                 p.related_rule_id = new.related_rule_id;
-                p.related_finding_key = new.related_finding_key;
+                p.related_finding_key = related_finding_key;
                 p.updated_at_ms = now_ms;
                 return Proposed::Updated(p.id.clone());
             }
@@ -564,7 +571,7 @@ impl HealthStore {
                 target,
                 change,
                 related_rule_id: new.related_rule_id,
-                related_finding_key: new.related_finding_key,
+                related_finding_key,
                 client: new.author.client,
                 session_id,
                 created_at_ms: now_ms,
@@ -838,6 +845,37 @@ mod tests {
         assert_eq!(raw["proposals"][0]["change"]["kind"], "scale");
         assert_eq!(raw["proposals"][0]["status"], "open");
         assert!(raw["proposals"][0].get("appliedAsProposed").is_none());
+    }
+
+    /// Ключ находки от модели хранится очищенным и не длиннее предела; пустой после очистки — как
+    /// не заданный. Повтор того же автора обновляет ключ так же.
+    #[test]
+    fn related_finding_key_is_sanitized_and_cut() {
+        let (_d, s) = store();
+        let claude = || author(Some("claude-ai"), "s1");
+        let mut p = proposal(scale("web", 2), claude());
+        p.related_finding_key = Some(format!("\u{1b}[31m{}\u{7}", "k".repeat(300)));
+        let id = proposed_id(s.propose(ID, p, T0).unwrap());
+        let stored = |s: &HealthStore| {
+            s.load(ID, T0)
+                .unwrap()
+                .proposals
+                .into_iter()
+                .find(|p| p.id == id)
+                .unwrap()
+                .related_finding_key
+        };
+        let key = stored(&s).unwrap();
+        assert_eq!(key.chars().count(), MAX_RELATED_KEY_CHARS);
+        assert!(key.starts_with("[31mkkk"), "{key}");
+        assert!(!key.chars().any(|c| c.is_control()), "{key:?}");
+        let mut again = proposal(scale("web", 3), claude());
+        again.related_finding_key = Some("\u{7}\u{1b}".into());
+        assert_eq!(
+            s.propose(ID, again, T0).unwrap(),
+            Proposed::Updated(id.clone())
+        );
+        assert_eq!(stored(&s), None);
     }
 
     #[test]

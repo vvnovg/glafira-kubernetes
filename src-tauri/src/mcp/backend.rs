@@ -1413,6 +1413,127 @@ mod tests {
         assert!(e.message.contains("tokenMissing"), "{}", e.message);
     }
 
+    /// Свой источник метрик работает и выбран: его адрес не попадает в ответы модели — ни в
+    /// `source`, ни где-либо ещё в `get_resource_usage` и `recommend_resources`.
+    #[tokio::test]
+    async fn a_working_own_source_is_used_without_its_address() {
+        let (base, seen) = crate::metrics::http::fake::server(|line| {
+            let body = if line.contains("vector%281%29") || line.contains("vector(1)&") {
+                r#"{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1,"1"]}]}}"#
+            } else if line.contains("/query_range") {
+                r#"{"status":"success","data":{"resultType":"matrix","result":[]}}"#
+            } else {
+                r#"{"status":"success","data":{"resultType":"vector","result":[]}}"#
+            };
+            (200, body.to_string())
+        })
+        .await;
+        let (_d, b) = backend();
+        let mut p = b.state.connections.get("open").unwrap();
+        p.proxy = crate::storage::profile::ProxyConfig::None;
+        p.metrics = crate::storage::profile::MetricsConfig::Prometheus(
+            crate::storage::profile::MetricsEndpoint {
+                url: base.to_string(),
+                auth: crate::storage::profile::MetricsAuth::None,
+                ca: crate::storage::profile::MetricsCa::Connection,
+            },
+        );
+        b.state.connections.upsert(p).unwrap();
+        pooled(&b, "open", crate::resources::usage::tests::cluster);
+        let address = format!("{}:{}", base.host_str().unwrap(), base.port().unwrap());
+        let ReadOutput::ResourceUsage(u) = b
+            .read(ReadOp::ResourceUsage {
+                connection_id: "open".into(),
+                namespace: "team-a".into(),
+                workload: workload_ref(),
+                window_days: 7,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("usage")
+        };
+        assert_eq!(
+            (u.source.kind.as_str(), u.source.origin.as_str()),
+            ("prometheus", "profile")
+        );
+        assert_eq!(u.source.location, None);
+        assert!(u.rejected.is_empty());
+        let text = serde_json::to_string(&u).unwrap();
+        assert!(
+            !text.contains(&address) && !text.contains("/prefix"),
+            "{text}"
+        );
+        let ReadOutput::Recommendation(r) = b
+            .read(ReadOp::RecommendResources {
+                connection_id: "open".into(),
+                namespace: "team-a".into(),
+                workload: workload_ref(),
+                window_days: 7,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("recommendation")
+        };
+        assert_eq!(r.source.location, None);
+        let text = serde_json::to_string(&r).unwrap();
+        assert!(
+            !text.contains(&address) && !text.contains("/prefix"),
+            "{text}"
+        );
+        assert!(
+            seen.lock().unwrap().len() > 1,
+            "источник действительно опрашивался"
+        );
+    }
+
+    /// Подключение только для чтения: предложение создаётся (применит человек, сняв флажок), ответ
+    /// говорит `readOnly: true`. Список HPA не прочитался (500): `scale` — не отказ, а предложение с
+    /// предупреждением; форма перепроверит HPA при применении (решение контроллера).
+    #[tokio::test]
+    async fn read_only_connection_and_an_unread_hpa_list_still_give_a_proposal() {
+        use glafira_mcp_kubernetes::proposals::{ProposalOp, ProposalOutput};
+        let (_d, b) = backend();
+        let mut p = b.state.connections.get("open").unwrap();
+        p.read_only = true;
+        b.state.connections.upsert(p).unwrap();
+        pooled(&b, "open", |s| match s.path() {
+            "/apis/autoscaling/v2/namespaces/team-a/horizontalpodautoscalers" => {
+                status(500, "InternalError", "boom")
+            }
+            p if p.ends_with("/limitranges") || p.ends_with("/resourcequotas") => list(vec![]),
+            _ => crate::resources::usage::tests::cluster(s),
+        });
+        let session = view("s1", Some("claude-ai"));
+        b.access(&session);
+        let out = b
+            .proposals(ProposalOp::Propose {
+                connection_id: "open".into(),
+                session,
+                proposal: proposal(serde_json::json!({"kind": "scale", "namespace": "team-a",
+                    "workload": {"kind": "Deployment", "name": "web"}, "replicas": 3})),
+            })
+            .await
+            .unwrap();
+        let ProposalOutput::Proposed {
+            created,
+            read_only,
+            warnings,
+            ..
+        } = out
+        else {
+            panic!("proposed")
+        };
+        assert!(created && read_only);
+        assert_eq!(
+            warnings,
+            [
+                "The HorizontalPodAutoscalers of the project could not be read, so the change was not checked against them"
+            ]
+        );
+    }
+
     fn proposal(change: serde_json::Value) -> glafira_mcp_kubernetes::proposals::NewProposal {
         glafira_mcp_kubernetes::proposals::NewProposal {
             severity: mh::Severity::Warning,
