@@ -174,7 +174,12 @@ fn surge_pods(max_surge: Option<&IntOrString>, replicas: i32) -> i32 {
             .strip_suffix('%')
             .and_then(|p| p.trim().parse::<i64>().ok())
             .map_or(0, |p| {
-                ((i64::from(replicas.max(0)) * p.max(0) + 99) / 100) as i32
+                // Процент задаёт автор workload'а и может быть любым: без переполнения и усечения.
+                let pods = i64::from(replicas.max(0))
+                    .saturating_mul(p.max(0))
+                    .saturating_add(99)
+                    / 100;
+                i32::try_from(pods).unwrap_or(i32::MAX)
             }),
         None => (replicas.max(0) + 3) / 4,
     }
@@ -1021,6 +1026,50 @@ mod tests {
         assert_eq!(surge_pods(Some(&pct("0%")), 3), 0);
         assert_eq!(surge_pods(Some(&int(2)), 10), 2);
         assert_eq!(surge_pods(Some(&pct("x")), 3), 0);
+    }
+
+    #[test]
+    fn surge_does_not_overflow_on_an_odd_percentage() {
+        let pct = |p: &str| IntOrString::String(p.into());
+        assert_eq!(surge_pods(Some(&pct("200%")), 3), 6, "больше 100 % бывает");
+        assert_eq!(surge_pods(Some(&pct("-50%")), 3), 0);
+        // Произведение не помещается в i64, результат — в i32.
+        for p in [
+            "9223372036854775807%",
+            "9223372036854775807 %",
+            "99999999999%",
+        ] {
+            assert_eq!(surge_pods(Some(&pct(p)), 3), i32::MAX, "{p}");
+        }
+        assert_eq!(
+            surge_pods(Some(&pct("9223372036854775807%")), i32::MAX),
+            i32::MAX
+        );
+        assert_eq!(surge_pods(Some(&pct("100%")), i32::MAX), i32::MAX);
+        assert_eq!(surge_pods(Some(&pct("5%")), -4), 0);
+        assert_eq!(surge_pods(Some(&IntOrString::Int(i32::MIN)), 3), 0);
+    }
+
+    #[test]
+    fn recreate_has_no_surge_even_with_a_huge_percentage() {
+        let d: Deployment = serde_json::from_value(serde_json::json!({
+            "metadata": {"name": "web"},
+            "spec": {"replicas": 3, "selector": {"matchLabels": {"app": "web"}},
+                "strategy": {"type": "Recreate",
+                    "rollingUpdate": {"maxSurge": "9223372036854775807%"}},
+                "template": fixtures::template("web", "web:1")}
+        }))
+        .unwrap();
+        assert_eq!(parse_deployment(&d).surge, 0);
+        let rolling: Deployment = serde_json::from_value(serde_json::json!({
+            "metadata": {"name": "web"},
+            "spec": {"replicas": 3, "selector": {"matchLabels": {"app": "web"}},
+                "strategy": {"type": "RollingUpdate",
+                    "rollingUpdate": {"maxSurge": "9223372036854775807%"}},
+                "template": fixtures::template("web", "web:1")}
+        }))
+        .unwrap();
+        assert_eq!(parse_deployment(&rolling).surge, i32::MAX);
     }
 
     #[tokio::test]

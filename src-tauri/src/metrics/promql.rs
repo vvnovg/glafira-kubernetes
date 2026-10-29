@@ -51,7 +51,9 @@ pub fn window(days: u32) -> String {
     format!("{days}d")
 }
 
-/// Шаг графика окна в секундах: окно / 200, не меньше 5 минут (спец. §7.2, §10.7).
+/// Шаг графика окна в секундах: окно / 200, не меньше 5 минут (спец. §7.2, §10.7). Range-запрос
+/// идёт от `конец − окно + шаг` до конца: Prometheus отдаёт каждую точку `начало + i · шаг ≤ конец`,
+/// так что точек ровно окно / шаг, то есть не больше 200 (от `конец − окно` их было бы 201).
 pub fn chart_step_seconds(days: u32) -> u64 {
     (u64::from(days) * 86_400 / CHART_POINTS).max(STEP_SECONDS)
 }
@@ -599,7 +601,13 @@ mod tests {
         assert_eq!(chart_step_seconds(30), 12_960);
         for days in [1, 7, 14, 30] {
             let step = chart_step_seconds(days);
-            assert!(step >= STEP_SECONDS && u64::from(days) * 86_400 / step <= CHART_POINTS);
+            let window = u64::from(days) * 86_400;
+            // Точки range-запроса `[конец − окно + шаг, конец]` с шагом `шаг`.
+            let points = (window - step) / step + 1;
+            assert!(
+                step >= STEP_SECONDS && points <= CHART_POINTS,
+                "{days}: {points}"
+            );
         }
         let p = by_name(WorkloadKind::Deployment, "web");
         assert!(

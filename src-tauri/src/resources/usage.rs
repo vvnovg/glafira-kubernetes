@@ -201,7 +201,9 @@ async fn from_history(
 ) -> Result<(Vec<ContainerUsage>, Charts, Option<f64>, Option<i64>), Failure> {
     let ns = pods.namespace();
     let step = promql::chart_step_seconds(days);
-    let start = now - i64::from(days) * 86_400;
+    // Начало на шаг позже начала окна: Prometheus отдаёт каждую точку `start + i · step ≤ end`, и от
+    // самого начала окна их было бы 201, а ряд графика — не больше 200 точек.
+    let start = now - i64::from(days) * 86_400 + step as i64;
     let q = [
         promql::workload_cpu(pods, days),
         promql::workload_memory(pods, days),
@@ -329,10 +331,10 @@ pub async fn workload_usage(
         kind,
         name: name.to_string(),
     };
-    let pods = match workload_pods(r, namespace, &w).await {
-        Ok(l) => l.items,
-        // Без прав на поды нет только пометки LimitRange.
-        Err(e) if e.code == ErrorCode::Forbidden => Vec::new(),
+    let (pods, pods_read) = match workload_pods(r, namespace, &w).await {
+        Ok(l) => (l.items, true),
+        // Без прав на поды нет пометок LimitRange, а по именам подов нечем отбирать метрики.
+        Err(e) if e.code == ErrorCode::Forbidden => (Vec::new(), false),
         Err(e) => return Err(e),
     };
     let containers = current(spec.template.as_ref().and_then(|t| t.spec.as_ref()), &pods);
@@ -384,20 +386,19 @@ pub async fn workload_usage(
     if !sel.status.pod_metrics {
         return Err(sel.status.unavailable());
     }
-    let names: std::collections::BTreeSet<&str> = pods
-        .iter()
-        .filter_map(|p| p.metadata.name.as_deref())
-        .collect();
-    let now_list: Vec<PodNow> = pods_now(
-        r,
-        namespace,
-        spec.selector.as_deref().filter(|s| !s.is_empty()),
-    )
-    .await
-    .map_err(failed)?
-    .into_iter()
-    .filter(|p| names.contains(p.pod.as_str()))
-    .collect();
+    let selector = spec.selector.as_deref().filter(|s| !s.is_empty());
+    let mut now_list = pods_now(r, namespace, selector).await.map_err(failed)?;
+    // Метрики по селектору — поды workload'а. Прочитан список подов — оставляем только его поды
+    // (селектор мог зацепить и чужие). Селектора нет (CronJob) — метрики всего проекта, отбор по
+    // списку обязателен. Список не прочитан (403), а селектор есть — отбирать нечем: имена пусты,
+    // и фильтр стёр бы все поды, поэтому остаётся один селектор.
+    if pods_read || selector.is_none() {
+        let names: std::collections::BTreeSet<&str> = pods
+            .iter()
+            .filter_map(|p| p.metadata.name.as_deref())
+            .collect();
+        now_list.retain(|p| names.contains(p.pod.as_str()));
+    }
     out.containers = from_pods_now(containers, &now_list);
     out.pods_now = now_list;
     Ok(out)
@@ -682,6 +683,64 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn chart_ranges_start_one_step_after_the_window_and_have_at_most_two_hundred_points() {
+        for days in WINDOWS {
+            let src = Arc::new(prometheus(true));
+            let sel = Selected {
+                history: Some(src.clone()),
+                status: source_status(false),
+            };
+            let u = workload_usage(
+                &reader(),
+                &sel,
+                "team-a",
+                WorkloadKind::Deployment,
+                "web",
+                days,
+                NOW,
+            )
+            .await
+            .unwrap();
+            let step = promql::chart_step_seconds(days);
+            let first = NOW - i64::from(days) * 86_400 + step as i64;
+            let ranges: Vec<(i64, i64, i64)> = src
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(api, _)| *api == PromApi::QueryRange)
+                .map(|(_, params)| {
+                    let get = |k: &str| {
+                        let (_, v) = params.iter().find(|(n, _)| n == k).unwrap();
+                        v.parse::<i64>().unwrap()
+                    };
+                    (get("start"), get("end"), get("step"))
+                })
+                .collect();
+            assert_eq!(
+                ranges.len(),
+                3,
+                "{days}: ряды CPU, памяти и отметки событий"
+            );
+            for (start, end, st) in ranges {
+                assert_eq!((start, end, st), (first, NOW, step as i64), "{days}");
+                // Prometheus отдаёт каждую точку `start + i · step ≤ end`.
+                let points = (end - start) / st + 1;
+                assert!(points <= 200, "{days}: {points} точек");
+            }
+            let charts = u.charts.unwrap();
+            assert_eq!(
+                (charts.start, charts.end, charts.step_seconds),
+                (first, NOW, step),
+                "{days}"
+            );
+        }
+        // Семь дней: шаг 3024 с и ровно 200 точек (а не 201).
+        assert_eq!(promql::chart_step_seconds(7), 3024);
+        assert_eq!((7 * 86_400 - 3024) / 3024 + 1, 200);
+    }
+
+    #[tokio::test]
     async fn no_source_and_a_bad_window_are_errors() {
         let sel = Selected {
             history: None,
@@ -711,6 +770,104 @@ pub(crate) mod tests {
         .await
         .unwrap_err();
         assert_eq!(e.key, "errors.resources.badWindow");
+    }
+
+    /// API-сервер, который не даёт читать поды и Job проекта (403); метрики подов он отдаёт по
+    /// селектору, как настоящий.
+    fn reader_without_pods() -> ReadClient {
+        let (client, _) = mock_client(|s| match s.path() {
+            "/api/v1/namespaces/team-a/pods" | "/apis/batch/v1/namespaces/team-a/jobs" => {
+                status(403, "Forbidden", "forbidden")
+            }
+            "/apis/batch/v1/namespaces/team-a/cronjobs/nightly" => (
+                200,
+                serde_json::json!({"apiVersion": "batch/v1", "kind": "CronJob",
+                    "metadata": {"name": "nightly", "namespace": "team-a"},
+                    "spec": {"schedule": "0 * * * *", "jobTemplate": {"spec": {"template": {
+                        "spec": {"restartPolicy": "Never",
+                            "containers": [{"name": "job", "image": "job:1"}]}}}}}}),
+            ),
+            "/apis/metrics.k8s.io/v1beta1/namespaces/team-a/pods" => {
+                let items = [
+                    ("app=web", "web-7d9f8c6b5d-x2x4z", "app"),
+                    ("app=other", "other-1", "app"),
+                ];
+                let items: Vec<_> = items
+                    .iter()
+                    .filter(|(label, ..)| {
+                        !s.uri.contains("labelSelector=")
+                            || s.uri.contains(&label.replace('=', "%3D"))
+                    })
+                    .map(|(_, pod, container)| {
+                        serde_json::json!({"metadata": {"name": pod}, "containers": [
+                            {"name": container, "usage": {"cpu": "120m", "memory": "300Mi"}}]})
+                    })
+                    .collect();
+                (
+                    200,
+                    serde_json::json!({"apiVersion": "metrics.k8s.io/v1beta1",
+                        "kind": "PodMetricsList", "metadata": {}, "items": items}),
+                )
+            }
+            _ => cluster(s),
+        });
+        ReadClient::new(client, Duration::from_secs(5))
+    }
+
+    #[tokio::test]
+    async fn pod_metrics_survive_a_forbidden_pod_list_when_the_workload_has_a_selector() {
+        let sel = Selected {
+            history: None,
+            status: source_status(true),
+        };
+        let u = workload_usage(
+            &reader_without_pods(),
+            &sel,
+            "team-a",
+            WorkloadKind::Deployment,
+            "web",
+            7,
+            NOW,
+        )
+        .await
+        .unwrap();
+        // Список подов не прочитан, но метрики выбраны по селектору workload'а: они не пропали.
+        assert_eq!(
+            u.pods_now
+                .iter()
+                .map(|p| p.pod.as_str())
+                .collect::<Vec<_>>(),
+            ["web-7d9f8c6b5d-x2x4z"]
+        );
+        let app = &u.containers[0];
+        assert_eq!(app.stats.cpu.max, Some(0.12));
+        assert_eq!(app.stats.memory.max, Some(300.0 * 1024.0 * 1024.0));
+        // Без списка подов нет пометок LimitRange, остальное — из шаблона.
+        assert_eq!(app.current.limit_range_requests, Default::default());
+        assert_eq!(app.current.requests.cpu, Some(0.5));
+    }
+
+    #[tokio::test]
+    async fn without_a_selector_and_without_the_pod_list_no_pod_is_taken_for_the_workload() {
+        let sel = Selected {
+            history: None,
+            status: source_status(true),
+        };
+        let u = workload_usage(
+            &reader_without_pods(),
+            &sel,
+            "team-a",
+            WorkloadKind::CronJob,
+            "nightly",
+            7,
+            NOW,
+        )
+        .await
+        .unwrap();
+        // У CronJob нет селектора, метрики — всего проекта; по именам отобрать нечем, и чужие
+        // поды не выдаются за поды CronJob.
+        assert!(u.pods_now.is_empty());
+        assert_eq!(u.containers[0].stats.cpu.max, None);
     }
 
     #[tokio::test]
