@@ -9,6 +9,8 @@ pub mod files;
 #[cfg(test)]
 mod guard;
 pub mod map;
+pub mod proposals;
+pub mod resources;
 pub mod shim;
 
 use std::ffi::OsString;

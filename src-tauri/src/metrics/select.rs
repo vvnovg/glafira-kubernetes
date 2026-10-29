@@ -325,7 +325,7 @@ pub async fn for_connection(
     };
     let (s, _) = crate::k8s::read::observe(
         c.metrics
-            .get_or_select(refresh, || async { select(&inputs, now_s()).await }),
+            .get_or_select(refresh, || Box::pin(select(&inputs, now_s()))),
     )
     .await;
     Ok(s)

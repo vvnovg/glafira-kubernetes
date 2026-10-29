@@ -190,3 +190,5 @@
 | `docs/releases-repo/SUPPORT.md` | `docs/releases-repo/SUPPORT.md` | `c5446fc` | адаптирован: название продукта |
 | `src-tauri/src/guard.rs` | `src-tauri/src/guard.rs` | `8bbd0bd` | адаптирован: профиль подключения Kubernetes, ввод имени пода без контроллера |
 | `src-tauri/src/health/proposals.rs` | `src-tauri/src/health/proposals.rs` | `8bbd0bd` | адаптирован: модель, статусы и сроки предложения; вид изменения — `change::Change` (§9) |
+| `crates/glafira-mcp-kubernetes/src/proposals.rs` | `crates/glafira-mcp/src/proposals.rs` | `8bbd0bd` | адаптирован: виды изменения Kubernetes (§9), предупреждения проверки |
+| `crates/glafira-mcp-kubernetes/src/server/proposal_tools.rs` | `crates/glafira-mcp/src/server/proposal_tools.rs` | `8bbd0bd` | адаптирован: виды изменения Kubernetes, область LLM, предупреждения |

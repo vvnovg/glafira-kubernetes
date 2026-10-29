@@ -371,8 +371,9 @@ pub async fn workload_usage(
                 name: name.into(),
             }
         };
+        // Восемь запросов одной future: в debug-сборке она велика для стека потока — в куче.
         let (usage, charts, coverage, data) =
-            from_history(src, &selector, days, now, owner, containers)
+            Box::pin(from_history(src, &selector, days, now, owner, containers))
                 .await
                 .map_err(failed)?;
         out.source = src.info().clone();
@@ -491,6 +492,7 @@ pub(crate) mod tests {
                         "spec": {"containers": [{"name": "app", "image": "web:1"}]},
                         "status": {"phase": "Running"}}]}),
             ),
+            "/apis/metrics.k8s.io/v1beta1" => (200, serde_json::json!({"kind": "APIResourceList"})),
             "/apis/metrics.k8s.io/v1beta1/namespaces/team-a/pods" => (
                 200,
                 serde_json::json!({"apiVersion": "metrics.k8s.io/v1beta1", "kind": "PodMetricsList",

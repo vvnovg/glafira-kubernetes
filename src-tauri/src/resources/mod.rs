@@ -34,8 +34,15 @@ pub async fn analyze(
     now: i64,
     nodes: bool,
 ) -> AppResult<Analysis> {
-    let usage = usage::workload_usage(r, sel, namespace, kind, name, days, now).await?;
-    let c = constraints::read_constraints(r, namespace, kind, name, nodes).await;
+    // Future сбора велики для стека потока в debug-сборке — в куче.
+    let usage = Box::pin(usage::workload_usage(
+        r, sel, namespace, kind, name, days, now,
+    ))
+    .await?;
+    let c = Box::pin(constraints::read_constraints(
+        r, namespace, kind, name, nodes,
+    ))
+    .await;
     Ok(Analysis {
         recommendation: recommend::recommend(&usage, &c),
         usage,
