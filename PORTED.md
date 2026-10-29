@@ -192,3 +192,6 @@
 | `src-tauri/src/health/proposals.rs` | `src-tauri/src/health/proposals.rs` | `8bbd0bd` | адаптирован: модель, статусы и сроки предложения; вид изменения — `change::Change` (§9) |
 | `crates/glafira-mcp-kubernetes/src/proposals.rs` | `crates/glafira-mcp/src/proposals.rs` | `8bbd0bd` | адаптирован: виды изменения Kubernetes (§9), предупреждения проверки |
 | `crates/glafira-mcp-kubernetes/src/server/proposal_tools.rs` | `crates/glafira-mcp/src/server/proposal_tools.rs` | `8bbd0bd` | адаптирован: виды изменения Kubernetes, область LLM, предупреждения |
+| `src/components/common/ConfirmDialog.tsx` | `src/components/common/ConfirmDialog.tsx` | `8bbd0bd` | адаптирован: подписи — имя пода |
+| `src/components/common/ConfirmDialog.test.tsx` | `src/components/common/ConfirmDialog.test.tsx` | `8bbd0bd` | адаптирован: объекты Kubernetes в примерах |
+| `src/lib/useConnection.ts` | `src/lib/useConnection.ts` | `8bbd0bd` | как есть |

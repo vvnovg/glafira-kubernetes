@@ -207,3 +207,9 @@ label.inline { display: inline-flex; gap: 4px; align-items: center; white-space:
 .confidence-low { color: var(--warn); }
 .risk { color: var(--danger); }
 .diff-table td.after { font-weight: 600; }
+.confirm { border: 1px solid var(--warn); border-radius: 6px; padding: 8px; display: flex; flex-direction: column; gap: 6px; background: color-mix(in srgb, var(--warn) 8%, transparent); }
+.confirm label { display: flex; flex-direction: column; gap: 2px; }
+.resource-form td { padding: 2px 4px; }
+.resource-form input { width: 7em; }
+.resource-form .removed { color: var(--muted); font-style: italic; }
+.change-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }

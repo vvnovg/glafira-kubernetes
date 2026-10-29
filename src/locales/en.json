@@ -22,7 +22,14 @@
       "hours": "{{n}}h",
       "days": "{{n}}d"
     },
-    "copyFailed": "Could not copy to the clipboard"
+    "copyFailed": "Could not copy to the clipboard",
+    "confirm": {
+      "typeObject": "To confirm, type the {{label}} <code>{{name}}</code>",
+      "prodNotice": "This is a prod connection. Type its name <code>{{name}}</code>",
+      "defaultLabel": "name",
+      "objectAria": "Confirmation: {{label}}",
+      "connectionAria": "Connection name"
+    }
   },
   "errors": {
     "generic": "{{message}}",
@@ -1245,16 +1252,96 @@
         "detailsMemory": "Requests are much higher than the usage over the last 24 hours — memory (request / maximum): {{memory}}.",
         "fix": "Lower the requests closer to the usage: the reserved capacity is unavailable to other pods and counts against the quota. The Resources tab shows a recommendation."
       }
+    },
+    "proposals": {
+      "applying": "Applying an LLM proposal: {{title}}"
     }
   },
   "change": {
     "warning": {
-      "unverified": "Could not read {{what}}: the change was not checked against this data"
+      "unverified": "Could not read {{what}}: the change was not checked against this data",
+      "hpaManaged": "HPA {{hpa}} scales this workload and will overwrite the replicas",
+      "scaleToZero": "No pods will be left",
+      "limitRange": "{{container}}: {{field}} {{bound}} of the LimitRange {{limit}} — the API server will reject the change",
+      "quota": "The quota {{quota}} lacks {{resource}}: {{needed}} needed, {{free}} free — the pods of the new revision would not be created and the rollout would stall",
+      "orphan": "The pod has no controller: nobody will create it again"
     },
     "unverifiedWhat": {
       "hpa": "the HPA of this workload",
       "limitRange": "the LimitRange of the project",
       "quota": "the quotas of the project"
+    },
+    "title": {
+      "setResources": "Container resources",
+      "scale": "Replicas",
+      "rolloutRestart": "Restart",
+      "setHpaBounds": "HPA bounds",
+      "deletePod": "Delete pod"
+    },
+    "action": {
+      "setResources": "Change resources",
+      "scale": "Scale",
+      "rolloutRestart": "Restart",
+      "setHpaBounds": "HPA bounds",
+      "deletePod": "Delete pod"
+    },
+    "preview": "Check",
+    "apply": "Apply",
+    "delete": "Delete",
+    "confirmTitle": "Apply the change?",
+    "podName": "pod name",
+    "refreshRetry": "Refresh and retry",
+    "readOnly": "The connection is read-only: changes are not available",
+    "noRights": "No rights: {{verb}} {{resource}}",
+    "diffTitle": "Before → after",
+    "noDiff": "Nothing changes",
+    "notSet": "not set",
+    "col": {
+      "container": "Container",
+      "field": "Field",
+      "before": "Before",
+      "after": "After"
+    },
+    "diff": {
+      "requests": {
+        "cpu": "CPU request",
+        "memory": "Memory request"
+      },
+      "limits": {
+        "cpu": "CPU limit",
+        "memory": "Memory limit"
+      },
+      "replicas": "Replicas",
+      "minReplicas": "Min replicas",
+      "maxReplicas": "Max replicas",
+      "restartedAt": "Restarted at",
+      "pod": "Pod"
+    },
+    "dryRun": {
+      "passed": "The API server accepted the change (dry-run)",
+      "skipped": "This call has no dry-run: the API server checks it when it is applied",
+      "rejected": "The API server rejected the change"
+    },
+    "replicas": "Replicas",
+    "minReplicas": "Min replicas",
+    "maxReplicas": "Max replicas",
+    "keep": "keep",
+    "removed": "will be removed",
+    "current": "now {{value}}",
+    "remove": "Remove the value",
+    "restartNote": "Pods are recreated one by one according to the rollout strategy.",
+    "restartDc": "A new DeploymentConfig rollout starts (oc rollout latest).",
+    "deleteNote": "The pod is deleted gracefully; its controller, if any, creates a new one.",
+    "fieldName": {
+      "cpuRequest": "CPU request",
+      "cpuLimit": "CPU limit",
+      "memoryRequest": "memory request",
+      "memoryLimit": "memory limit"
+    },
+    "bound": {
+      "min": "is below the minimum",
+      "max": "is above the maximum",
+      "ratio": "exceeds the limit/request ratio"
     }
   }
 }

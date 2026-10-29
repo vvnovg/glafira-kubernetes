@@ -12,6 +12,7 @@ import { ReadError } from "../common/ReadError";
 import { RefreshControls, useRefreshInterval } from "../common/RefreshControls";
 import { SubTabs } from "../common/SubTabs";
 import { YamlView } from "../common/YamlView";
+import { PodActions } from "../change/ChangeActions";
 import { matchPod } from "../health/findings";
 import { HealthBlock } from "../health/HealthBlock";
 import { LogsView } from "../logs/LogsView";
@@ -66,6 +67,7 @@ function PodOverview({ connectionId, namespace, name }: { connectionId: string; 
       <HealthBlock connectionId={connectionId} match={matchPod(namespace, name)} showTarget />
       {q.isPending && <p className="muted">{t("common.loading")}</p>}
       {q.error && <ReadError error={q.error} connectionId={connectionId} onRetry={() => void q.refetch()} />}
+      {q.data && <PodActions connectionId={connectionId} namespace={namespace} pod={name} />}
       {q.data && <PodSummary connectionId={connectionId} namespace={namespace} d={q.data} />}
     </div>
   );

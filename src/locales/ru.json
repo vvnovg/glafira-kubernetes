@@ -22,7 +22,14 @@
       "hours": "{{n}} ч",
       "days": "{{n}} д"
     },
-    "copyFailed": "Не удалось скопировать в буфер обмена"
+    "copyFailed": "Не удалось скопировать в буфер обмена",
+    "confirm": {
+      "typeObject": "Для подтверждения введите {{label}} <code>{{name}}</code>",
+      "prodNotice": "Это prod-подключение. Введите его имя <code>{{name}}</code>",
+      "defaultLabel": "имя",
+      "objectAria": "Подтверждение: {{label}}",
+      "connectionAria": "Имя подключения"
+    }
   },
   "errors": {
     "generic": "{{message}}",
@@ -1265,16 +1272,96 @@
         "detailsMemory": "Requests намного больше потребления за последние 24 часа — память (request / максимум): {{memory}}.",
         "fix": "Снизьте requests ближе к потреблению: зарезервированное недоступно другим подам и занимает квоту. На вкладке «Ресурсы» — рекомендация."
       }
+    },
+    "proposals": {
+      "applying": "Применяется предложение LLM: {{title}}"
     }
   },
   "change": {
     "warning": {
-      "unverified": "Не удалось прочитать {{what}}: изменение не проверено по этим данным"
+      "unverified": "Не удалось прочитать {{what}}: изменение не проверено по этим данным",
+      "hpaManaged": "HPA {{hpa}} масштабирует этот workload и перезапишет число реплик",
+      "scaleToZero": "Подов не останется",
+      "limitRange": "{{container}}: {{field}} {{bound}} LimitRange {{limit}} — сервер отклонит изменение",
+      "quota": "Квоте {{quota}} не хватит {{resource}}: нужно {{needed}}, свободно {{free}} — поды новой ревизии не создадутся, выкладка встанет",
+      "orphan": "У пода нет контроллера: заново его никто не создаст"
     },
     "unverifiedWhat": {
       "hpa": "HPA этого workload'а",
       "limitRange": "LimitRange проекта",
       "quota": "квоты проекта"
+    },
+    "title": {
+      "setResources": "Ресурсы контейнеров",
+      "scale": "Реплики",
+      "rolloutRestart": "Перезапуск",
+      "setHpaBounds": "Границы HPA",
+      "deletePod": "Удаление пода"
+    },
+    "action": {
+      "setResources": "Изменить ресурсы",
+      "scale": "Масштабировать",
+      "rolloutRestart": "Перезапустить",
+      "setHpaBounds": "Границы HPA",
+      "deletePod": "Удалить под"
+    },
+    "preview": "Проверить",
+    "apply": "Применить",
+    "delete": "Удалить",
+    "confirmTitle": "Применить изменение?",
+    "podName": "имя пода",
+    "refreshRetry": "Обновить и повторить",
+    "readOnly": "Подключение только для чтения: изменения недоступны",
+    "noRights": "Нет прав: {{verb}} {{resource}}",
+    "diffTitle": "Было → станет",
+    "noDiff": "Ничего не меняется",
+    "notSet": "не задано",
+    "col": {
+      "container": "Контейнер",
+      "field": "Поле",
+      "before": "Было",
+      "after": "Станет"
+    },
+    "diff": {
+      "requests": {
+        "cpu": "CPU request",
+        "memory": "Memory request"
+      },
+      "limits": {
+        "cpu": "CPU limit",
+        "memory": "Memory limit"
+      },
+      "replicas": "Реплики",
+      "minReplicas": "Минимум реплик",
+      "maxReplicas": "Максимум реплик",
+      "restartedAt": "Перезапуск",
+      "pod": "Под"
+    },
+    "dryRun": {
+      "passed": "API-сервер принял изменение (dry-run)",
+      "skipped": "У этого вызова нет dry-run: API-сервер проверит его при применении",
+      "rejected": "API-сервер отклонил изменение"
+    },
+    "replicas": "Реплики",
+    "minReplicas": "Минимум реплик",
+    "maxReplicas": "Максимум реплик",
+    "keep": "не менять",
+    "removed": "будет убрано",
+    "current": "сейчас {{value}}",
+    "remove": "Убрать значение",
+    "restartNote": "Поды пересоздаются по очереди по стратегии выкладки.",
+    "restartDc": "Запустится новая выкладка DeploymentConfig (oc rollout latest).",
+    "deleteNote": "Под удаляется штатно; его контроллер, если он есть, создаст новый.",
+    "fieldName": {
+      "cpuRequest": "CPU request",
+      "cpuLimit": "CPU limit",
+      "memoryRequest": "memory request",
+      "memoryLimit": "memory limit"
+    },
+    "bound": {
+      "min": "меньше минимума",
+      "max": "больше максимума",
+      "ratio": "превышает отношение limit/request"
     }
   }
 }

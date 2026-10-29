@@ -12,6 +12,7 @@ import { ReadError } from "../common/ReadError";
 import { RefreshControls, useRefreshInterval } from "../common/RefreshControls";
 import { SubTabs } from "../common/SubTabs";
 import { YamlView } from "../common/YamlView";
+import { WorkloadActions } from "../change/ChangeActions";
 import { matchWorkload } from "../health/findings";
 import { HealthBlock } from "../health/HealthBlock";
 import { ContainerCard } from "./ContainerCard";
@@ -62,6 +63,7 @@ function WorkloadOverview({ connectionId, namespace, kind, name }: { connectionI
       <HealthBlock connectionId={connectionId} match={matchWorkload(namespace, kind, name)} />
       {q.isPending && <p className="muted">{t("common.loading")}</p>}
       {q.error && <ReadError error={q.error} connectionId={connectionId} onRetry={() => void q.refetch()} />}
+      {q.data && <WorkloadActions connectionId={connectionId} namespace={namespace} d={q.data} />}
       {q.data && <WorkloadSummary d={q.data} />}
     </div>
   );

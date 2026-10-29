@@ -1270,6 +1270,12 @@ export type Change =
 
 export type ChangeKind = Change["kind"];
 
+/** Подтверждение изменения (`ConfirmDialog`): имя prod-подключения и введённое имя объекта (пода). */
+export interface Confirmation {
+  confirm: string | null;
+  typedName: string | null;
+}
+
 /** Поле «было → станет»: `requests.cpu`, `replicas`, `restartedAt`, `pod`… */
 export interface FieldChange {
   container: string | null;
