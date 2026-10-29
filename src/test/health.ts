@@ -1,4 +1,4 @@
-import type { Annotation, Finding, HealthTarget, HealthView } from "../api/types";
+import type { Annotation, Finding, HealthTarget, HealthView, Proposal } from "../api/types";
 
 /** Находка для тестов: ключ — из правила и объекта. */
 export function finding(ruleId: string, severity: Finding["severity"], target: HealthTarget, params: Record<string, unknown> = {}): Finding {
@@ -22,7 +22,7 @@ export function note(severity: Annotation["severity"], name: string, status: Ann
 }
 
 /** Состояние подключения после проверки `findings` (prod, интерфейс, 2 проекта). */
-export function checkedView(findings: Finding[], annotations: Annotation[] = [], ignored: string[] = []): HealthView {
+export function checkedView(findings: Finding[], annotations: Annotation[] = [], ignored: string[] = [], proposals: Proposal[] = []): HealthView {
   return {
     lastCheck: {
       runId: "r1",
@@ -36,5 +36,6 @@ export function checkedView(findings: Finding[], annotations: Annotation[] = [],
     },
     ignored,
     annotations,
+    proposals,
   };
 }

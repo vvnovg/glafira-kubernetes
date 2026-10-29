@@ -5,7 +5,7 @@ import { renderWithClient } from "../../test/render";
 
 vi.mock("../../api/client", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../../api/client")>();
-  return { ...orig, api: { getHealth: vi.fn().mockResolvedValue({ lastCheck: null, ignored: [], annotations: [] }), getNetwork: vi.fn(), getConfig: vi.fn(), getConfigMapValues: vi.fn(), listPvcs: vi.fn(), getQuotas: vi.fn() } };
+  return { ...orig, api: { getHealth: vi.fn().mockResolvedValue({ lastCheck: null, ignored: [], annotations: [], proposals: [] }), getNetwork: vi.fn(), getConfig: vi.fn(), getConfigMapValues: vi.fn(), listPvcs: vi.fn(), getQuotas: vi.fn() } };
 });
 
 import { api } from "../../api/client";

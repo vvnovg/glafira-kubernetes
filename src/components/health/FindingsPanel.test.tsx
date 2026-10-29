@@ -58,6 +58,7 @@ function view(p: Partial<HealthView> = {}): HealthView {
     },
     ignored: [],
     annotations: [],
+    proposals: [],
     ...p,
   };
 }
@@ -70,7 +71,7 @@ beforeEach(() => {
 
 describe("FindingsPanel", () => {
   it("запускает проверку и группирует находки по правилу", async () => {
-    vi.mocked(api.getHealth).mockResolvedValue({ lastCheck: null, ignored: [], annotations: [] });
+    vi.mocked(api.getHealth).mockResolvedValue({ lastCheck: null, ignored: [], annotations: [], proposals: [] });
     vi.mocked(api.runHealthCheck).mockResolvedValue(view());
     const user = userEvent.setup();
     renderWithClient(<FindingsPanel connectionId="c1" />);

@@ -6,7 +6,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import { api, toAppError } from "./client";
-import type { AppError, ConnectionProfile } from "./types";
+import type { AppError, Change, ConnectionProfile } from "./types";
 
 beforeEach(() => {
   invoke.mockReset();
@@ -90,6 +90,22 @@ describe("api client", () => {
     const err: AppError = { code: "NOT_FOUND", message: "нет", retryable: false };
     invoke.mockRejectedValue(err);
     await expect(api.listConnections()).rejects.toEqual(err);
+  });
+
+  it("applyChange передаёт версию предпросмотра, подтверждения и предложение", async () => {
+    invoke.mockResolvedValue({});
+    const change: Change = { kind: "scale", namespace: "team-a", workload: { kind: "Deployment", name: "web" }, replicas: 3 };
+    await api.applyChange("c1", change, "4", "prod", null, "p1");
+    expect(invoke).toHaveBeenCalledWith("apply_change", {
+      connectionId: "c1",
+      change,
+      expectedVersion: "4",
+      confirm: "prod",
+      confirmPod: null,
+      proposalId: "p1",
+    });
+    await api.setProposalStatus("c1", "p1", "rejected");
+    expect(invoke).toHaveBeenLastCalledWith("set_proposal_status", { connectionId: "c1", proposalId: "p1", status: "rejected", reason: null });
   });
 
   it("строковые ошибки превращает в INTERNAL", async () => {
