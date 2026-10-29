@@ -79,6 +79,7 @@ export function detailsKey(f: Finding): string {
       return [p.projectLimit, p.podLimit, p.timedOut].includes(true) || (Array.isArray(p.gaps) && p.gaps.length > 0) ? "details" : "detailsUnknown";
     // Пустой список не называется: «без request CPU: ;» читается как сбой.
     case "container.noRequests":
+    case "resources.overProvisioned":
       if (Array.isArray(p.cpu) && p.cpu.length === 0) return "detailsMemory";
       return Array.isArray(p.memory) && p.memory.length === 0 ? "detailsCpu" : "details";
     default:

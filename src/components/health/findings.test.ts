@@ -107,10 +107,11 @@ describe("findingTexts", () => {
       "service.noEndpoints": [{}, { referencedBy: ["Ingress/a"] }],
       "check.partial": [{}, { timedOut: true }],
       "container.noRequests": [{}, { cpu: [], memory: ["x"] }, { cpu: ["x"], memory: [] }],
+      "resources.overProvisioned": [{}, { cpu: [], memory: ["x"] }, { cpu: ["x"], memory: [] }],
     };
     for (const dict of [en as Dict, ru as Dict]) {
       const rules = dict.health.rules;
-      expect(Object.keys(rules)).toHaveLength(34);
+      expect(Object.keys(rules)).toHaveLength(37);
       expect(Object.keys(dict.health.ruleNames).sort()).toEqual(Object.keys(rules).sort());
       for (const [id, texts] of Object.entries(rules)) {
         expect(Object.keys(texts)).toEqual(expect.arrayContaining(["title", "details", "fix"]));

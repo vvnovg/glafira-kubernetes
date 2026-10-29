@@ -53,6 +53,27 @@ fn number_end(b: &[u8]) -> usize {
     i
 }
 
+/// Ядра строкой quantity: `250m`, `2`.
+pub fn format_cpu(cores: f64) -> String {
+    let milli = (cores * 1000.0).round() as i64;
+    if milli % 1000 == 0 {
+        format!("{}", milli / 1000)
+    } else {
+        format!("{milli}m")
+    }
+}
+
+/// Байты строкой quantity: `2Gi`, `512Mi`, иначе — округлённые мебибайты.
+pub fn format_memory(bytes: f64) -> String {
+    const MI: f64 = 1024.0 * 1024.0;
+    let b = bytes.round();
+    if b != 0.0 && b % (1024.0 * MI) == 0.0 {
+        format!("{}Gi", (b / (1024.0 * MI)) as i64)
+    } else {
+        format!("{}Mi", (b / MI).round() as i64)
+    }
+}
+
 /// Доля `used` от `hard`; `None`, если что-то не разобрано или лимит нулевой.
 pub fn ratio(used: &str, hard: &str) -> Option<f64> {
     let hard = parse_quantity(hard).filter(|h| *h > 0.0)?;
@@ -85,6 +106,16 @@ mod tests {
         for bad in ["", "Mi", "1Xi", "e3", "abc"] {
             assert_eq!(parse_quantity(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn quantities_back_to_text() {
+        assert_eq!(format_cpu(0.25), "250m");
+        assert_eq!(format_cpu(2.0), "2");
+        assert_eq!(format_cpu(0.0101), "10m");
+        assert_eq!(format_memory(512.0 * 1024.0 * 1024.0), "512Mi");
+        assert_eq!(format_memory(2.0 * 1024.0 * 1024.0 * 1024.0), "2Gi");
+        assert_eq!(format_memory(1_000_000_000.0), "954Mi");
     }
 
     #[test]

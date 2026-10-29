@@ -63,6 +63,7 @@ async fn until_found(
                 Some(&requested),
                 LIMITS,
                 now(),
+                None,
             )
             .await;
             let found = evaluate(&s, Environment::Prod);
@@ -109,13 +110,21 @@ async fn rules_find_the_problems_of_the_stand() {
         "container.latestTag",
         "cluster.apiNotReady",
         "node.notReady",
-        "check.partial",
     ] {
         assert!(
             !have.iter().any(|h| h.starts_with(absent)),
             "{absent}: {have:?}"
         );
     }
+    // Источника метрик здесь нет (его проверяет it_metrics): правила `resources.*` — единственный
+    // разрыв проверки у администратора.
+    let gaps: Vec<String> = s
+        .coverage
+        .gaps
+        .iter()
+        .map(|g| format!("{} {}", g.part, g.code))
+        .collect();
+    assert_eq!(gaps, ["resources METRICS_UNAVAILABLE"]);
     let by = |rule: &str, name: &str| {
         found
             .iter()

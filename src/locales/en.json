@@ -1017,7 +1017,10 @@
       "gatewayRoute.notAccepted": "Routes not accepted by Gateways",
       "gatewayRoute.refsUnresolved": "Route references unresolved",
       "gateway.notProgrammed": "Gateways not programmed",
-      "check.partial": "Incomplete check"
+      "check.partial": "Incomplete check",
+      "resources.cpuThrottled": "CPU throttling",
+      "resources.memoryNearLimit": "Memory near the limit",
+      "resources.overProvisioned": "Excess requests"
     },
     "rules": {
       "cluster.apiNotReady": {
@@ -1198,6 +1201,23 @@
         "details": "Some objects were not checked: {{parts}}. Findings may be missing for them.",
         "detailsUnknown": "Some objects were not checked: findings may be missing for them.",
         "fix": "Check as a user who can read more, or check fewer projects; the permissions are on the cluster overview."
+      },
+      "resources.cpuThrottled": {
+        "title": "{{object}}: CPU is throttled",
+        "details": "Containers with a CPU limit were throttled on average over the last 24 hours: {{containers}}.",
+        "fix": "Raise the CPU limit or remove it: the limit cuts CPU time and slows responses. The Resources tab shows the usage and a recommendation."
+      },
+      "resources.memoryNearLimit": {
+        "title": "{{object}}: memory close to the limit",
+        "details": "Containers used 90% or more of their memory limit over the last 24 hours (maximum / limit): {{containers}}.",
+        "fix": "Raise the memory limit or reduce the usage: the next spike may end in OOMKilled. The Resources tab shows the usage and a recommendation."
+      },
+      "resources.overProvisioned": {
+        "title": "{{object}}: requests far above the usage",
+        "details": "Requests are much higher than the usage over the last 24 hours — CPU (request / p95): {{cpu}}; memory (request / maximum): {{memory}}.",
+        "detailsCpu": "Requests are much higher than the usage over the last 24 hours — CPU (request / p95): {{cpu}}.",
+        "detailsMemory": "Requests are much higher than the usage over the last 24 hours — memory (request / maximum): {{memory}}.",
+        "fix": "Lower the requests closer to the usage: the reserved capacity is unavailable to other pods and counts against the quota. The Resources tab shows a recommendation."
       }
     }
   }

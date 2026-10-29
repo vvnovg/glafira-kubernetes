@@ -103,6 +103,34 @@ pub struct ContainerSnap {
     pub cpu_request: bool,
     pub memory_request: bool,
     pub memory_limit: bool,
+    /// Значения requests и limits (правила `resources.*`).
+    pub amounts: ContainerAmounts,
+}
+
+/// Requests и limits контейнера пода: миллиядра и байты, `None` — не задано.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ContainerAmounts {
+    pub cpu_request_milli: Option<i64>,
+    pub memory_request: Option<i64>,
+    pub cpu_limit_milli: Option<i64>,
+    pub memory_limit: Option<i64>,
+}
+
+impl ContainerAmounts {
+    fn amounts(cpu_milli: Option<i64>, memory: Option<i64>) -> crate::resources::current::Amounts {
+        crate::resources::current::Amounts {
+            cpu: cpu_milli.map(|m| m as f64 / 1000.0),
+            memory: memory.map(|b| b as f64),
+        }
+    }
+
+    pub fn requests(&self) -> crate::resources::current::Amounts {
+        Self::amounts(self.cpu_request_milli, self.memory_request)
+    }
+
+    pub fn limits(&self) -> crate::resources::current::Amounts {
+        Self::amounts(self.cpu_limit_milli, self.memory_limit)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -271,6 +299,9 @@ pub struct ProjectSnap {
     pub quotas: Option<Vec<QuotaSnap>>,
     /// Имена Secret проекта (значения не читаются); `None` — нет прав на `list secrets`.
     pub secrets: Option<BTreeSet<String>>,
+    /// Потребление по поду и контейнеру за 24 ч (правила `resources.*`): `None` — нет источника
+    /// истории метрик или не прочитано.
+    pub usage: Option<BTreeMap<(String, String), crate::resources::project::Use>>,
 }
 
 /// Часть, которую не удалось прочитать: что, в каком проекте и код ошибки (`FORBIDDEN`…).

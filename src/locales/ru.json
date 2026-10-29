@@ -1037,7 +1037,10 @@
       "gatewayRoute.notAccepted": "Маршруты не приняты Gateway",
       "gatewayRoute.refsUnresolved": "Ссылки маршрутов не разрешены",
       "gateway.notProgrammed": "Gateway не настроены",
-      "check.partial": "Неполная проверка"
+      "check.partial": "Неполная проверка",
+      "resources.cpuThrottled": "Троттлинг CPU",
+      "resources.memoryNearLimit": "Память у лимита",
+      "resources.overProvisioned": "Лишние requests"
     },
     "rules": {
       "cluster.apiNotReady": {
@@ -1218,6 +1221,23 @@
         "details": "Часть объектов не проверена: {{parts}}. Находок по ним может не хватать.",
         "detailsUnknown": "Часть объектов не проверена: находок по ним может не хватать.",
         "fix": "Проверьте под пользователем с большими правами или проверяйте меньше проектов; права — на обзоре кластера."
+      },
+      "resources.cpuThrottled": {
+        "title": "{{object}}: троттлинг CPU",
+        "details": "Контейнеры с CPU limit в среднем за последние 24 часа упирались в лимит: {{containers}}.",
+        "fix": "Поднимите CPU limit или уберите его: лимит урезает процессорное время и замедляет ответы. На вкладке «Ресурсы» — потребление и рекомендация."
+      },
+      "resources.memoryNearLimit": {
+        "title": "{{object}}: память у лимита",
+        "details": "Контейнеры за последние 24 часа занимали 90% memory limit и больше (максимум / лимит): {{containers}}.",
+        "fix": "Поднимите memory limit или снизьте потребление: следующий всплеск может закончиться OOMKilled. На вкладке «Ресурсы» — потребление и рекомендация."
+      },
+      "resources.overProvisioned": {
+        "title": "{{object}}: requests намного больше потребления",
+        "details": "Requests намного больше потребления за последние 24 часа — CPU (request / p95): {{cpu}}; память (request / максимум): {{memory}}.",
+        "detailsCpu": "Requests намного больше потребления за последние 24 часа — CPU (request / p95): {{cpu}}.",
+        "detailsMemory": "Requests намного больше потребления за последние 24 часа — память (request / максимум): {{memory}}.",
+        "fix": "Снизьте requests ближе к потреблению: зарезервированное недоступно другим подам и занимает квоту. На вкладке «Ресурсы» — рекомендация."
       }
     }
   }

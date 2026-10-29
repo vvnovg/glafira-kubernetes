@@ -37,6 +37,7 @@ use crate::k8s::read::{Listed, ReadClient};
 use crate::k8s::storage::mounts;
 use crate::k8s::view::{ConditionView, conditions, conditions_of, created, name, seconds};
 use crate::k8s::workloads::{WorkloadFacts, WorkloadKind, list_facts};
+use crate::metrics::prometheus::MetricsSource;
 use crate::platform::PlatformKind;
 use crate::storage::profile::ConnectionProfile;
 
@@ -291,6 +292,24 @@ pub fn pod_snap(p: &Pod) -> PodSnap {
                 cpu_request: has(res.and_then(|r| r.requests.as_ref()), "cpu"),
                 memory_request: has(res.and_then(|r| r.requests.as_ref()), "memory"),
                 memory_limit: has(res.and_then(|r| r.limits.as_ref()), "memory"),
+                amounts: ContainerAmounts {
+                    cpu_request_milli: milli(
+                        res.and_then(|r| r.requests.as_ref())
+                            .and_then(|m| m.get("cpu")),
+                    ),
+                    memory_request: bytes(
+                        res.and_then(|r| r.requests.as_ref())
+                            .and_then(|m| m.get("memory")),
+                    ),
+                    cpu_limit_milli: milli(
+                        res.and_then(|r| r.limits.as_ref())
+                            .and_then(|m| m.get("cpu")),
+                    ),
+                    memory_limit: bytes(
+                        res.and_then(|r| r.limits.as_ref())
+                            .and_then(|m| m.get("memory")),
+                    ),
+                },
             }
         })
         .collect();
@@ -487,7 +506,16 @@ async fn projects(
     (names, total)
 }
 
-async fn project(rd: &Reader<'_>, info: &ConnectionInfo, ns: &str) -> ProjectSnap {
+/// Окно правил `resources.*`, дни (спец. §8.2).
+pub const RESOURCES_WINDOW_DAYS: u32 = 1;
+
+async fn project(
+    rd: &Reader<'_>,
+    info: &ConnectionInfo,
+    ns: &str,
+    metrics: Option<&dyn MetricsSource>,
+    now: i64,
+) -> ProjectSnap {
     let lp = ListParams::default();
     let n = Some(ns);
     let groups = &info.api_groups;
@@ -535,6 +563,24 @@ async fn project(rd: &Reader<'_>, info: &ConnectionInfo, ns: &str) -> ProjectSna
         rd.list("resourcequotas", n, rd.r.list::<ResourceQuota>(n, &lp)),
         rd.list("secrets", n, rd.r.names::<Secret>(ns)),
     );
+    // Потребление за 24 ч — агрегирующими запросами по проекту (три запроса под одним слотом).
+    let usage = match metrics {
+        Some(src) => {
+            rd.read("resources", n, async move {
+                crate::resources::project::pod_container_use(
+                    src,
+                    ns,
+                    RESOURCES_WINDOW_DAYS,
+                    now,
+                    false,
+                )
+                .await
+                .map_err(|f| f.error)
+            })
+            .await
+        }
+        None => None,
+    };
     let (route_objs, gateway_objs, http_objs, grpc_objs) = tokio::join!(
         async {
             match groups.routes {
@@ -661,6 +707,7 @@ async fn project(rd: &Reader<'_>, info: &ConnectionInfo, ns: &str) -> ProjectSna
         }),
         secrets: secrets.map(|v| v.into_iter().collect::<BTreeSet<_>>()),
         pods: pods.map(|v| v.iter().map(pod_snap).collect()),
+        usage,
     }
 }
 
@@ -785,7 +832,9 @@ async fn cluster(rd: &Reader<'_>, info: &ConnectionInfo, s: &mut ClusterSnapshot
     s.openshift = openshift;
 }
 
-/// Снимок кластера и проектов. `requested` — проекты проверки (`None` — все доступные).
+/// Снимок кластера и проектов. `requested` — проекты проверки (`None` — все доступные);
+/// `metrics` — источник истории метрик для правил `resources.*` (без него — разрыв
+/// `resources`).
 pub async fn collect(
     r: &ReadClient,
     info: &ConnectionInfo,
@@ -793,6 +842,7 @@ pub async fn collect(
     requested: Option<&[String]>,
     limits: Limits,
     now: i64,
+    metrics: Option<&dyn MetricsSource>,
 ) -> ClusterSnapshot {
     let rd = Reader {
         r,
@@ -805,8 +855,15 @@ pub async fn collect(
     let (names, total) = projects(&rd, info, profile, requested, limits.projects).await;
     let ((), projects) = tokio::join!(
         cluster(&rd, info, &mut s),
-        futures::future::join_all(names.iter().map(|ns| Box::pin(project(&rd, info, ns))))
+        futures::future::join_all(
+            names
+                .iter()
+                .map(|ns| Box::pin(project(&rd, info, ns, metrics, now)))
+        )
     );
+    if metrics.is_none() && !names.is_empty() {
+        rd.gap("resources", None, "METRICS_UNAVAILABLE".into());
+    }
     s.projects = projects;
     // Не больше `limits.pods` подов: проекты по порядку. Проект, чей список не поместился,
     // и все после него не прочитаны (`None`): обрезанный список правила приняли бы за полный
@@ -845,6 +902,7 @@ mod tests {
     use crate::k8s::cluster::Capabilities;
     use crate::k8s::pods::fixtures::{crash_looping, running};
     use crate::k8s::testing::{Seen, mock_raw};
+    use crate::metrics::prometheus::fake::{FakeSource, vector};
     use crate::platform::ApiGroups;
     use crate::storage::profile::sample_profile;
 
@@ -947,6 +1005,7 @@ mod tests {
             None,
             LIMITS,
             NOW,
+            None,
         )
         .await;
         assert_eq!(
@@ -1046,6 +1105,7 @@ mod tests {
             Some(&requested),
             limits,
             NOW,
+            None,
         )
         .await;
         let names: Vec<&str> = s.projects.iter().map(|p| p.namespace.as_str()).collect();
@@ -1094,6 +1154,7 @@ mod tests {
             Some(&["a".to_string()]),
             limits,
             NOW,
+            None,
         )
         .await;
         assert!(s.coverage.timed_out);
@@ -1132,6 +1193,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn usage_of_the_day_is_read_per_project_from_the_metrics_source() {
+        let (client, _server) = mock_raw(|_| list("List", vec![]));
+        let r = ReadClient::new(client, Duration::from_secs(5));
+        let metrics = FakeSource::new(|_, q| {
+            assert!(q.contains("[1d:5m]"), "окно правил — 24 ч: {q}");
+            let v = if q.contains("container_cpu_usage_seconds_total") {
+                0.4
+            } else {
+                1e8
+            };
+            Ok(vector(&[(
+                &[("pod", "web-1"), ("container", "app")][..],
+                v,
+            )]))
+        });
+        let s = collect(
+            &r,
+            &info(admin()),
+            &sample_profile("c1"),
+            Some(&["a".to_string()]),
+            LIMITS,
+            NOW,
+            Some(&metrics),
+        )
+        .await;
+        let usage = s.projects[0].usage.as_ref().unwrap();
+        let u = usage[&("web-1".to_string(), "app".to_string())];
+        assert_eq!(u.cpu_p95, Some(0.4));
+        assert_eq!(u.memory_max, Some(1e8));
+        assert_eq!(u.oom_count, None, "OOM — правило pod.oomKilled");
+        assert_eq!(
+            metrics.queries().len(),
+            3,
+            "не больше трёх запросов на проект"
+        );
+        let failing =
+            FakeSource::new(|_, _| Err(crate::metrics::prometheus::Failure::bad_response("x")));
+        let s = collect(
+            &r,
+            &info(admin()),
+            &sample_profile("c1"),
+            Some(&["a".to_string()]),
+            LIMITS,
+            NOW,
+            Some(&failing),
+        )
+        .await;
+        assert!(s.projects[0].usage.is_none());
+        assert!(
+            gap_lines(&s).contains(&"a resources CONNECTION_FAILED".to_string()),
+            "{:?}",
+            gap_lines(&s)
+        );
+    }
+
+    #[tokio::test]
     async fn an_absent_kind_is_not_a_gap() {
         // Gateway API 1.0 без GRPCRoute v1 и кластер без IngressClass отвечают 404.
         let (client, _server) = mock_raw(|s| match s.path() {
@@ -1141,6 +1258,7 @@ mod tests {
         let r = ReadClient::new(client, Duration::from_secs(5));
         let mut i = info(admin());
         i.api_groups.gateway_api = true;
+        let metrics = FakeSource::new(|_, _| Ok(vector(&[])));
         let s = collect(
             &r,
             &i,
@@ -1148,6 +1266,7 @@ mod tests {
             Some(&["a".to_string()]),
             LIMITS,
             NOW,
+            Some(&metrics),
         )
         .await;
         assert_eq!(gap_lines(&s), Vec::<String>::new());
@@ -1169,7 +1288,16 @@ mod tests {
             _ => list("List", vec![]),
         });
         let r = ReadClient::new(client, Duration::from_secs(5));
-        let s = collect(&r, &info(admin()), &sample_profile("c1"), None, LIMITS, NOW).await;
+        let s = collect(
+            &r,
+            &info(admin()),
+            &sample_profile("c1"),
+            None,
+            LIMITS,
+            NOW,
+            None,
+        )
+        .await;
         assert!(s.readyz.is_none());
         assert_eq!(
             gap_lines(&s),
@@ -1240,6 +1368,7 @@ mod tests {
             Some(&["a".to_string()]),
             LIMITS,
             NOW,
+            None,
         )
         .await;
         let findings =
@@ -1285,6 +1414,7 @@ mod tests {
             Some(&requested),
             LIMITS,
             NOW,
+            None,
         )
         .await;
         assert_eq!(
@@ -1292,6 +1422,7 @@ mod tests {
             [
                 "- nodes FORBIDDEN",
                 "- pods (all projects) FORBIDDEN",
+                "- resources METRICS_UNAVAILABLE",
                 "a pods FORBIDDEN",
                 "a secrets FORBIDDEN",
                 "b secrets FORBIDDEN",
@@ -1324,6 +1455,7 @@ mod tests {
             Some(&["x".to_string()]),
             limits,
             NOW,
+            None,
         )
         .await;
         assert!(s.coverage.pod_limit && s.projects[0].pods.is_none());

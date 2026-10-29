@@ -221,7 +221,8 @@ pub fn workload_of(
         .cloned()
 }
 
-fn kind_of(s: &str) -> Option<WorkloadKind> {
+/// Вид workload'а по имени вида Kubernetes (`Deployment`).
+pub fn kind_of(s: &str) -> Option<WorkloadKind> {
     WorkloadKind::ALL
         .into_iter()
         .find(|k| format!("{k:?}") == s)

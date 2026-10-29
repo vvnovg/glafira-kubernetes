@@ -303,8 +303,11 @@ fn collector(state: &AppState, connection_id: &str) -> Collector {
         let (st, id) = (st.clone(), id.clone());
         Box::pin(async move {
             let profile = st.connections.get(&id)?;
+            let (st2, id2) = (st.clone(), id.clone());
             st.read(&id, |c| async move {
                 let now = now_ms() / 1000;
+                // Источник истории метрик — для правил `resources.*`; без него — разрыв.
+                let sel = crate::metrics::select::for_connection(&st2, &id2, &c, false).await?;
                 Ok(collect(
                     &c.reader(),
                     &c.info,
@@ -312,6 +315,7 @@ fn collector(state: &AppState, connection_id: &str) -> Collector {
                     requested.as_deref(),
                     LIMITS,
                     now,
+                    sel.history.as_deref(),
                 )
                 .await)
             })
