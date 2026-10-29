@@ -35,6 +35,9 @@
     "change.fieldName.cpuRequest",
     "change.fieldName.cpuLimit",
     "change.fieldName.memoryRequest",
-    "change.fieldName.memoryLimit"
+    "change.fieldName.memoryLimit",
+    "resources.init",
+    "resources.col.cpu",
+    "resources.col.oom"
   ]
 }

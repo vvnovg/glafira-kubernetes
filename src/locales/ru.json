@@ -308,6 +308,10 @@
     "health": {
       "check": "Запускает встроенные правила Glafira по кластеру, его нодам и не более чем 50 проектам. Строгость зависит от окружения подключения. Проверка только читает кластер.",
       "hidden": "Находки, которые вы скрыли для конкретного объекта. Они не считаются в значках; LLM-ассистенты видят их с пометкой «скрыто»."
+    },
+    "resources": {
+      "window": "Статистика за последние 1, 7, 14 или 30 дней, но не дольше срока хранения источника метрик. Перцентили считаются по каждому поду, затем берётся худший под.",
+      "confidence": "Высокая — окно и данные от 7 дней при покрытии от 80 %; средняя — данные от 24 часов при покрытии от 50 %; низкая — меньше либо только metrics.k8s.io."
     }
   },
   "connections": {
@@ -728,7 +732,8 @@
     "tabs": {
       "overview": "Обзор",
       "pods": "Поды",
-      "events": "События"
+      "events": "События",
+      "resources": "Ресурсы"
     },
     "watch": {
       "polling": "Нет прав на watch — список обновляется раз в 10 с"
@@ -1363,5 +1368,57 @@
       "max": "больше максимума",
       "ratio": "превышает отношение limit/request"
     }
+  },
+  "resources": {
+    "window": "Окно",
+    "days": "{{count}} дн.",
+    "source": "Источник: {{source}}",
+    "coverage": "покрытие {{value}}",
+    "dataDays": "данные за {{count}} дн.",
+    "confidence": "уверенность: {{value}}",
+    "confidenceLabel": "Уверенность",
+    "confidenceLevel": {
+      "low": "низкая",
+      "medium": "средняя",
+      "high": "высокая"
+    },
+    "noKubeStateMetrics": "Нет kube-state-metrics: поды выбраны по имени, OOM и рестарты неизвестны.",
+    "applyRecommendation": "Применить рекомендацию",
+    "lowConfidence": "Уверенность рекомендации низкая: данных за окно мало. Проверьте значения перед применением.",
+    "init": "init",
+    "col": {
+      "cpu": "CPU p95 / max",
+      "memory": "Память max",
+      "throttling": "Троттлинг",
+      "oom": "OOM",
+      "restarts": "Рестарты",
+      "pod": "Под",
+      "memoryNow": "Память"
+    },
+    "totals": "На весь workload ({{replicas}} реплик): requests CPU {{requestsCpu}}, память {{requestsMemory}}; limits CPU {{limitsCpu}}, память {{limitsMemory}}",
+    "hpaShift": "HPA {{hpa}}: цель {{resource}} {{target}} % считается от request; чтобы масштабирование осталось прежним при новом request, поставьте {{equivalent}} %",
+    "chartCpu": "CPU, ядра",
+    "chartMemory": "Память",
+    "marks": "Рестарты и OOM",
+    "now": "Текущее потребление",
+    "note": {
+      "cpuLimitNotSet": "CPU limit не задан — троттлинга нет, limit не добавляется",
+      "cpuThrottled": "Троттлинг p95 — {{p95}} %: наблюдаемое потребление CPU ограничено лимитом, limit не меньше текущего × 1,5",
+      "oomKilled": "OOMKilled {{count}} раз за окно: наблюдаемое потребление памяти обрезано лимитом, limit не меньше текущего × 1,5",
+      "noData": "Данных за окно нет: рекомендации нет",
+      "limitRange": "{{field}} подтянут к границе LimitRange: {{bound}}",
+      "limitRangeDefault": "Текущий {{field}} — по умолчанию LimitRange, в шаблоне его нет",
+      "java": "Заданы опции Java: проверьте -Xmx или MaxRAMPercentage вместе с лимитом памяти",
+      "go": "Задан GOMEMLIMIT: проверьте его вместе с лимитом памяти"
+    },
+    "bound": {
+      "min": "минимум",
+      "max": "максимум",
+      "ratio": "отношение limit/request"
+    },
+    "violation": {
+      "nodeAllocatable": "{{container}}: request {{resource}} {{request}} больше allocatable самой крупной ноды {{allocatable}}"
+    },
+    "chartFailed": "График не загрузился"
   }
 }

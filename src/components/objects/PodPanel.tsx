@@ -13,17 +13,18 @@ import { RefreshControls, useRefreshInterval } from "../common/RefreshControls";
 import { SubTabs } from "../common/SubTabs";
 import { YamlView } from "../common/YamlView";
 import { PodActions } from "../change/ChangeActions";
+import { PodResources } from "../resources/WorkloadResources";
 import { matchPod } from "../health/findings";
 import { HealthBlock } from "../health/HealthBlock";
 import { LogsView } from "../logs/LogsView";
 import { ContainerCard } from "./ContainerCard";
 import { ObjectEvents } from "./EventList";
 
-type Sub = "overview" | "logs" | "events" | "yaml";
+type Sub = "overview" | "logs" | "events" | "yaml" | "resources";
 
 const WORKLOAD_KINDS: string[] = ["Deployment", "StatefulSet", "DaemonSet", "DeploymentConfig", "Job", "CronJob"] satisfies WorkloadKind[];
 
-/** Вкладка пода (спец. §6.5–6.6): обзор с состоянием каждого контейнера, логи, события, YAML. */
+/** Вкладка пода (спец. §6.5–6.6): обзор с состоянием каждого контейнера, логи, события, YAML, ресурсы. */
 export function PodPanel({ connectionId, namespace, name }: { connectionId: string; namespace: string; name: string }) {
   const { t } = useTranslation();
   const [sub, setSub] = useState<Sub>("overview");
@@ -34,6 +35,7 @@ export function PodPanel({ connectionId, namespace, name }: { connectionId: stri
     { id: "logs", label: t("logs.title") },
     { id: "events", label: t("objects.tabs.events") },
     { id: "yaml", label: "YAML" },
+    { id: "resources", label: t("objects.tabs.resources") },
   ];
   return (
     <div className="page">
@@ -48,6 +50,7 @@ export function PodPanel({ connectionId, namespace, name }: { connectionId: stri
       {sub === "logs" && details.error && <ReadError error={details.error} connectionId={connectionId} onRetry={() => void details.refetch()} />}
       {sub === "events" && <ObjectEvents connectionId={connectionId} namespace={namespace} object={{ kind: "Pod", name }} />}
       {sub === "yaml" && <YamlView connectionId={connectionId} namespace={namespace} kind="Pod" name={name} />}
+      {sub === "resources" && <PodResources connectionId={connectionId} namespace={namespace} pod={name} />}
     </div>
   );
 }

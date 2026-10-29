@@ -13,21 +13,23 @@ import { RefreshControls, useRefreshInterval } from "../common/RefreshControls";
 import { SubTabs } from "../common/SubTabs";
 import { YamlView } from "../common/YamlView";
 import { WorkloadActions } from "../change/ChangeActions";
+import { WorkloadResources } from "../resources/WorkloadResources";
 import { matchWorkload } from "../health/findings";
 import { HealthBlock } from "../health/HealthBlock";
 import { ContainerCard } from "./ContainerCard";
 import { ObjectEvents } from "./EventList";
 import { PodList } from "./PodList";
 
-type Sub = "overview" | "pods" | "events" | "yaml";
+type Sub = "overview" | "pods" | "resources" | "events" | "yaml";
 
-/** Вкладка workload'а (спец. §6.4): обзор, его поды, события вместе с подами, YAML. */
+/** Вкладка workload'а (спец. §6.4): обзор, его поды, ресурсы, события вместе с подами, YAML. */
 export function WorkloadPanel({ connectionId, namespace, kind, name }: { connectionId: string; namespace: string; kind: WorkloadKind; name: string }) {
   const { t } = useTranslation();
   const [sub, setSub] = useState<Sub>("overview");
   const tabs: { id: Sub; label: string }[] = [
     { id: "overview", label: t("objects.tabs.overview") },
     { id: "pods", label: t("objects.tabs.pods") },
+    { id: "resources", label: t("objects.tabs.resources") },
     { id: "events", label: t("objects.tabs.events") },
     { id: "yaml", label: "YAML" },
   ];
@@ -42,6 +44,7 @@ export function WorkloadPanel({ connectionId, namespace, kind, name }: { connect
       <SubTabs tabs={tabs} active={sub} onChange={setSub} />
       {sub === "overview" && <WorkloadOverview connectionId={connectionId} namespace={namespace} kind={kind} name={name} />}
       {sub === "pods" && <PodList connectionId={connectionId} namespace={namespace} workload={{ kind, name }} />}
+      {sub === "resources" && <WorkloadResources connectionId={connectionId} namespace={namespace} kind={kind} name={name} />}
       {sub === "events" && <ObjectEvents connectionId={connectionId} namespace={namespace} object={{ kind, name }} />}
       {sub === "yaml" && <YamlView connectionId={connectionId} namespace={namespace} kind={kind} name={name} />}
     </div>

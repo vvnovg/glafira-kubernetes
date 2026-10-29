@@ -308,6 +308,10 @@
     "health": {
       "check": "Runs the built-in Glafira rules over the cluster, its nodes and up to 50 projects. Severity depends on the connection environment. The check only reads the cluster.",
       "hidden": "Findings you hid for a particular object. They are not counted in badges; LLM assistants see them marked as hidden."
+    },
+    "resources": {
+      "window": "Statistics over the last 1, 7, 14 or 30 days, but not longer than the metrics source keeps. Percentiles are taken per pod, then the worst pod.",
+      "confidence": "High — window and data of 7 days or more with coverage of 80 % or more; medium — data of 24 hours or more with coverage of 50 % or more; low — less, or only metrics.k8s.io."
     }
   },
   "connections": {
@@ -716,7 +720,8 @@
     "tabs": {
       "overview": "Overview",
       "pods": "Pods",
-      "events": "Events"
+      "events": "Events",
+      "resources": "Resources"
     },
     "watch": {
       "polling": "No watch rights — the list refreshes every 10 s"
@@ -1343,5 +1348,57 @@
       "max": "is above the maximum",
       "ratio": "exceeds the limit/request ratio"
     }
+  },
+  "resources": {
+    "window": "Window",
+    "days": "{{count}} d",
+    "source": "Source: {{source}}",
+    "coverage": "coverage {{value}}",
+    "dataDays": "data for {{count}} d",
+    "confidence": "confidence: {{value}}",
+    "confidenceLabel": "Confidence",
+    "confidenceLevel": {
+      "low": "low",
+      "medium": "medium",
+      "high": "high"
+    },
+    "noKubeStateMetrics": "No kube-state-metrics: pods are matched by name, OOM and restarts are unknown.",
+    "applyRecommendation": "Apply the recommendation",
+    "lowConfidence": "The confidence of the recommendation is low: little data for the window. Check the values before applying.",
+    "init": "init",
+    "col": {
+      "cpu": "CPU p95 / max",
+      "memory": "Memory max",
+      "throttling": "Throttling",
+      "oom": "OOM",
+      "restarts": "Restarts",
+      "pod": "Pod",
+      "memoryNow": "Memory"
+    },
+    "totals": "For the whole workload ({{replicas}} replicas): requests CPU {{requestsCpu}}, memory {{requestsMemory}}; limits CPU {{limitsCpu}}, memory {{limitsMemory}}",
+    "hpaShift": "HPA {{hpa}}: the {{resource}} target {{target}} % is relative to the request; for the same scaling with the new request set it to {{equivalent}} %",
+    "chartCpu": "CPU, cores",
+    "chartMemory": "Memory",
+    "marks": "Restarts and OOM",
+    "now": "Current usage",
+    "note": {
+      "cpuLimitNotSet": "The CPU limit is not set — there is no throttling, no limit is added",
+      "cpuThrottled": "Throttling p95 is {{p95}} %: the observed CPU usage is capped by the limit, the limit is at least the current one × 1.5",
+      "oomKilled": "OOMKilled {{count}} times in the window: the observed memory usage is cut by the limit, the limit is at least the current one × 1.5",
+      "noData": "No data for the window: no recommendation",
+      "limitRange": "{{field}} is pulled to the LimitRange {{bound}}",
+      "limitRangeDefault": "The current {{field}} comes from the LimitRange default, the template has none",
+      "java": "Java options are set: check -Xmx or MaxRAMPercentage together with the memory limit",
+      "go": "GOMEMLIMIT is set: check it together with the memory limit"
+    },
+    "bound": {
+      "min": "minimum",
+      "max": "maximum",
+      "ratio": "limit/request ratio"
+    },
+    "violation": {
+      "nodeAllocatable": "{{container}}: request {{resource}} {{request}} is above the allocatable of the largest node {{allocatable}}"
+    },
+    "chartFailed": "The chart could not be loaded"
   }
 }
