@@ -188,3 +188,4 @@
 | `src/components/common/ChunkBoundary.tsx` | `src/components/common/ChunkBoundary.tsx` | `c5446fc` | как есть |
 | `src/components/common/ExternalLink.tsx` | `src/components/common/ExternalLink.tsx` | `c5446fc` | как есть |
 | `docs/releases-repo/SUPPORT.md` | `docs/releases-repo/SUPPORT.md` | `c5446fc` | адаптирован: название продукта |
+| `src-tauri/src/guard.rs` | `src-tauri/src/guard.rs` | `8bbd0bd` | адаптирован: профиль подключения Kubernetes, ввод имени пода без контроллера |

@@ -1,10 +1,12 @@
 #[macro_use]
 pub mod i18n;
 pub mod auth;
+pub mod change;
 pub mod commands;
 pub mod der;
 mod dock_name;
 pub mod error;
+pub mod guard;
 pub mod health;
 pub mod k8s;
 pub mod logging;

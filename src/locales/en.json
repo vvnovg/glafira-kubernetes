@@ -194,6 +194,23 @@
     },
     "resources": {
       "badWindow": "The analysis window must be 1, 7, 14 or 30 days, not {{days}}"
+    },
+    "guard": {
+      "readOnly": "Connection “{{name}}” is read-only",
+      "prodConfirm": "To change a prod connection, type its name “{{name}}”",
+      "typeToConfirm": "Type “{{expected}}” to confirm"
+    },
+    "change": {
+      "badQuantity": "Container {{container}}: “{{value}}” is not a valid {{field}} quantity",
+      "containersCount": "List 1 to {{max}} containers",
+      "duplicateContainer": "Container {{container}} is listed twice",
+      "nothingToChange": "Container {{container}}: nothing to change",
+      "scaleKind": "Only a Deployment, StatefulSet or DeploymentConfig can be scaled",
+      "replicas": "Replicas must be from 0 to {{max}}",
+      "restartKind": "A Job or CronJob cannot be restarted",
+      "limitBelowRequest": "Container {{container}}: the {{resource}} limit is below the request",
+      "hpaBounds": "HPA bounds must be 1 ≤ minReplicas ≤ maxReplicas ≤ {{max}}",
+      "noContainer": "There is no container {{container}} in the pod template"
     }
   },
   "messages": {

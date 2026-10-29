@@ -194,6 +194,23 @@
     },
     "resources": {
       "badWindow": "Окно анализа — 1, 7, 14 или 30 дней, а не {{days}}"
+    },
+    "guard": {
+      "readOnly": "Подключение «{{name}}» только для чтения",
+      "prodConfirm": "Чтобы изменить prod-подключение, введите его имя «{{name}}»",
+      "typeToConfirm": "Введите «{{expected}}» для подтверждения"
+    },
+    "change": {
+      "badQuantity": "Контейнер {{container}}: «{{value}}» — не quantity для {{field}}",
+      "containersCount": "Укажите от 1 до {{max}} контейнеров",
+      "duplicateContainer": "Контейнер {{container}} указан дважды",
+      "nothingToChange": "Контейнер {{container}}: нечего менять",
+      "scaleKind": "Масштабировать можно только Deployment, StatefulSet и DeploymentConfig",
+      "replicas": "Реплик — от 0 до {{max}}",
+      "restartKind": "Job и CronJob перезапустить нельзя",
+      "limitBelowRequest": "Контейнер {{container}}: limit {{resource}} меньше request",
+      "hpaBounds": "Границы HPA: 1 ≤ minReplicas ≤ maxReplicas ≤ {{max}}",
+      "noContainer": "В шаблоне подов нет контейнера {{container}}"
     }
   },
   "messages": {
