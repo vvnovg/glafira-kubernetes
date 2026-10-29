@@ -16,7 +16,7 @@ use super::{
 use crate::error::{AppResult, ErrorCode};
 use crate::k8s::quantity::{format_cpu, format_memory, parse_quantity};
 use crate::k8s::read::{Listed, ReadClient};
-use crate::k8s::workloads::{WorkloadSpec, get_spec};
+use crate::k8s::workloads::{WorkloadKind, WorkloadSpec, get_spec};
 use crate::resources::constraints::{limit_range_bounds, quota_rooms};
 use crate::resources::current::Amounts;
 use crate::resources::recommend::{Bound, Field, LimitRangeBounds, QuotaRoom};
@@ -59,6 +59,9 @@ pub struct HpaNow {
     pub max_replicas: i32,
     pub resource_version: Option<String>,
     pub generation: Option<i64>,
+    /// Версия по содержимому spec (`digest`): HPA получает `metadata.generation` только с
+    /// Kubernetes 1.37 (и не в OpenShift 4.20), на прежних версиях её нет.
+    pub spec_digest: Option<String>,
 }
 
 /// Что при проверке изменения не удалось прочитать (ответ не 404): HPA, `LimitRange` или квоты
@@ -100,14 +103,45 @@ pub enum Facts {
     },
 }
 
+/// Версия по содержимому объекта без `metadata.generation`: хеш сериализованного spec
+/// (`DefaultHasher` с фиксированными ключами, одинаков в пределах процесса, где идут предпросмотр
+/// и применение). Префикс `s` отличает её от версии по `generation` (`g`) и по `uid` (`u`). Не
+/// сериализовалось — `None`: применение без версии не идёт. `resourceVersion` не годится: HPA
+/// переписывает статус каждые ~15 с.
+fn digest(spec: &impl Serialize) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    serde_json::to_string(spec).ok()?.hash(&mut hasher);
+    Some(format!("s{:016x}", hasher.finish()))
+}
+
+/// Что в spec workload'а известно фактам: шаблон подов, селектор, реплики, `maxSurge`, расписание
+/// CronJob. Число подов DaemonSet — статус (`desiredNumberScheduled`), в версию не входит.
+fn workload_digest(w: &WorkloadSpec) -> Option<String> {
+    let replicas = (w.row.kind != WorkloadKind::DaemonSet).then_some(w.row.desired);
+    digest(&(
+        &w.template,
+        &w.selector,
+        replicas,
+        w.surge,
+        &w.row.schedule,
+        w.row.suspended,
+    ))
+}
+
 impl Facts {
-    /// Версия объекта для формы: у workload'а и HPA — `metadata.generation` (растёт при изменении
-    /// spec, а не статуса: идущая выкладка не делает предпросмотр устаревшим), у пода — `uid`.
+    /// Версия объекта для формы: `g<generation>` (растёт при изменении spec, а не статуса:
+    /// идущая выкладка не делает предпросмотр устаревшим). Без `metadata.generation` (HPA до
+    /// Kubernetes 1.37, CronJob, созданный до 1.22) — `s<хеш spec>`, у пода — `u<uid>`. Версия
+    /// есть у любого объекта, который удалось прочитать: применение без неё не идёт.
     pub fn version(&self) -> Option<String> {
+        let generation = |g: Option<i64>| g.map(|g| format!("g{g}"));
         match self {
-            Facts::Workload(w) => w.spec.generation.map(|g| g.to_string()),
-            Facts::Hpa(h) => h.generation.map(|g| g.to_string()),
-            Facts::Pod { uid, .. } => uid.clone(),
+            Facts::Workload(w) => {
+                generation(w.spec.generation).or_else(|| workload_digest(&w.spec))
+            }
+            Facts::Hpa(h) => generation(h.generation).or_else(|| h.spec_digest.clone()),
+            Facts::Pod { uid, .. } => uid.as_ref().map(|u| format!("u{u}")),
         }
     }
 
@@ -150,6 +184,7 @@ fn hpa_now(h: &HorizontalPodAutoscaler) -> Option<HpaNow> {
         max_replicas: s.max_replicas,
         resource_version: h.metadata.resource_version.clone(),
         generation: h.metadata.generation,
+        spec_digest: digest(s),
     })
 }
 
@@ -689,7 +724,7 @@ mod tests {
         let f = read_facts(&r, &c).await.unwrap();
         assert_eq!(
             (f.resource_version(), f.version().as_deref()),
-            (Some("11"), Some("2"))
+            (Some("11"), Some("g2"))
         );
         // Значение вне границы LimitRange (min CPU 100m, max памяти 2Gi) — ошибка, а не
         // предупреждение: шаблон API-сервер по LimitRange не проверяет, поды новой ревизии
@@ -817,7 +852,7 @@ mod tests {
         let f = read_facts(&r, &hpa(None)).await.unwrap();
         assert_eq!(
             (f.resource_version(), f.version().as_deref()),
-            (Some("5"), Some("1"))
+            (Some("5"), Some("g1"))
         );
         assert_eq!(
             check(&hpa(None), &f).unwrap_err().key,
@@ -832,7 +867,7 @@ mod tests {
         };
         let f = read_facts(&r, &pod).await.unwrap();
         assert_eq!(check(&pod, &f).unwrap(), [Warning::Orphan]);
-        assert_eq!(f.version().as_deref(), Some("u-solo"));
+        assert_eq!(f.version().as_deref(), Some("uu-solo"));
         let missing = Change::DeletePod {
             namespace: "team-a".into(),
             pod: "ghost".into(),
@@ -1022,5 +1057,105 @@ mod tests {
             let f = read_facts(&r, &shrink).await.unwrap();
             assert!(check(&shrink, &f).unwrap().is_empty(), "{used}");
         }
+    }
+
+    /// HPA без `metadata.generation` (Kubernetes до 1.37): `rv` и статус меняются сами.
+    fn hpa_without_generation(
+        rv: &'static str,
+        max: i32,
+        extra: serde_json::Value,
+    ) -> (u16, serde_json::Value) {
+        let mut spec = json!({"minReplicas": 2, "maxReplicas": max,
+            "scaleTargetRef": {"kind": "Deployment", "name": "web"}});
+        spec.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        (
+            200,
+            json!({"apiVersion": "autoscaling/v2", "kind": "HorizontalPodAutoscaler",
+                "metadata": {"name": "web-hpa", "resourceVersion": rv}, "spec": spec,
+                "status": {"currentReplicas": rv.len(), "desiredReplicas": rv.len() + 1}}),
+        )
+    }
+
+    fn cron_job(rv: &'static str, image: &'static str) -> (u16, serde_json::Value) {
+        (
+            200,
+            json!({"apiVersion": "batch/v1", "kind": "CronJob",
+                "metadata": {"name": "web", "namespace": "team-a", "resourceVersion": rv},
+                "spec": {"schedule": "* * * * *", "jobTemplate": {"spec": {"template": {
+                    "spec": {"containers": [{"name": "app", "image": image}]}}}}},
+                "status": {"lastScheduleTime": "2026-10-28T12:00:00Z"}}),
+        )
+    }
+
+    #[tokio::test]
+    async fn an_object_without_generation_is_versioned_by_its_spec_not_its_status() {
+        let hpa = HPAS.to_string() + "/web-hpa";
+        let version = |rv: &'static str, max: i32, extra: serde_json::Value| {
+            let hpa = hpa.clone();
+            async move {
+                let r = reader_over(move |p| {
+                    (p == hpa).then(|| hpa_without_generation(rv, max, extra.clone()))
+                });
+                let change = Change::SetHpaBounds {
+                    namespace: "team-a".into(),
+                    hpa: "web-hpa".into(),
+                    min_replicas: Some(1),
+                    max_replicas: 4,
+                };
+                read_facts(&r, &change).await.unwrap().version().unwrap()
+            }
+        };
+        let base = version("5", 6, json!({})).await;
+        assert!(base.starts_with('s'), "{base}");
+        assert_eq!(
+            version("77", 6, json!({})).await,
+            base,
+            "resourceVersion и статус HPA меняются каждые 15 с"
+        );
+        let metrics = json!({"metrics": [{"type": "Resource", "resource": {"name": "cpu",
+            "target": {"type": "Utilization", "averageUtilization": 70}}}]});
+        let behavior = json!({"behavior": {"scaleDown": {"stabilizationWindowSeconds": 60}}});
+        let others = [
+            version("5", 7, json!({})).await,
+            version("5", 6, metrics).await,
+            version("5", 6, behavior).await,
+        ];
+        for other in &others {
+            assert_ne!(*other, base);
+        }
+        assert_eq!(
+            others
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            3
+        );
+
+        // CronJob без generation: версия — шаблон и расписание, а не `resourceVersion` и статус.
+        let cron = Change::SetResources {
+            namespace: "team-a".into(),
+            workload: WorkloadRef {
+                kind: WorkloadKind::CronJob,
+                name: "web".into(),
+            },
+            containers: serde_json::from_value(json!([{"name": "app", "limits": {"cpu": "1"}}]))
+                .unwrap(),
+        };
+        let cron_version = |rv: &'static str, image: &'static str| {
+            let cron = cron.clone();
+            async move {
+                let r = reader_over(move |p| {
+                    (p == "/apis/batch/v1/namespaces/team-a/cronjobs/web")
+                        .then(|| cron_job(rv, image))
+                });
+                read_facts(&r, &cron).await.unwrap().version().unwrap()
+            }
+        };
+        let base = cron_version("31", "r:1").await;
+        assert!(base.starts_with('s'), "{base}");
+        assert_eq!(cron_version("32", "r:1").await, base);
+        assert_ne!(cron_version("31", "r:2").await, base);
     }
 }

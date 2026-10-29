@@ -200,7 +200,7 @@ mod tests {
             &st,
             "c1",
             hpa(),
-            Some("4".into()),
+            Some("g4".into()),
             Some("prod-1".into()),
             None,
             None,
@@ -225,7 +225,7 @@ mod tests {
             &st,
             "c1",
             hpa(),
-            Some("4".into()),
+            Some("g4".into()),
             Some("prod".into()),
             None,
             None,
@@ -236,7 +236,7 @@ mod tests {
         assert!(requests.lock().unwrap().is_empty());
         // Предпросмотр prod не требует имени: оно — для применения.
         let p = preview_change_impl(&st, "c1", hpa()).await.unwrap();
-        assert_eq!(p.version.as_deref(), Some("4"));
+        assert_eq!(p.version.as_deref(), Some("g4"));
         assert_eq!(p.diff.len(), 2);
     }
 
@@ -246,14 +246,14 @@ mod tests {
         let (st, requests) = state(dir.path(), Environment::Prod, false, None);
         let confirm = || Some("prod-1".to_string());
         // Без версии предпросмотра и с чужой — CONFLICT, в кластер ничего не записано.
-        for version in [None, Some("3".to_string())] {
+        for version in [None, Some("g3".to_string())] {
             let e = apply_change_impl(&st, "c1", hpa(), version, confirm(), None, None)
                 .await
                 .unwrap_err();
             assert_eq!(e.code, ErrorCode::Conflict);
         }
         assert!(writes(&requests).is_empty(), "{:?}", writes(&requests));
-        apply_change_impl(&st, "c1", hpa(), Some("4".into()), confirm(), None, None)
+        apply_change_impl(&st, "c1", hpa(), Some("g4".into()), confirm(), None, None)
             .await
             .unwrap();
         let sent = writes(&requests);

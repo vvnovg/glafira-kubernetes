@@ -541,7 +541,7 @@ pub fn now_rfc3339() -> String {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration as StdDuration;
 
     use super::*;
@@ -660,7 +660,7 @@ pub(crate) mod tests {
         assert!(matches!(p.dry_run, DryRun::Passed));
         assert_eq!(
             p.version.as_deref(),
-            Some("2"),
+            Some("g2"),
             "generation, не resourceVersion"
         );
         let sent = w.sent.lock().unwrap();
@@ -688,7 +688,7 @@ pub(crate) mod tests {
             "DeploymentConfig",
             json!([{"name": "app", "requests": {"cpu": null, "memory": "256Mi"}}]),
         );
-        apply(&reader(), &w, c, Some("7"), None, "now")
+        apply(&reader(), &w, c, Some("g7"), None, "now")
             .await
             .unwrap();
         let (write, dry) = w.sent.lock().unwrap()[0].clone();
@@ -731,12 +731,12 @@ pub(crate) mod tests {
             workload: workload(WorkloadKind::Deployment),
             replicas: 4,
         };
-        apply(&r, &w, scale, Some("2"), None, "now").await.unwrap();
+        apply(&r, &w, scale, Some("g2"), None, "now").await.unwrap();
         let restart = Change::RolloutRestart {
             namespace: "team-a".into(),
             workload: workload(WorkloadKind::Deployment),
         };
-        apply(&r, &w, restart, Some("2"), None, "2026-10-28T12:00:00Z")
+        apply(&r, &w, restart, Some("g2"), None, "2026-10-28T12:00:00Z")
             .await
             .unwrap();
         let dc = Change::RolloutRestart {
@@ -748,14 +748,14 @@ pub(crate) mod tests {
             matches!(p.dry_run, DryRun::Skipped),
             "instantiate без dry-run"
         );
-        apply(&r, &w, dc, Some("7"), None, "now").await.unwrap();
+        apply(&r, &w, dc, Some("g7"), None, "now").await.unwrap();
         let hpa = Change::SetHpaBounds {
             namespace: "team-a".into(),
             hpa: "web".into(),
             min_replicas: Some(3),
             max_replicas: 8,
         };
-        apply(&r, &w, hpa, Some("1"), None, "now").await.unwrap();
+        apply(&r, &w, hpa, Some("g1"), None, "now").await.unwrap();
         let sent: Vec<(Verb, String, Value)> = w
             .sent
             .lock()
@@ -796,7 +796,7 @@ pub(crate) mod tests {
         let p = preview(&r, &w, pod.clone(), "now").await.unwrap();
         assert!(p.confirm_pod_name);
         let before = w.sent.lock().unwrap().len();
-        let e = apply(&r, &w, pod.clone(), Some("u-solo"), None, "now")
+        let e = apply(&r, &w, pod.clone(), Some("uu-solo"), None, "now")
             .await
             .unwrap_err();
         assert_eq!(e.key, "errors.guard.typeToConfirm");
@@ -805,7 +805,7 @@ pub(crate) mod tests {
             before,
             "без имени в кластер ничего не ушло"
         );
-        apply(&r, &w, pod, Some("u-solo"), Some("solo"), "now")
+        apply(&r, &w, pod, Some("uu-solo"), Some("solo"), "now")
             .await
             .unwrap();
         let last = w.sent.lock().unwrap().last().unwrap().0.clone();
@@ -840,7 +840,7 @@ pub(crate) mod tests {
             "{}",
             error.message
         );
-        let e = apply(&reader(), &w, c.clone(), Some("10"), None, "now")
+        let e = apply(&reader(), &w, c.clone(), Some("g10"), None, "now")
             .await
             .unwrap_err();
         assert_eq!(
@@ -869,7 +869,7 @@ pub(crate) mod tests {
         let p = preview(&reader(), &w, c.clone(), "now").await.unwrap();
         assert!(matches!(p.dry_run, DryRun::Passed), "{:?}", p.dry_run);
         let w = racing();
-        apply(&reader(), &w, c.clone(), Some("2"), None, "now")
+        apply(&reader(), &w, c.clone(), Some("g2"), None, "now")
             .await
             .unwrap();
         assert_eq!(w.sent.lock().unwrap().len(), 2);
@@ -879,7 +879,7 @@ pub(crate) mod tests {
                     .with_code(409),
             ))
         });
-        let e = apply(&reader(), &busy, c, Some("2"), None, "now")
+        let e = apply(&reader(), &busy, c, Some("g2"), None, "now")
             .await
             .unwrap_err();
         assert_eq!(
@@ -968,16 +968,12 @@ pub(crate) mod tests {
             namespace: "team-a".into(),
             pod: "solo".into(),
         };
-        // У CronJob в ответе кластера нет `metadata.generation`: версии объекта нет.
-        let cron = set("CronJob", json!([{"name": "app", "limits": {"cpu": "1"}}]));
         let cases = [
             // Без версии предпросмотра: под удаляется с его именем, чтобы упереться в версию.
             (scale.clone(), None, None),
             (pod.clone(), None, Some("solo")),
             // Другая версия: объект пересоздан или изменён.
-            (pod.clone(), Some("u-other"), Some("solo")),
-            // У прочитанного объекта версии нет.
-            (cron, Some("1"), None),
+            (pod.clone(), Some("uu-other"), Some("solo")),
         ];
         for (change, expected, confirm_pod) in cases {
             let e = apply(&r, &w, change, expected, confirm_pod, "now")
@@ -992,8 +988,85 @@ pub(crate) mod tests {
             w.sent.lock().unwrap().is_empty(),
             "в кластер ничего не ушло"
         );
-        apply(&r, &w, scale, Some("2"), None, "now").await.unwrap();
+        apply(&r, &w, scale, Some("g2"), None, "now").await.unwrap();
         assert_eq!(w.sent.lock().unwrap().len(), 1);
+    }
+
+    /// Клиент с ответами `cluster`, где запросы из `over` подменены.
+    fn reader_over(
+        over: impl Fn(&crate::k8s::testing::Seen) -> Option<(u16, Value)> + Send + 'static,
+    ) -> ReadClient {
+        let (client, _) = mock_client(move |s| over(s).unwrap_or_else(|| cluster(s)));
+        ReadClient::new(client, StdDuration::from_secs(5))
+    }
+
+    /// Объект без `metadata.generation` (HPA до Kubernetes 1.37, CronJob старого кластера) версии
+    /// по `generation` не имеет: версия — хеш spec. Контроллер при этом переписывает
+    /// `resourceVersion` и статус при каждом чтении.
+    #[tokio::test]
+    async fn an_object_without_generation_is_applied_with_the_version_of_its_spec() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let max = Arc::new(AtomicUsize::new(6));
+        let image = Arc::new(AtomicUsize::new(1));
+        let reads = Arc::new(AtomicUsize::new(100));
+        let (m, i, n) = (max.clone(), image.clone(), reads.clone());
+        let r = reader_over(move |s| {
+            let rv = n.fetch_add(1, Ordering::SeqCst).to_string();
+            match s.path() {
+                "/apis/autoscaling/v2/namespaces/team-a/horizontalpodautoscalers/web" => Some((
+                    200,
+                    json!({"apiVersion": "autoscaling/v2", "kind": "HorizontalPodAutoscaler",
+                        "metadata": {"name": "web", "resourceVersion": rv},
+                        "spec": {"minReplicas": 2, "maxReplicas": m.load(Ordering::SeqCst),
+                            "scaleTargetRef": {"kind": "Deployment", "name": "web"}},
+                        "status": {"currentReplicas": 2, "desiredReplicas": rv.len() + 1}}),
+                )),
+                "/apis/batch/v1/namespaces/team-a/cronjobs/web" => Some((
+                    200,
+                    json!({"apiVersion": "batch/v1", "kind": "CronJob",
+                        "metadata": {"name": "web", "namespace": "team-a", "resourceVersion": rv},
+                        "spec": {"schedule": "* * * * *", "jobTemplate": {"spec": {"template": {
+                            "spec": {"containers": [{"name": "app",
+                                "image": format!("r:{}", i.load(Ordering::SeqCst))}]}}}}}}),
+                )),
+                _ => None,
+            }
+        });
+        let hpa = Change::SetHpaBounds {
+            namespace: "team-a".into(),
+            hpa: "web".into(),
+            min_replicas: Some(3),
+            max_replicas: 8,
+        };
+        let cron = set("CronJob", json!([{"name": "app", "limits": {"cpu": "1"}}]));
+        for (change, spec_changes) in [(hpa, &max), (cron, &image)] {
+            let w = FakeWriter::new(|_, _| Ok(()));
+            let p = preview(&r, &w, change.clone(), "now").await.unwrap();
+            assert!(matches!(p.dry_run, DryRun::Passed), "{:?}", p.dry_run);
+            let version = p.version.clone().unwrap();
+            assert!(version.starts_with('s'), "{version}");
+            // Применение перечитывает объект: `resourceVersion` и статус другие, spec тот же.
+            apply(&r, &w, change.clone(), p.version.as_deref(), None, "now")
+                .await
+                .unwrap();
+            assert_eq!(w.sent.lock().unwrap().len(), 2, "dry-run и запись");
+            // Spec изменился после предпросмотра: CONFLICT, записи нет.
+            spec_changes.fetch_add(1, Ordering::SeqCst);
+            let e = apply(&r, &w, change.clone(), p.version.as_deref(), None, "now")
+                .await
+                .unwrap_err();
+            assert_eq!(
+                (e.code, e.key.as_str()),
+                (ErrorCode::Conflict, "errors.ops.changed")
+            );
+            assert_eq!(w.sent.lock().unwrap().len(), 2, "записи нет");
+            // Новый предпросмотр даёт новую версию, с ней применение идёт.
+            let again = preview(&r, &w, change.clone(), "now").await.unwrap();
+            assert_ne!(again.version, p.version);
+            apply(&r, &w, change, again.version.as_deref(), None, "now")
+                .await
+                .unwrap();
+        }
     }
 
     #[tokio::test]
