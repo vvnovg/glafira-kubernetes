@@ -1138,6 +1138,7 @@ export interface WorkloadUsage {
 
 export interface PodUsage {
   source: MetricsSourceInfo;
+  sourceStatus: MetricsSourceStatus;
   containers: ContainerNow[];
 }
 

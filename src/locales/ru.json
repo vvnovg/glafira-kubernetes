@@ -1419,6 +1419,8 @@
     "violation": {
       "nodeAllocatable": "{{container}}: request {{resource}} {{request}} больше allocatable самой крупной ноды {{allocatable}}"
     },
-    "chartFailed": "График не загрузился"
+    "chartFailed": "График не загрузился",
+    "currentOnly": "Только текущие значения metrics.k8s.io: истории нет, окно не применяется",
+    "noPodUsage": "Нет данных о потреблении пода"
   }
 }

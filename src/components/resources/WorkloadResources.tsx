@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Suspense, lazy, useMemo, useState } from "react";
+import { Suspense, lazy, useCallback, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
 import type { Analysis, Change, ContainerRecommendation, ContainerUsage, PodNow, WorkloadKind } from "../../api/types";
@@ -10,10 +10,10 @@ import { canSetResources } from "../change/changes";
 import { ChangeDialog } from "../change/ChangeDialog";
 import { Hint } from "../common/Hint";
 import { ChunkBoundary } from "../common/ChunkBoundary";
-import { ReadError } from "../common/ReadError";
 import { useNamespaceAccess } from "../project/useNamespaceAccess";
 import type { ChartLine } from "./chart";
 import { DEFAULT_WINDOW, WINDOWS, effective, noteText, recommendationChange, sourceLabel, violationText } from "./recommend";
+import { ResourcesError, SourceReasons } from "./SourceReasons";
 
 // uPlot — отдельный чанк: грузится, когда есть что рисовать.
 const UsageChart = lazy(() => import("./UsageChart").then((m) => ({ default: m.UsageChart })));
@@ -25,14 +25,14 @@ interface Props {
   name: string;
 }
 
-/** Выбор окна анализа: 1, 7, 14 или 30 дней. */
-export function WindowSelect({ days, onChange }: { days: number; onChange: (d: number) => void }) {
+/** Выбор окна анализа: 1, 7, 14 или 30 дней. `disabledReason` — выбор недоступен, причина в подсказке. */
+export function WindowSelect({ days, onChange, disabledReason }: { days: number; onChange: (d: number) => void; disabledReason?: string }) {
   const { t } = useTranslation();
   return (
     <span className="field-label">
-      <label>
+      <label title={disabledReason}>
         {t("resources.window")}{" "}
-        <select value={days} onChange={(e) => onChange(Number(e.target.value))}>
+        <select value={days} disabled={disabledReason !== undefined} title={disabledReason} onChange={(e) => onChange(Number(e.target.value))}>
           {WINDOWS.map((d) => (
             <option key={d} value={d}>
               {t("resources.days", { count: d })}
@@ -46,6 +46,29 @@ export function WindowSelect({ days, onChange }: { days: number; onChange: (d: n
 }
 
 /**
+ * Запрос вкладки «Ресурсы». Обычная загрузка берёт выбор источника метрик из подключения (он живёт 5 минут);
+ * `reload` — «Обновить» и «Повторить» — просит выбрать источник заново. Флаг читает ближайший запрос и
+ * сбрасывается; в ключ запроса он не входит.
+ */
+function useResourcesQuery<T>(queryKey: readonly unknown[], load: (refresh: boolean) => Promise<T>) {
+  const forced = useRef(false);
+  const q = useQuery({
+    queryKey,
+    queryFn: () => {
+      const refresh = forced.current;
+      forced.current = false;
+      return load(refresh);
+    },
+  });
+  const { refetch } = q;
+  const reload = useCallback(() => {
+    forced.current = true;
+    void refetch();
+  }, [refetch]);
+  return { q, reload };
+}
+
+/**
  * «Ресурсы» workload'а (спец. §7.4): окно, источник, покрытие и уверенность; таблица «сейчас → рекомендация» по
  * контейнерам со статистикой худшего пода; итог на весь workload; графики; «Применить рекомендацию» открывает форму
  * «Ресурсы контейнеров» с рекомендованными значениями.
@@ -56,18 +79,17 @@ export function WorkloadResources({ connectionId, namespace, kind, name }: Props
   const [form, setForm] = useState<Change | null>(null);
   const access = useNamespaceAccess(connectionId, namespace).data;
   const readOnly = useConnection(connectionId)?.readOnly === true;
-  const q = useQuery({
-    queryKey: ["resources", connectionId, namespace, kind, name, days],
-    queryFn: () => api.recommendResources(connectionId, namespace, kind, name, days),
-  });
+  const { q, reload } = useResourcesQuery(["resources", connectionId, namespace, kind, name, days], (refresh) =>
+    api.recommendResources(connectionId, namespace, kind, name, days, refresh),
+  );
   const a = q.data;
   const change = a ? recommendationChange(a.recommendation) : null;
   const low = a?.recommendation.confidence === "low";
   return (
     <div className="section">
       <div className="toolbar">
-        <WindowSelect days={days} onChange={setDays} />
-        <button type="button" disabled={q.isFetching} onClick={() => void q.refetch()}>
+        <WindowSelect days={days} onChange={setDays} disabledReason={a && !a.usage.source.history ? t("resources.currentOnly") : undefined} />
+        <button type="button" disabled={q.isFetching} onClick={reload}>
           {t("common.refresh")}
         </button>
         {change && change.kind === "setResources" && change.containers.length > 0 && canSetResources(kind) && (
@@ -75,7 +97,7 @@ export function WorkloadResources({ connectionId, namespace, kind, name }: Props
         )}
       </div>
       {q.isPending && <p className="muted">{t("common.loading")}</p>}
-      {q.error && <ReadError error={q.error} connectionId={connectionId} onRetry={() => void q.refetch()} />}
+      {q.error && <ResourcesError error={q.error} connectionId={connectionId} at={q.errorUpdatedAt} onRetry={reload} />}
       {a && <AnalysisView a={a} />}
       {form && (
         <ChangeDialog
@@ -96,13 +118,16 @@ function AnalysisView({ a }: { a: Analysis }) {
   return (
     <>
       <p className="muted">
-        {t("resources.source", { source: sourceLabel(u.source) })} · {t("resources.days", { count: u.windowDays })}
+        {t("resources.source", { source: sourceLabel(u.source) })} ·{" "}
+        {/* metrics.k8s.io отдаёт одно текущее значение: окна нет, и дни не печатаются. */}
+        {u.source.history ? t("resources.days", { count: u.windowDays }) : t("resources.currentOnly")}
         {u.coverage != null && <> · {t("resources.coverage", { value: percentText(u.coverage) })}</>}
         {u.dataSeconds != null && <> · {t("resources.dataDays", { count: Math.round((u.dataSeconds / 86_400) * 10) / 10 })}</>}
         {" · "}
         <span className={`confidence-${r.confidence}`}>{t("resources.confidence", { value: t(`resources.confidenceLevel.${r.confidence}`) })}</span>{" "}
         <Hint k="hints.resources.confidence" label={t("resources.confidenceLabel")} />
       </p>
+      <SourceReasons rejected={u.sourceStatus.rejected} />
       {!u.ownerMetrics && u.source.history && <p className="muted">{t("resources.noKubeStateMetrics")}</p>}
       <table className="resource-table">
         <thead>
@@ -247,20 +272,23 @@ export function PodsNow({ pods }: { pods: PodNow[] }) {
 /** «Ресурсы» пода (спец. §6.5): текущее потребление по контейнерам. */
 export function PodResources({ connectionId, namespace, pod }: { connectionId: string; namespace: string; pod: string }) {
   const { t } = useTranslation();
-  const q = useQuery({ queryKey: ["resources", connectionId, namespace, "pod", pod], queryFn: () => api.getPodUsage(connectionId, namespace, pod) });
+  const { q, reload } = useResourcesQuery(["resources", connectionId, namespace, "pod", pod], (refresh) =>
+    api.getPodUsage(connectionId, namespace, pod, refresh),
+  );
   return (
     <div className="section">
       <div className="toolbar">
-        <button type="button" disabled={q.isFetching} onClick={() => void q.refetch()}>
+        <button type="button" disabled={q.isFetching} onClick={reload}>
           {t("common.refresh")}
         </button>
       </div>
       {q.isPending && <p className="muted">{t("common.loading")}</p>}
-      {q.error && <ReadError error={q.error} connectionId={connectionId} onRetry={() => void q.refetch()} />}
+      {q.error && <ResourcesError error={q.error} connectionId={connectionId} at={q.errorUpdatedAt} onRetry={reload} />}
       {q.data && (
         <>
           <p className="muted">{t("resources.source", { source: sourceLabel(q.data.source) })}</p>
-          <PodsNow pods={[{ pod, containers: q.data.containers }]} />
+          <SourceReasons rejected={q.data.sourceStatus.rejected} />
+          {q.data.containers.length > 0 ? <PodsNow pods={[{ pod, containers: q.data.containers }]} /> : <p className="empty">{t("resources.noPodUsage")}</p>}
         </>
       )}
     </div>

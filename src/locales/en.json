@@ -1399,6 +1399,8 @@
     "violation": {
       "nodeAllocatable": "{{container}}: request {{resource}} {{request}} is above the allocatable of the largest node {{allocatable}}"
     },
-    "chartFailed": "The chart could not be loaded"
+    "chartFailed": "The chart could not be loaded",
+    "currentOnly": "Current values from metrics.k8s.io only: no history, the window does not apply",
+    "noPodUsage": "No usage data for this pod"
   }
 }

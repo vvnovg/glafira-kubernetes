@@ -37,7 +37,8 @@ pub async fn get_metrics_source_status(
         .await
 }
 
-/// Статистика workload'а за окно `window_days` (1, 7, 14 или 30 дней).
+/// Статистика workload'а за окно `window_days` (1, 7, 14 или 30 дней). `refresh` («Обновить»,
+/// «Повторить») выбирает источник метрик заново, иначе берётся выбор из подключения (5 минут).
 #[tauri::command]
 pub async fn get_workload_usage(
     state: State<'_, AppState>,
@@ -46,12 +47,14 @@ pub async fn get_workload_usage(
     kind: WorkloadKind,
     name: String,
     window_days: u32,
+    refresh: Option<bool>,
 ) -> AppResult<WorkloadUsage> {
     let st = state.inner().clone();
     let (id, ns) = (connection_id.clone(), namespace.clone());
+    let refresh = refresh.unwrap_or(false);
     state
         .read_in(&connection_id, &namespace, |c| async move {
-            let sel = crate::metrics::select::for_connection(&st, &id, &c, false).await?;
+            let sel = crate::metrics::select::for_connection(&st, &id, &c, refresh).await?;
             crate::resources::usage::workload_usage(
                 &c.reader(),
                 &sel,
@@ -66,25 +69,28 @@ pub async fn get_workload_usage(
         .await
 }
 
-/// Текущее потребление контейнеров пода.
+/// Текущее потребление контейнеров пода; `refresh` — выбрать источник метрик заново.
 #[tauri::command]
 pub async fn get_pod_usage(
     state: State<'_, AppState>,
     connection_id: String,
     namespace: String,
     pod: String,
+    refresh: Option<bool>,
 ) -> AppResult<PodUsage> {
     let st = state.inner().clone();
     let (id, ns) = (connection_id.clone(), namespace.clone());
+    let refresh = refresh.unwrap_or(false);
     state
         .read_in(&connection_id, &namespace, |c| async move {
-            let sel = crate::metrics::select::for_connection(&st, &id, &c, false).await?;
+            let sel = crate::metrics::select::for_connection(&st, &id, &c, refresh).await?;
             crate::resources::usage::pod_usage(&c.reader(), &sel, &ns, &pod, now_s()).await
         })
         .await
 }
 
-/// Статистика workload'а и рекомендация requests и limits (вкладка «Ресурсы» workload'а).
+/// Статистика workload'а и рекомендация requests и limits (вкладка «Ресурсы» workload'а);
+/// `refresh` — выбрать источник метрик заново.
 #[tauri::command]
 pub async fn recommend_resources(
     state: State<'_, AppState>,
@@ -93,12 +99,14 @@ pub async fn recommend_resources(
     kind: WorkloadKind,
     name: String,
     window_days: u32,
+    refresh: Option<bool>,
 ) -> AppResult<Analysis> {
     let st = state.inner().clone();
     let (id, ns) = (connection_id.clone(), namespace.clone());
+    let refresh = refresh.unwrap_or(false);
     state
         .read_in(&connection_id, &namespace, |c| async move {
-            let sel = crate::metrics::select::for_connection(&st, &id, &c, false).await?;
+            let sel = crate::metrics::select::for_connection(&st, &id, &c, refresh).await?;
             let nodes = c.info.capabilities.list_nodes;
             crate::resources::analyze(
                 &c.reader(),

@@ -151,13 +151,14 @@ export const api = {
   /** Источник метрик подключения: выбранный и отвергнутые; `refresh` — выбрать заново. */
   getMetricsSourceStatus: (connectionId: string, refresh = false) =>
     call<MetricsSourceStatus>("get_metrics_source_status", { connectionId, refresh }),
-  /** Статистика workload'а за окно 1, 7, 14 или 30 дней. */
-  getWorkloadUsage: (connectionId: string, namespace: string, kind: WorkloadKind, name: string, windowDays: number) =>
-    call<WorkloadUsage>("get_workload_usage", { connectionId, namespace, kind, name, windowDays }),
-  getPodUsage: (connectionId: string, namespace: string, pod: string) => call<PodUsage>("get_pod_usage", { connectionId, namespace, pod }),
-  /** Статистика и рекомендация requests и limits (вкладка «Ресурсы» workload'а). */
-  recommendResources: (connectionId: string, namespace: string, kind: WorkloadKind, name: string, windowDays: number) =>
-    call<Analysis>("recommend_resources", { connectionId, namespace, kind, name, windowDays }),
+  /** Статистика workload'а за окно 1, 7, 14 или 30 дней; `refresh` — выбрать источник метрик заново. */
+  getWorkloadUsage: (connectionId: string, namespace: string, kind: WorkloadKind, name: string, windowDays: number, refresh = false) =>
+    call<WorkloadUsage>("get_workload_usage", { connectionId, namespace, kind, name, windowDays, refresh }),
+  getPodUsage: (connectionId: string, namespace: string, pod: string, refresh = false) =>
+    call<PodUsage>("get_pod_usage", { connectionId, namespace, pod, refresh }),
+  /** Статистика и рекомендация requests и limits (вкладка «Ресурсы» workload'а); `refresh` — выбрать источник заново. */
+  recommendResources: (connectionId: string, namespace: string, kind: WorkloadKind, name: string, windowDays: number, refresh = false) =>
+    call<Analysis>("recommend_resources", { connectionId, namespace, kind, name, windowDays, refresh }),
   /** Ресурсы проекта — фоновая сессия; итог приходит в `onEvent`. Возвращает id сессии для `stopSession`. */
   startProjectUsage: (connectionId: string, namespace: string, windowDays: number, refresh: boolean, onEvent: (e: ProjectUsageEvent) => void) => {
     const channel = new Channel<ProjectUsageEvent>();

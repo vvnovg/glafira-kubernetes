@@ -41,6 +41,8 @@ const DETAILS: WorkloadDetails = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Кнопки изменений (ChangeActions) читают профиль подключения из кэша ["connections"].
+  Object.assign(api, { listConnections: vi.fn().mockResolvedValue([]) });
   vi.mocked(api.getWorkload).mockResolvedValue(DETAILS);
   vi.mocked(api.startWatch).mockResolvedValue("s1");
   vi.mocked(api.stopSession).mockResolvedValue(true);

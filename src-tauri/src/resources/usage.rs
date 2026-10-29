@@ -410,6 +410,8 @@ pub async fn workload_usage(
 #[serde(rename_all = "camelCase")]
 pub struct PodUsage {
     pub source: SourceInfo,
+    /// Выбор источника и причины, по которым отвергнуты остальные (спец. §7.1).
+    pub source_status: SourceStatus,
     pub containers: Vec<crate::metrics::pods::ContainerNow>,
 }
 
@@ -433,6 +435,7 @@ pub async fn pod_usage(
         let get = |s: &str, c: &str| stats.get(s).and_then(|m| m.get(c)).copied();
         return Ok(PodUsage {
             source: src.info().clone(),
+            source_status: sel.status.clone(),
             containers: names
                 .into_iter()
                 .map(|c| crate::metrics::pods::ContainerNow {
@@ -449,6 +452,7 @@ pub async fn pod_usage(
     let now_list = pods_now(r, namespace, None).await.map_err(failed)?;
     Ok(PodUsage {
         source: crate::metrics::pods::info(),
+        source_status: sel.status.clone(),
         containers: now_list
             .into_iter()
             .find(|p| p.pod == pod)
@@ -889,6 +893,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(p.containers[0].cpu, Some(0.3));
+        assert!(!p.source_status.pod_metrics);
         let sel = Selected {
             history: None,
             status: source_status(true),
@@ -897,5 +902,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(p.containers[0].memory, Some(300.0 * 1024.0 * 1024.0));
+        // Выбор источника уходит вместе с данными: причины отказов видны в интерфейсе.
+        assert!(p.source_status.pod_metrics);
     }
 }
