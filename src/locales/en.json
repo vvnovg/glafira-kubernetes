@@ -165,7 +165,9 @@
       "saveStopped": "Saving the log was stopped: the connection was closed"
     },
     "health": {
-      "annotationNotFound": "The note was deleted or has expired"
+      "annotationNotFound": "The note was deleted or has expired",
+      "proposalNotFound": "The proposal was deleted or has expired",
+      "proposalClosed": "The proposal is {{status}} and cannot be changed to {{to}}"
     },
     "mcp": {
       "startFailed": "The MCP server did not start: {{error}}",

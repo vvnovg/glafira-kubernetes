@@ -144,9 +144,9 @@
 | `crates/glafira-mcp-kubernetes/src/server/tools.rs` | `crates/glafira-mcp/src/server/tools.rs` | `8bbd0bd` | адаптирован: 13 инструментов чтения Kubernetes, маскировка в ответах |
 | `crates/glafira-mcp-kubernetes/tests/server.rs` | `crates/glafira-mcp/tests/server.rs` | `8bbd0bd` | адаптирован: фальшивый Backend Kubernetes, область LLM, маскировка |
 | `crates/glafira-mcp-kubernetes/src/server/health_tools.rs` | `crates/glafira-mcp/src/server/health_tools.rs` | `8bbd0bd` | адаптирован: проекты проверки, фильтр области LLM, объекты Kubernetes |
-| `src-tauri/src/health/store.rs` | `src-tauri/src/health/store.rs` | `8bbd0bd` | адаптирован: без предложений LLM (этап O3) и лага групп, проекты проверки, объекты Kubernetes |
+| `src-tauri/src/health/store.rs` | `src-tauri/src/health/store.rs` | `8bbd0bd` | адаптирован: без лага групп, проекты проверки, объекты Kubernetes; предложения LLM — с изменениями Kubernetes (`change::Change`) |
 | `src-tauri/src/health/service.rs` | `src-tauri/src/health/service.rs` | `8bbd0bd` | адаптирован: сборщик снимка Kubernetes, проекты проверки, без лага групп |
-| `src-tauri/src/commands/health.rs` | `src-tauri/src/commands/health.rs` | `8bbd0bd` | адаптирован: без предложений LLM (этап O3) |
+| `src-tauri/src/commands/health.rs` | `src-tauri/src/commands/health.rs` | `8bbd0bd` | адаптирован: отметка «применено» — по изменению Kubernetes (`change::Change`) |
 | `src-tauri/src/mcp/files.rs` | `src-tauri/src/mcp/files.rs` | `8bbd0bd` | адаптирован: ссылка на спеку |
 | `src-tauri/src/mcp/approvals.rs` | `src-tauri/src/mcp/approvals.rs` | `8bbd0bd` | адаптирован: крейт glafira-mcp-core, ссылка на спеку |
 | `src-tauri/src/mcp/backend.rs` | `src-tauri/src/mcp/backend.rs` | `8bbd0bd` | адаптирован: чтения Kubernetes через ReadClient, область llmNamespaces, проверка по проектам, объекты Kubernetes |
@@ -189,3 +189,4 @@
 | `src/components/common/ExternalLink.tsx` | `src/components/common/ExternalLink.tsx` | `c5446fc` | как есть |
 | `docs/releases-repo/SUPPORT.md` | `docs/releases-repo/SUPPORT.md` | `c5446fc` | адаптирован: название продукта |
 | `src-tauri/src/guard.rs` | `src-tauri/src/guard.rs` | `8bbd0bd` | адаптирован: профиль подключения Kubernetes, ввод имени пода без контроллера |
+| `src-tauri/src/health/proposals.rs` | `src-tauri/src/health/proposals.rs` | `8bbd0bd` | адаптирован: модель, статусы и сроки предложения; вид изменения — `change::Change` (§9) |
