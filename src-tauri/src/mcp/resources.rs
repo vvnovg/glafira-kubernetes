@@ -177,13 +177,6 @@ fn field(f: Field) -> &'static str {
     }
 }
 
-fn value(f: Field, v: f64) -> String {
-    match f {
-        Field::CpuRequest | Field::CpuLimit => format_cpu(v),
-        Field::MemoryRequest | Field::MemoryLimit => format_memory(v),
-    }
-}
-
 /// Количество ресурса словами: ядра или память.
 fn amount(resource: &str, v: f64) -> String {
     if resource.ends_with("cpu") {
@@ -258,24 +251,6 @@ pub fn warning(w: &Warning) -> String {
             format!("HPA {hpa} scales this workload and will overwrite the number of replicas")
         }
         Warning::ScaleToZero => "Scaling to 0 removes all pods of the workload".into(),
-        Warning::LimitRange {
-            container,
-            field: f,
-            bound,
-            limit,
-        } => format!(
-            "Container {container}: the {} is {} the LimitRange {} {}: new pods will be rejected",
-            field(*f),
-            match bound {
-                Bound::Max => "above",
-                _ => "below",
-            },
-            match bound {
-                Bound::Max => "maximum",
-                _ => "minimum",
-            },
-            value(*f, *limit)
-        ),
         Warning::Quota {
             quota,
             resource,
@@ -417,15 +392,6 @@ mod tests {
                 free: 1024.0 * MIB,
             }),
             "ResourceQuota compute: requests.memory needs 2Gi more with all replicas and the rollout surge, only 1Gi is free"
-        );
-        assert_eq!(
-            warning(&Warning::LimitRange {
-                container: "app".into(),
-                field: Field::CpuRequest,
-                bound: Bound::Min,
-                limit: 0.1,
-            }),
-            "Container app: the CPU request is below the LimitRange minimum 100m: new pods will be rejected"
         );
         assert_eq!(
             warning(&Warning::Unverified {

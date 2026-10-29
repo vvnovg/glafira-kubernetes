@@ -1,5 +1,5 @@
 import type { TFunction } from "i18next";
-import type { Change, ChangeWarning, NamespaceAccess, ResourceField, WorkloadKind } from "../../api/types";
+import type { Change, ChangeWarning, NamespaceAccess, WorkloadKind } from "../../api/types";
 import { cpuQuantity, memoryQuantity } from "../../lib/quantity";
 
 /** Ресурс прав (`ресурс.группа`) вида workload'а. */
@@ -68,12 +68,6 @@ export function hasValues(c: Change): boolean {
 
 const isCpu = (s: string) => s.toLowerCase().includes("cpu");
 
-/** Значение поля ресурсов: у CPU — ядра, у памяти — байты, у `maxLimitRequestRatio` — само отношение. */
-export function fieldAmount(field: ResourceField, v: number, ratio = false): string {
-  if (ratio) return String(v);
-  return isCpu(field) ? cpuQuantity(v) : memoryQuantity(v);
-}
-
 /** Значение ресурса квоты: `requests.cpu` — ядра, `limits.memory` — байты. */
 export const quotaAmount = (resource: string, v: number) => (isCpu(resource) ? cpuQuantity(v) : memoryQuantity(v));
 
@@ -84,13 +78,6 @@ export function warningText(w: ChangeWarning, t: TFunction): string {
       return t("change.warning.hpaManaged", { hpa: w.hpa });
     case "scaleToZero":
       return t("change.warning.scaleToZero");
-    case "limitRange":
-      return t("change.warning.limitRange", {
-        container: w.container,
-        field: t(`change.fieldName.${w.field}`),
-        bound: t(`change.bound.${w.bound}`),
-        limit: fieldAmount(w.field, w.limit, w.bound === "ratio"),
-      });
     case "quota":
       return t("change.warning.quota", { quota: w.quota, resource: w.resource, needed: quotaAmount(w.resource, w.needed), free: quotaAmount(w.resource, w.free) });
     case "unverified":

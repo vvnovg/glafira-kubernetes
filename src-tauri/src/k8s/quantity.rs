@@ -74,6 +74,32 @@ pub fn format_memory(bytes: f64) -> String {
     }
 }
 
+/// Целое с допуском на погрешность дробей (`700m` как f64 — 0.7000000000000001): почти целое —
+/// оно само, иначе вверх (`up`) или вниз.
+fn round_toward(x: f64, up: bool) -> f64 {
+    let near = x.round();
+    if (x - near).abs() < 1e-6 {
+        near
+    } else if up {
+        x.ceil()
+    } else {
+        x.floor()
+    }
+}
+
+/// Ядра строкой quantity, как `format_cpu`, но милликоры округляются в сторону `up`: граница в
+/// тексте остаётся допустимым значением (максимум — вниз, минимум — вверх).
+pub fn format_cpu_toward(cores: f64, up: bool) -> String {
+    format_cpu(round_toward(cores * 1000.0, up) / 1000.0)
+}
+
+/// Байты строкой quantity, как `format_memory`, но мебибайты округляются в сторону `up`:
+/// максимум `1G` — `953Mi` (а не `954Mi`, который сам выше максимума), минимум `100M` — `96Mi`.
+pub fn format_memory_toward(bytes: f64, up: bool) -> String {
+    const MI: f64 = 1024.0 * 1024.0;
+    format_memory(round_toward(bytes / MI, up) * MI)
+}
+
 /// Доля `used` от `hard`; `None`, если что-то не разобрано или лимит нулевой.
 pub fn ratio(used: &str, hard: &str) -> Option<f64> {
     let hard = parse_quantity(hard).filter(|h| *h > 0.0)?;
@@ -83,6 +109,25 @@ pub fn ratio(used: &str, hard: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounds_are_rounded_toward_the_allowed_side() {
+        // Максимум — вниз, минимум — вверх; ровные значения не меняются.
+        assert_eq!(format_memory_toward(1e9, false), "953Mi");
+        assert_eq!(format_memory_toward(1e9, true), "954Mi");
+        assert_eq!(format_memory_toward(1e8, true), "96Mi");
+        assert_eq!(format_memory_toward(1e8, false), "95Mi");
+        assert_eq!(
+            format_memory_toward(2.0 * 1024.0 * 1024.0 * 1024.0, false),
+            "2Gi"
+        );
+        assert_eq!(format_memory_toward(256.0 * 1024.0 * 1024.0, true), "256Mi");
+        assert_eq!(format_cpu_toward(0.0015, false), "1m");
+        assert_eq!(format_cpu_toward(0.0015, true), "2m");
+        assert_eq!(format_cpu_toward(0.7, true), "700m");
+        assert_eq!(format_cpu_toward(0.7, false), "700m");
+        assert_eq!(format_cpu_toward(2.0, false), "2");
+    }
 
     #[test]
     fn quantities() {

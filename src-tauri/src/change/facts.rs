@@ -1,6 +1,7 @@
 //! Изменение против прочитанных объектов (спец. §9, §10.5): что в кластере сейчас (`Facts`,
 //! только чтение), проверка (объект и контейнеры есть, `limits ≥ requests` с текущими
-//! значениями, предупреждения `LimitRange`, квоты и HPA) и «было → станет» по полям.
+//! значениями, границы `LimitRange` — ошибка; предупреждения квоты, HPA и непрочитанных списков)
+//! и «было → станет» по полям.
 
 use std::collections::BTreeMap;
 
@@ -14,12 +15,12 @@ use super::{
     Change, ContainerResources, check_bounds, check_limits, quantity_lt, same_quantity_text,
 };
 use crate::error::{AppResult, ErrorCode};
-use crate::k8s::quantity::{format_cpu, format_memory, parse_quantity};
+use crate::k8s::quantity::{format_cpu_toward, format_memory_toward, parse_quantity};
 use crate::k8s::read::{Listed, ReadClient};
 use crate::k8s::workloads::{WorkloadKind, WorkloadSpec, get_spec};
 use crate::resources::constraints::{limit_range_bounds, quota_rooms};
 use crate::resources::current::Amounts;
-use crate::resources::recommend::{Bound, Field, LimitRangeBounds, QuotaRoom};
+use crate::resources::recommend::{Field, LimitRangeBounds, QuotaRoom};
 
 /// Аннотация шаблона, которой перезапускает `kubectl rollout restart`.
 pub const RESTARTED_AT: &str = "kubectl.kubernetes.io/restartedAt";
@@ -290,17 +291,6 @@ pub enum Warning {
     HpaManaged { hpa: String },
     /// Масштаб в 0: подов не останется.
     ScaleToZero,
-    /// Значение вне границы `LimitRange`. `check` его больше не выдаёт: API-сервер шаблон
-    /// workload'а по `LimitRange` не проверяет (LimitRanger пропускает только Pod и PVC), поды
-    /// новой ревизии отклонят позже, и выкладка встанет, поэтому нарушение — ошибка
-    /// `errors.change.limitRangeMin` / `errors.change.limitRangeMax`, а не предупреждение.
-    /// Вариант оставлен для кода, который его разбирает.
-    LimitRange {
-        container: String,
-        field: Field,
-        bound: Bound,
-        limit: f64,
-    },
     /// Запаса квоты не хватит с учётом реплик и подов выкладки.
     Quota {
         quota: String,
@@ -326,7 +316,8 @@ fn not_in_template(container: &str) -> crate::error::AppError {
 
 /// Значение вне границы `LimitRange`: ошибка, а не предупреждение. API-сервер не проверяет
 /// шаблон workload'а по `LimitRange` (LimitRanger пропускает только Pod и PVC): поды новой
-/// ревизии отклонят при создании, и выкладка встанет.
+/// ревизии отклонят при создании, и выкладка встанет. Граница в тексте округляется в допустимую
+/// сторону (максимум — вниз, минимум — вверх): значение из текста проходит проверку.
 fn limit_range_violation(
     container: &str,
     field: Field,
@@ -339,10 +330,11 @@ fn limit_range_violation(
         Field::MemoryRequest => ("memory request", false),
         Field::MemoryLimit => ("memory limit", false),
     };
+    let up = !above;
     let limit = if cpu {
-        format_cpu(limit)
+        format_cpu_toward(limit, up)
     } else {
-        format_memory(limit)
+        format_memory_toward(limit, up)
     };
     let text = if above {
         crate::ltext!(
@@ -950,6 +942,55 @@ mod tests {
             )
             .len(),
             1
+        );
+    }
+
+    /// Граница `LimitRange` в тексте ошибки — допустимое значение: максимум `1G` — `953Mi` (а не
+    /// `954Mi`, который сам выше максимума), минимум `100M` — `96Mi`, CPU — так же по милликорам.
+    #[tokio::test]
+    async fn limit_range_bounds_in_the_error_are_rounded_toward_the_allowed_side() {
+        let r = reader_over(|p| {
+            (p == LIMIT_RANGES).then(|| {
+                items_of(
+                    "LimitRangeList",
+                    json!([{"metadata": {"name": "lr"}, "spec": {"limits": [
+                        {"type": "Container", "min": {"memory": "100M", "cpu": "1500u"},
+                         "max": {"memory": "1G", "cpu": "2500u"}}]}}]),
+                )
+            })
+        });
+        let limit = |c: Change| {
+            let r = r.clone();
+            async move {
+                let f = read_facts(&r, &c).await.unwrap();
+                let e = check(&c, &f).unwrap_err();
+                (e.key, e.params["limit"].clone())
+            }
+        };
+        assert_eq!(
+            limit(set(json!([{"name": "app", "requests": {"memory": "512Mi", "cpu": "2m"}, "limits": {"memory": "2Gi"}}]))).await,
+            ("errors.change.limitRangeMax".to_string(), "953Mi".to_string())
+        );
+        assert_eq!(
+            limit(set(
+                json!([{"name": "app", "requests": {"memory": "64Mi", "cpu": "2m"}}])
+            ))
+            .await,
+            (
+                "errors.change.limitRangeMin".to_string(),
+                "96Mi".to_string()
+            )
+        );
+        assert_eq!(
+            limit(set(
+                json!([{"name": "app", "requests": {"cpu": "1m", "memory": "128Mi"}}])
+            ))
+            .await,
+            ("errors.change.limitRangeMin".to_string(), "2m".to_string())
+        );
+        assert_eq!(
+            limit(set(json!([{"name": "app", "requests": {"cpu": "2m", "memory": "128Mi"}, "limits": {"cpu": "3m"}}]))).await,
+            ("errors.change.limitRangeMax".to_string(), "2m".to_string())
         );
     }
 

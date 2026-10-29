@@ -41,8 +41,5 @@ describe("изменения", () => {
       "Квоте compute не хватит requests.cpu: нужно 1500m, свободно 500m — поды новой ревизии не создадутся, выкладка встанет",
     );
     expect(warningText({ code: "unverified", what: "quota" }, t)).toBe("Не удалось прочитать квоты проекта: изменение не проверено по этим данным");
-    expect(warningText({ code: "limitRange", container: "app", field: "memoryLimit", bound: "max", limit: 1024 ** 3 }, t)).toBe(
-      "app: memory limit больше максимума LimitRange 1Gi — сервер отклонит изменение",
-    );
   });
 });

@@ -1295,7 +1295,6 @@
       "unverified": "Could not read {{what}}: the change was not checked against this data",
       "hpaManaged": "HPA {{hpa}} scales this workload and will overwrite the replicas",
       "scaleToZero": "No pods will be left",
-      "limitRange": "{{container}}: {{field}} {{bound}} of the LimitRange {{limit}} — the API server will reject the change",
       "quota": "The quota {{quota}} lacks {{resource}}: {{needed}} needed, {{free}} free — the pods of the new revision would not be created and the rollout would stall",
       "orphan": "The pod has no controller: nobody will create it again"
     },
@@ -1370,11 +1369,6 @@
       "cpuLimit": "CPU limit",
       "memoryRequest": "memory request",
       "memoryLimit": "memory limit"
-    },
-    "bound": {
-      "min": "is below the minimum",
-      "max": "is above the maximum",
-      "ratio": "exceeds the limit/request ratio"
     }
   },
   "resources": {

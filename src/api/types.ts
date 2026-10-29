@@ -1288,7 +1288,6 @@ export interface FieldChange {
 export type ChangeWarning =
   | { code: "hpaManaged"; hpa: string }
   | { code: "scaleToZero" }
-  | { code: "limitRange"; container: string; field: ResourceField; bound: LimitBound; limit: number }
   | { code: "quota"; quota: string; resource: string; needed: number; free: number }
   | { code: "orphan" }
   | { code: "unverified"; what: "hpa" | "limitRange" | "quota" };

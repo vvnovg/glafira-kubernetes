@@ -1315,7 +1315,6 @@
       "unverified": "Не удалось прочитать {{what}}: изменение не проверено по этим данным",
       "hpaManaged": "HPA {{hpa}} масштабирует этот workload и перезапишет число реплик",
       "scaleToZero": "Подов не останется",
-      "limitRange": "{{container}}: {{field}} {{bound}} LimitRange {{limit}} — сервер отклонит изменение",
       "quota": "Квоте {{quota}} не хватит {{resource}}: нужно {{needed}}, свободно {{free}} — поды новой ревизии не создадутся, выкладка встанет",
       "orphan": "У пода нет контроллера: заново его никто не создаст"
     },
@@ -1390,11 +1389,6 @@
       "cpuLimit": "CPU limit",
       "memoryRequest": "memory request",
       "memoryLimit": "memory limit"
-    },
-    "bound": {
-      "min": "меньше минимума",
-      "max": "больше максимума",
-      "ratio": "превышает отношение limit/request"
     }
   },
   "resources": {
