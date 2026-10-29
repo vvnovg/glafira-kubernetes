@@ -165,6 +165,9 @@ pub async fn get_project_usage_impl(
     tokio::spawn(async move {
         let _guard = guard;
         let work = async {
+            // Эпоха подключения — до кэша и до чтения: сброс клиента посреди сбора (новый токен,
+            // 401, отключение) не даёт положить в кэш числа, собранные прежним клиентом.
+            let epoch = st.resources.epoch(&connection_id);
             if !refresh && let Some(u) = st.resources.get(&connection_id, &namespace, days) {
                 return Ok(u);
             }
@@ -185,11 +188,11 @@ pub async fn get_project_usage_impl(
             let u = tokio::time::timeout(PROJECT_DEADLINE, Box::pin(read))
                 .await
                 .map_err(|_| crate::k8s::errors::timeout())??;
-            // Результат с ошибкой (не прочитался вид workload'ов или Jobs) в кэш не идёт: иначе
-            // сбой, который мог быть разовым, держался бы пять минут. Неполный список — без
-            // ошибок — кэшируется.
-            if u.errors.is_empty() {
-                st.resources.put(&connection_id, &u);
+            // Результат с сетевой ошибкой (повторимой: таймаут, обрыв, 5xx) в кэш не идёт: такой
+            // сбой разовый, и держать его пять минут незачем. Нет прав (403) или вида нет (404)
+            // повторяется при каждом сборе, поэтому такой результат кэшируется, как и неполный.
+            if !u.errors.iter().any(|e| e.error.retryable) {
+                st.resources.put(&connection_id, epoch, &u);
             }
             Ok::<_, AppError>(u)
         };
@@ -285,10 +288,13 @@ mod tests {
         assert_eq!(e.key, "errors.resources.badWindow");
     }
 
-    /// Результат с ошибкой чтения вида workload'ов в кэш не идёт: сбой мог быть разовым,
-    /// следующий запрос читает кластер заново.
-    #[tokio::test]
-    async fn project_usage_with_errors_is_not_cached() {
+    /// Подключение `a` с кластером, где список Deployments отвечает `deployments`; поды
+    /// читаются — `pods` раз; `on_pods` вызывается на каждом чтении подов (сброс подключения
+    /// посреди сбора).
+    fn project_state(
+        deployments: (u16, &'static str),
+        on_pods: impl Fn(&AppState) + Send + 'static,
+    ) -> (tempfile::TempDir, AppState, Arc<AtomicUsize>) {
         let dir = tempfile::tempdir().unwrap();
         let st =
             AppState::new(dir.path(), Arc::new(crate::secrets::MemoryStore::default())).unwrap();
@@ -296,7 +302,7 @@ mod tests {
             .upsert(crate::storage::profile::sample_profile("a"))
             .unwrap();
         let pods = Arc::new(AtomicUsize::new(0));
-        let seen = pods.clone();
+        let (seen, during) = (pods.clone(), st.clone());
         let connected = crate::k8s::pool::test_connected(move |s| {
             let list = |kind: &str| {
                 (
@@ -307,10 +313,11 @@ mod tests {
             match s.path() {
                 "/apis/metrics.k8s.io/v1beta1" => (200, serde_json::json!({})),
                 "/apis/apps/v1/namespaces/team-a/deployments" => {
-                    crate::k8s::testing::status(403, "Forbidden", "no")
+                    crate::k8s::testing::status(deployments.0, deployments.1, "no")
                 }
                 "/api/v1/namespaces/team-a/pods" => {
                     seen.fetch_add(1, Ordering::SeqCst);
+                    on_pods(&during);
                     list("PodList")
                 }
                 p if p.ends_with("/proxy/api/v1/query") => {
@@ -323,18 +330,57 @@ mod tests {
             st.pool
                 .insert_if_current("a", st.pool.generation("a"), connected)
         );
+        (dir, st, pods)
+    }
+
+    /// Два сбора без `refresh`; в каждом ровно одна ошибка (вид Deployment не прочитался).
+    async fn collect_twice(st: &AppState) {
         let sink: Collect<ProjectUsageEvent> = Collect::default();
         for n in 1..=2 {
-            get_project_usage_impl(&st, "a".into(), "team-a".into(), 7, false, sink.clone())
+            get_project_usage_impl(st, "a".into(), "team-a".into(), 7, false, sink.clone())
                 .await
                 .unwrap();
             let events = done(&sink, n).await;
             let ProjectUsageEvent::Done { usage } = &events[n - 1] else {
                 panic!("{events:?}")
             };
-            assert_eq!(usage.errors.len(), 1, "{:?}", usage.errors);
+            let kinds: Vec<_> = usage.errors.iter().map(|e| e.kind).collect();
+            assert!(
+                kinds.contains(&WorkloadKind::Deployment),
+                "{:?}",
+                usage.errors
+            );
         }
+    }
+
+    /// Результат с повторимой ошибкой (500 на списке Deployments) в кэш не идёт: сбой мог быть
+    /// разовым, следующий запрос читает кластер заново.
+    #[tokio::test]
+    async fn project_usage_with_a_retryable_error_is_not_cached() {
+        let (_dir, st, pods) = project_state((500, "InternalError"), |_| {});
+        collect_twice(&st).await;
         assert_eq!(pods.load(Ordering::SeqCst), 2, "с ошибкой — не из кэша");
+        assert!(st.resources.get("a", "team-a", 7).is_none());
+    }
+
+    /// Нет прав на вид (403) повторяется при каждом сборе: такой результат кэшируется.
+    #[tokio::test]
+    async fn project_usage_with_a_forbidden_kind_is_cached() {
+        let (_dir, st, pods) = project_state((403, "Forbidden"), |_| {});
+        collect_twice(&st).await;
+        assert_eq!(pods.load(Ordering::SeqCst), 1, "второй раз — из кэша");
+        assert!(st.resources.get("a", "team-a", 7).is_some());
+    }
+
+    /// Подключение сбросили посреди сбора (новый токен, 401 в другой вкладке, «Подключиться
+    /// заново»): числа, собранные прежним клиентом, в кэш не идут.
+    #[tokio::test]
+    async fn project_usage_collected_across_a_reset_is_not_cached() {
+        let (_dir, st, pods) = project_state((403, "Forbidden"), |st| {
+            st.resources.forget_connection("a");
+        });
+        collect_twice(&st).await;
+        assert_eq!(pods.load(Ordering::SeqCst), 2, "сброс во время сбора");
         assert!(st.resources.get("a", "team-a", 7).is_none());
     }
 }

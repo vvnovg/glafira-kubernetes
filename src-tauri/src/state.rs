@@ -224,7 +224,8 @@ mod tests {
     /// Собранное по проекту в кэше ресурсов подключения.
     fn cache_project(st: &AppState, connection_id: &str, namespace: &str) {
         let usage = crate::resources::project::tests::sample_usage(namespace, 7);
-        st.resources.put(connection_id, &usage);
+        let epoch = st.resources.epoch(connection_id);
+        assert!(st.resources.put(connection_id, epoch, &usage));
     }
 
     #[tokio::test]

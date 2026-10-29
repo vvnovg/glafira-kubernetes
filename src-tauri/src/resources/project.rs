@@ -528,34 +528,59 @@ pub async fn project_usage(
 /// Ключ собранного по проекту: подключение, проект, окно.
 type ProjectKey = (String, String, u32);
 
-/// Собранное по проектам: ключ → (когда, результат), живёт `PROJECT_TTL`.
+/// Собранное по проектам: ключ → (когда, результат), живёт `PROJECT_TTL`. Сброс подключения
+/// (`forget_connection`) меняет его эпоху: результат, сбор которого начался до сброса, в кэш не
+/// попадает (`put`) — как у кэша прав (`AccessCache`).
 #[derive(Default)]
 pub struct ProjectCache {
-    inner: std::sync::Mutex<HashMap<ProjectKey, (Instant, ProjectUsage)>>,
+    inner: std::sync::Mutex<ProjectInner>,
+}
+
+#[derive(Default)]
+struct ProjectInner {
+    results: HashMap<ProjectKey, (Instant, ProjectUsage)>,
+    /// Растёт при каждом `forget_connection`.
+    epochs: HashMap<String, u64>,
 }
 
 impl ProjectCache {
     pub fn get(&self, connection_id: &str, namespace: &str, days: u32) -> Option<ProjectUsage> {
         let inner = self.inner.lock_safe();
-        let (at, u) = inner.get(&(connection_id.into(), namespace.into(), days))?;
+        let (at, u) = inner
+            .results
+            .get(&(connection_id.into(), namespace.into(), days))?;
         (at.elapsed() < PROJECT_TTL).then(|| u.clone())
     }
 
-    pub fn put(&self, connection_id: &str, u: &ProjectUsage) {
+    /// Эпоха подключения: читается до сбора и передаётся в `put`.
+    pub fn epoch(&self, connection_id: &str) -> u64 {
+        let inner = self.inner.lock_safe();
+        inner.epochs.get(connection_id).copied().unwrap_or(0)
+    }
+
+    /// Кладёт результат, если подключение не сбрасывали с эпохи `epoch`. `false` — сбрасывали
+    /// (профиль, токен, отключение, 401), и числа, собранные прежним клиентом, не кэшируются.
+    pub fn put(&self, connection_id: &str, epoch: u64, u: &ProjectUsage) -> bool {
         let mut inner = self.inner.lock_safe();
-        inner.retain(|_, (at, _)| at.elapsed() < PROJECT_TTL);
-        inner.insert(
+        if inner.epochs.get(connection_id).copied().unwrap_or(0) != epoch {
+            return false;
+        }
+        inner
+            .results
+            .retain(|_, (at, _)| at.elapsed() < PROJECT_TTL);
+        inner.results.insert(
             (connection_id.into(), u.namespace.clone(), u.window_days),
             (Instant::now(), u.clone()),
         );
+        true
     }
 
     /// Забывает всё собранное по подключению: после смены профиля или токена, отключения и
     /// удаления прежние числа относятся к другому кластеру или другой учётной записи.
     pub fn forget_connection(&self, connection_id: &str) {
-        self.inner
-            .lock_safe()
-            .retain(|(c, _, _), _| c != connection_id);
+        let mut inner = self.inner.lock_safe();
+        inner.results.retain(|(c, _, _), _| c != connection_id);
+        *inner.epochs.entry(connection_id.into()).or_default() += 1;
     }
 }
 
@@ -913,7 +938,7 @@ pub(crate) mod tests {
     #[test]
     fn cache_keeps_results_for_five_minutes() {
         let c = ProjectCache::default();
-        c.put("c1", &sample_usage("team-a", 7));
+        assert!(c.put("c1", c.epoch("c1"), &sample_usage("team-a", 7)));
         assert!(c.get("c1", "team-a", 7).is_some());
         assert!(c.get("c1", "team-a", 1).is_none());
         assert!(c.get("c2", "team-a", 7).is_none());
@@ -922,14 +947,38 @@ pub(crate) mod tests {
     #[test]
     fn forgetting_a_connection_drops_all_its_results_and_only_them() {
         let c = ProjectCache::default();
-        c.put("c1", &sample_usage("team-a", 7));
-        c.put("c1", &sample_usage("team-a", 1));
-        c.put("c1", &sample_usage("team-b", 7));
-        c.put("c2", &sample_usage("team-a", 7));
+        for (id, ns, days) in [
+            ("c1", "team-a", 7),
+            ("c1", "team-a", 1),
+            ("c1", "team-b", 7),
+            ("c2", "team-a", 7),
+        ] {
+            assert!(c.put(id, c.epoch(id), &sample_usage(ns, days)));
+        }
         c.forget_connection("c1");
         for (ns, days) in [("team-a", 7), ("team-a", 1), ("team-b", 7)] {
             assert!(c.get("c1", ns, days).is_none(), "{ns}, {days}");
         }
         assert!(c.get("c2", "team-a", 7).is_some());
+    }
+
+    /// Сбор начался до сброса подключения: его результат старого клиента в кэш не идёт, а
+    /// сбор после сброса — идёт.
+    #[test]
+    fn a_result_collected_before_the_connection_was_forgotten_is_not_cached() {
+        let c = ProjectCache::default();
+        let epoch = c.epoch("c1");
+        c.forget_connection("c1");
+        assert!(!c.put("c1", epoch, &sample_usage("team-a", 7)));
+        assert!(c.get("c1", "team-a", 7).is_none());
+        assert!(
+            c.put("c1", c.epoch("c1"), &sample_usage("team-a", 7)),
+            "после сброса — с новой эпохи"
+        );
+        assert!(c.get("c1", "team-a", 7).is_some());
+        // Эпоха одного подключения не мешает другому.
+        let other = c.epoch("c2");
+        c.forget_connection("c1");
+        assert!(c.put("c2", other, &sample_usage("team-a", 7)));
     }
 }
