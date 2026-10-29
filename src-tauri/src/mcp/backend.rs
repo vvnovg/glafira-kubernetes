@@ -425,20 +425,26 @@ impl AppBackend {
         }
     }
 
-    /// Объект замечания есть в кластере (защита от придуманных имён). Проект проверяется по
-    /// имени: его самого пользователь без прав на `namespaces` прочитать не может.
+    /// Объект замечания есть в кластере (защита от придуманных имён). Объекты проекта читаются
+    /// через `read_in` (403 сбрасывает кэш прав проекта, как у вкладки); проект — по списку
+    /// проектов пользователя (`project_exists`).
     async fn target_exists(&self, connection_id: &str, t: &Target) -> Result<(), BackendError> {
         let ns = t.namespace.clone().unwrap_or_default();
         let name = t.name.clone().unwrap_or_default();
         let found = match t.kind {
             TargetKind::Cluster => true,
-            TargetKind::Project => is_valid_namespace(&ns),
+            TargetKind::Project => self.project_exists(connection_id, &ns).await?,
             _ => {
-                let t = t.clone();
-                let r = Box::pin(self.state.read(connection_id, |c| async move {
-                    exists(&c.reader(), &t, &ns, &name).await
-                }))
-                .await;
+                let node = t.kind == TargetKind::Node;
+                let (target, in_ns) = (t.clone(), ns.clone());
+                let read = |c: Arc<crate::k8s::pool::Connected>| async move {
+                    exists(&c.reader(), &target, &in_ns, &name).await
+                };
+                let r = if node {
+                    Box::pin(self.state.read(connection_id, read)).await
+                } else {
+                    Box::pin(self.state.read_in(connection_id, &ns, read)).await
+                };
                 match r {
                     Ok(found) => found,
                     Err(e) if e.code == ErrorCode::NotFound => false,
@@ -459,6 +465,22 @@ impl AppBackend {
                     .join("/")
             )))
         }
+    }
+
+    /// Проект есть среди проектов пользователя (как в дереве). Без права на их список (403)
+    /// проверить нельзя — тогда достаточно имени: так открывается проект из ручного списка.
+    async fn project_exists(&self, connection_id: &str, ns: &str) -> Result<bool, BackendError> {
+        if !is_valid_namespace(ns) {
+            return Ok(false);
+        }
+        let profile = self.allowed(connection_id)?;
+        let l = Box::pin(self.state.read(connection_id, |c| async move {
+            crate::k8s::projects::list_projects(&c.reader(), c.info.api_groups.projects, &profile)
+                .await
+        }))
+        .await
+        .map_err(to_backend)?;
+        Ok(l.error.is_some() || l.truncated || l.items.iter().any(|p| p.name == ns))
     }
 
     async fn health_impl(&self, op: mh::HealthOp) -> Result<mh::HealthOutput, BackendError> {
@@ -1060,6 +1082,33 @@ mod tests {
             .unwrap(),
             mh::HealthOutput::Removed
         ));
+    }
+
+    #[tokio::test]
+    async fn project_notes_need_a_project_of_the_user() {
+        let (_d, b) = backend();
+        let ns = |name: &str| serde_json::json!({"metadata": {"name": name}});
+        pooled(&b, "all", move |s| match s.path() {
+            "/api/v1/namespaces" => list(vec![ns("team-a")]),
+            _ => status(404, "NotFound", "not found"),
+        });
+        let session = view("s1", Some("claude-ai"));
+        b.access(&session);
+        let annotate = |project: &str| {
+            b.health(mh::HealthOp::Annotate {
+                connection_id: "all".into(),
+                session: session.clone(),
+                note: note(Target::project(project), "Project note"),
+            })
+        };
+        assert!(annotate("team-a").await.is_ok());
+        let e = annotate("team-b").await.unwrap_err();
+        assert_eq!(e.code, "not_found", "{e:?}");
+        // Без права на список проектов проверить нельзя: достаточно имени.
+        pooled(&b, "all", |_| {
+            status(403, "Forbidden", "namespaces is forbidden")
+        });
+        assert!(annotate("team-b").await.is_ok());
     }
 
     #[tokio::test]
