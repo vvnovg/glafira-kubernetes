@@ -414,7 +414,8 @@ pub fn summarize(
                 risks.extend(r);
                 excess.extend(e);
             }
-            let minus = |a: Option<f64>, b: Option<f64>| Some(a? - b.unwrap_or(0.0));
+            // Нет потребления (метрик по подам не пришло) — резерв неизвестен, а не весь request.
+            let minus = |a: Option<f64>, b: Option<f64>| Some(a? - b?);
             WorkloadResources {
                 kind: *kind,
                 name: name.clone(),
@@ -431,6 +432,28 @@ pub fn summarize(
             }
         })
         .collect()
+}
+
+/// Jobs проекта — по ним поды Job находят свой CronJob. Сбой чтения не прячется: без Jobs
+/// CronJob выглядел бы пустым (0 подов) без объяснения, поэтому он идёт в `errors` видом `Job`,
+/// как и другие виды, которые не прочитались. Если `list_workloads` уже назвал `Job`, второй
+/// записи нет.
+fn jobs_or_error(
+    jobs: AppResult<crate::k8s::read::Listed<Job>>,
+    errors: &mut Vec<KindError>,
+) -> Vec<Job> {
+    match jobs {
+        Ok(l) => l.items,
+        Err(error) => {
+            if !errors.iter().any(|e| e.kind == WorkloadKind::Job) {
+                errors.push(KindError {
+                    kind: WorkloadKind::Job,
+                    error,
+                });
+            }
+            Vec::new()
+        }
+    }
 }
 
 /// Ресурсы проекта по выбранному источнику: история за окно или текущие значения
@@ -453,7 +476,8 @@ pub async fn project_usage(
         r.list::<ResourceQuota>(ns, &all),
     );
     let pods = pods?;
-    let jobs = jobs.map(|l| l.items).unwrap_or_default();
+    let mut errors = list.errors;
+    let jobs = jobs_or_error(jobs, &mut errors);
     let workloads: Vec<(WorkloadKind, String)> = list
         .items
         .iter()
@@ -492,7 +516,7 @@ pub async fn project_usage(
         source,
         source_status: sel.status.clone(),
         workloads: summarize(&workloads, &pods.items, &owner, &usage),
-        errors: list.errors,
+        errors,
         truncated: list.truncated || pods.truncated,
         quotas: quotas
             .map(|l| super::constraints::quota_rooms(&l.items))
@@ -525,11 +549,20 @@ impl ProjectCache {
             (Instant::now(), u.clone()),
         );
     }
+
+    /// Забывает всё собранное по подключению: после смены профиля или токена, отключения и
+    /// удаления прежние числа относятся к другому кластеру или другой учётной записи.
+    pub fn forget_connection(&self, connection_id: &str) {
+        self.inner
+            .lock_safe()
+            .retain(|(c, _, _), _| c != connection_id);
+    }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration as StdDuration;
 
     use super::*;
@@ -697,6 +730,118 @@ mod tests {
         assert!(!u.truncated);
     }
 
+    /// Метрик по подам нет вовсе или нет по ресурсу: резерв неизвестен (`None`), а не весь
+    /// request — иначе такой workload встал бы первым по резерву.
+    #[tokio::test]
+    async fn reserve_is_unknown_where_the_usage_is_unknown() {
+        let r = ReadClient::new(mock_client(cluster).0, StdDuration::from_secs(5));
+        let run = |src: FakeSource| {
+            let r = r.clone();
+            async move {
+                let sel = Selected {
+                    history: Some(Arc::new(src)),
+                    status: source_status(false),
+                };
+                let u = project_usage(&r, &sel, &ApiGroups::default(), "team-a", 7, 1_700_000_000)
+                    .await
+                    .unwrap();
+                u.workloads.into_iter().find(|w| w.name == "web").unwrap()
+            }
+        };
+        let web = run(FakeSource::new(|_, _| Ok(vector(&[])))).await;
+        assert_eq!(web.pods, 2);
+        assert_eq!(web.requests.cpu, Some(4.0));
+        assert_eq!(web.usage, Amounts::default());
+        assert_eq!(web.reserve, Amounts::default(), "{:?}", web.reserve);
+        // Только CPU: резерв по CPU известен, по памяти — нет.
+        let web = run(FakeSource::new(|_, q| {
+            let rows: Vec<(&[(&str, &str)], f64)> =
+                if q.contains("container_cpu_usage_seconds_total") {
+                    vec![(
+                        &[("pod", "web-7d9f8c6b5d-x2x4z"), ("container", "app")],
+                        0.2,
+                    )]
+                } else {
+                    vec![]
+                };
+            Ok(vector(&rows))
+        }))
+        .await;
+        assert!(
+            (web.reserve.cpu.unwrap() - 3.6).abs() < 1e-9,
+            "{:?}",
+            web.reserve
+        );
+        assert_eq!(web.reserve.memory, None);
+    }
+
+    /// Jobs не прочитались, а виды workload'ов — да: сбой не прячется, остальное остаётся.
+    /// Список Jobs читают и `list_workloads`, и сам сбор (поды CronJob): второй запрос к Jobs
+    /// отвечает 500.
+    #[tokio::test]
+    async fn failed_jobs_list_is_reported_and_the_rest_stays() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let seen = requests.clone();
+        let handler = move |s: &crate::k8s::testing::Seen| {
+            if s.path() == "/apis/batch/v1/namespaces/team-a/jobs"
+                && seen.fetch_add(1, Ordering::SeqCst) == 1
+            {
+                return status(500, "InternalError", "boom");
+            }
+            cluster(s)
+        };
+        let r = ReadClient::new(mock_client(handler).0, StdDuration::from_secs(5));
+        let sel = Selected {
+            history: Some(Arc::new(prometheus())),
+            status: source_status(false),
+        };
+        let u = project_usage(&r, &sel, &ApiGroups::default(), "team-a", 7, 1_700_000_000)
+            .await
+            .unwrap();
+        assert_eq!(requests.load(Ordering::SeqCst), 2, "Jobs читают дважды");
+        let jobs: Vec<_> = u
+            .errors
+            .iter()
+            .filter(|e| e.kind == WorkloadKind::Job)
+            .collect();
+        assert_eq!(jobs.len(), 1, "{:?}", u.errors);
+        assert_eq!(
+            u.workloads.iter().find(|w| w.name == "web").unwrap().pods,
+            2
+        );
+        assert!(u.workloads.iter().any(|w| w.name == "report"));
+    }
+
+    #[test]
+    fn jobs_failure_is_listed_once_per_kind() {
+        use crate::k8s::read::Listed;
+        let fail = || Err(crate::k8s::errors::timeout());
+        let mut errors = Vec::new();
+        assert!(jobs_or_error(fail(), &mut errors).is_empty());
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].kind, WorkloadKind::Job);
+        // Вид уже назван в `list_workloads`: второй записи нет.
+        assert!(jobs_or_error(fail(), &mut errors).is_empty());
+        assert_eq!(errors.len(), 1);
+        // Другой вид не мешает.
+        let mut errors = vec![KindError {
+            kind: WorkloadKind::CronJob,
+            error: crate::k8s::errors::timeout(),
+        }];
+        jobs_or_error(fail(), &mut errors);
+        assert_eq!(errors.len(), 2);
+        // Прочитались — ошибок нет, Jobs возвращаются.
+        let job: Job =
+            serde_json::from_value(serde_json::json!({"metadata": {"name": "j"}})).unwrap();
+        let ok = Ok(Listed {
+            items: vec![job],
+            truncated: false,
+        });
+        let mut errors = Vec::new();
+        assert_eq!(jobs_or_error(ok, &mut errors).len(), 1);
+        assert!(errors.is_empty());
+    }
+
     #[test]
     fn pods_map_to_workloads_by_owner_or_by_name() {
         let w = [
@@ -750,12 +895,11 @@ mod tests {
         assert!(risks.is_empty(), "без CPU limit троттлинга нет");
     }
 
-    #[test]
-    fn cache_keeps_results_for_five_minutes() {
-        let c = ProjectCache::default();
-        let u = ProjectUsage {
-            namespace: "team-a".into(),
-            window_days: 7,
+    /// Собранное по проекту без метрик и workload'ов — для проверки кэша.
+    pub(crate) fn sample_usage(namespace: &str, window_days: u32) -> ProjectUsage {
+        ProjectUsage {
+            namespace: namespace.into(),
+            window_days,
             source: crate::metrics::pods::info(),
             source_status: source_status(true),
             workloads: vec![],
@@ -763,10 +907,29 @@ mod tests {
             truncated: false,
             quotas: vec![],
             collected_at_ms: 1,
-        };
-        c.put("c1", &u);
+        }
+    }
+
+    #[test]
+    fn cache_keeps_results_for_five_minutes() {
+        let c = ProjectCache::default();
+        c.put("c1", &sample_usage("team-a", 7));
         assert!(c.get("c1", "team-a", 7).is_some());
         assert!(c.get("c1", "team-a", 1).is_none());
         assert!(c.get("c2", "team-a", 7).is_none());
+    }
+
+    #[test]
+    fn forgetting_a_connection_drops_all_its_results_and_only_them() {
+        let c = ProjectCache::default();
+        c.put("c1", &sample_usage("team-a", 7));
+        c.put("c1", &sample_usage("team-a", 1));
+        c.put("c1", &sample_usage("team-b", 7));
+        c.put("c2", &sample_usage("team-a", 7));
+        c.forget_connection("c1");
+        for (ns, days) in [("team-a", 7), ("team-a", 1), ("team-b", 7)] {
+            assert!(c.get("c1", ns, days).is_none(), "{ns}, {days}");
+        }
+        assert!(c.get("c2", "team-a", 7).is_some());
     }
 }

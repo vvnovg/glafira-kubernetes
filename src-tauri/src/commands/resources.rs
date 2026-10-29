@@ -185,7 +185,12 @@ pub async fn get_project_usage_impl(
             let u = tokio::time::timeout(PROJECT_DEADLINE, Box::pin(read))
                 .await
                 .map_err(|_| crate::k8s::errors::timeout())??;
-            st.resources.put(&connection_id, &u);
+            // Результат с ошибкой (не прочитался вид workload'ов или Jobs) в кэш не идёт: иначе
+            // сбой, который мог быть разовым, держался бы пять минут. Неполный список — без
+            // ошибок — кэшируется.
+            if u.errors.is_empty() {
+                st.resources.put(&connection_id, &u);
+            }
             Ok::<_, AppError>(u)
         };
         tokio::select! {
@@ -278,5 +283,58 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(e.key, "errors.resources.badWindow");
+    }
+
+    /// Результат с ошибкой чтения вида workload'ов в кэш не идёт: сбой мог быть разовым,
+    /// следующий запрос читает кластер заново.
+    #[tokio::test]
+    async fn project_usage_with_errors_is_not_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let st =
+            AppState::new(dir.path(), Arc::new(crate::secrets::MemoryStore::default())).unwrap();
+        st.connections
+            .upsert(crate::storage::profile::sample_profile("a"))
+            .unwrap();
+        let pods = Arc::new(AtomicUsize::new(0));
+        let seen = pods.clone();
+        let connected = crate::k8s::pool::test_connected(move |s| {
+            let list = |kind: &str| {
+                (
+                    200,
+                    serde_json::json!({"apiVersion": "v1", "kind": kind, "metadata": {}, "items": []}),
+                )
+            };
+            match s.path() {
+                "/apis/metrics.k8s.io/v1beta1" => (200, serde_json::json!({})),
+                "/apis/apps/v1/namespaces/team-a/deployments" => {
+                    crate::k8s::testing::status(403, "Forbidden", "no")
+                }
+                "/api/v1/namespaces/team-a/pods" => {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    list("PodList")
+                }
+                p if p.ends_with("/proxy/api/v1/query") => {
+                    crate::k8s::testing::status(404, "NotFound", "no")
+                }
+                _ => list("List"),
+            }
+        });
+        assert!(
+            st.pool
+                .insert_if_current("a", st.pool.generation("a"), connected)
+        );
+        let sink: Collect<ProjectUsageEvent> = Collect::default();
+        for n in 1..=2 {
+            get_project_usage_impl(&st, "a".into(), "team-a".into(), 7, false, sink.clone())
+                .await
+                .unwrap();
+            let events = done(&sink, n).await;
+            let ProjectUsageEvent::Done { usage } = &events[n - 1] else {
+                panic!("{events:?}")
+            };
+            assert_eq!(usage.errors.len(), 1, "{:?}", usage.errors);
+        }
+        assert_eq!(pods.load(Ordering::SeqCst), 2, "с ошибкой — не из кэша");
+        assert!(st.resources.get("a", "team-a", 7).is_none());
     }
 }
