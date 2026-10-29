@@ -60,10 +60,30 @@ export function withValues(c: Change): Change {
   return { ...c, containers: c.containers.filter((x) => set(x.requests) || set(x.limits)) };
 }
 
-/** Есть что отправить: у ресурсов — хотя бы одно поле. */
+/** Предел реплик, как в Rust (`MAX_REPLICAS`). */
+export const MAX_REPLICAS = 1000;
+
+/** Целое число реплик от `min` до `MAX_REPLICAS`: пустое поле (`NaN`) и дробь не годятся. */
+const replicasIn = (n: number | undefined, min: number) => n !== undefined && Number.isInteger(n) && n >= min && n <= MAX_REPLICAS;
+
+/**
+ * Есть что отправить и числа допустимы: у ресурсов — хотя бы одно поле; реплики — целое 0–1000; у HPA максимум —
+ * целое 1–1000, минимум (если задан) — целое от 1 до максимума. Иначе «Проверить» недоступна: пустое поле или
+ * дробь ушли бы по IPC как `null` или дробное число, и вместо ошибки формы пришёл бы сырой текст Tauri.
+ */
 export function hasValues(c: Change): boolean {
-  const w = withValues(c);
-  return w.kind !== "setResources" || w.containers.length > 0;
+  switch (c.kind) {
+    case "setResources": {
+      const w = withValues(c);
+      return w.kind === "setResources" && w.containers.length > 0;
+    }
+    case "scale":
+      return replicasIn(c.replicas, 0);
+    case "setHpaBounds":
+      return replicasIn(c.maxReplicas, 1) && (c.minReplicas === undefined || (replicasIn(c.minReplicas, 1) && c.minReplicas <= c.maxReplicas));
+    default:
+      return true;
+  }
 }
 
 const isCpu = (s: string) => s.toLowerCase().includes("cpu");

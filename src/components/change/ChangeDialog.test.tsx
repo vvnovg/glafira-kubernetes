@@ -77,13 +77,90 @@ describe("ChangeDialog", () => {
     renderWithClient(<ChangeDialog connectionId="c1" initial={scale} onClose={() => {}} />);
     await user.click(screen.getByRole("button", { name: "Проверить" }));
     await user.click(await screen.findByRole("button", { name: "Применить" }));
-    await user.click(await screen.findByRole("button", { name: "Обновить и повторить" }));
+    // После CONFLICT применить против прежней версии нельзя: вместо подтверждения — «Обновить и повторить».
+    const retry = await screen.findByRole("button", { name: "Обновить и повторить" });
+    expect(screen.queryByRole("button", { name: "Применить" })).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toHaveFocus();
+    await user.click(retry);
     expect(screen.queryByRole("button", { name: "Применить" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Проверить" }));
     expect(api.previewChange).toHaveBeenCalledTimes(2);
     await user.clear(screen.getByLabelText("Реплики"));
     await user.type(screen.getByLabelText("Реплики"), "5");
     expect(screen.getByRole("button", { name: "Проверить" })).toBeInTheDocument();
+  });
+
+  it("предпросмотр без версии: «Применить» нет, только «Обновить и повторить»", async () => {
+    vi.mocked(api.previewChange).mockImplementation(async (_id, c) => preview(c, { version: null }));
+    const user = userEvent.setup();
+    const scale: Change = { kind: "scale", namespace: "team-a", workload: web, replicas: 2 };
+    renderWithClient(<ChangeDialog connectionId="c1" initial={scale} onClose={() => {}} />);
+    await user.click(screen.getByRole("button", { name: "Проверить" }));
+    expect(await screen.findByRole("button", { name: "Обновить и повторить" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Применить" })).not.toBeInTheDocument();
+    expect(api.applyChange).not.toHaveBeenCalled();
+  });
+
+  it("правка между двумя предпросмотрами: применяется изменённое с версией второго предпросмотра", async () => {
+    vi.mocked(api.previewChange)
+      .mockImplementationOnce(async (_id, c) => preview(c, { version: "g4" }))
+      .mockImplementationOnce(async (_id, c) => preview(c, { version: "g5" }));
+    vi.mocked(api.applyChange).mockImplementation(async (_id, c) => c);
+    const onClose = vi.fn();
+    const user = userEvent.setup();
+    const scale: Change = { kind: "scale", namespace: "team-a", workload: web, replicas: 2 };
+    renderWithClient(<ChangeDialog connectionId="c1" initial={scale} onClose={onClose} />);
+    await user.click(screen.getByRole("button", { name: "Проверить" }));
+    await screen.findByRole("button", { name: "Применить" });
+    await user.clear(screen.getByLabelText("Реплики"));
+    await user.type(screen.getByLabelText("Реплики"), "3");
+    expect(screen.queryByRole("button", { name: "Применить" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Проверить" }));
+    await user.click(await screen.findByRole("button", { name: "Применить" }));
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(api.applyChange).toHaveBeenCalledTimes(1);
+    expect(api.applyChange).toHaveBeenCalledWith("c1", { ...scale, replicas: 3 }, "g5", null, null, null);
+  });
+
+  it("пустые, дробные и вне границ числа: «Проверить» недоступна", async () => {
+    const user = userEvent.setup();
+    const scale: Change = { kind: "scale", namespace: "team-a", workload: web, replicas: 2 };
+    const { unmount } = renderWithClient(<ChangeDialog connectionId="c1" initial={scale} onClose={() => {}} />);
+    const check = () => screen.getByRole("button", { name: "Проверить" });
+    await waitFor(() => expect(check()).toBeEnabled());
+    await user.clear(screen.getByLabelText("Реплики"));
+    expect(check()).toBeDisabled();
+    await user.type(screen.getByLabelText("Реплики"), "2.5");
+    expect(check()).toBeDisabled();
+    await user.clear(screen.getByLabelText("Реплики"));
+    await user.type(screen.getByLabelText("Реплики"), "3");
+    expect(check()).toBeEnabled();
+    unmount();
+    const hpa: Change = { kind: "setHpaBounds", namespace: "team-a", hpa: "web", minReplicas: 2, maxReplicas: 6 };
+    renderWithClient(<ChangeDialog connectionId="c1" initial={hpa} onClose={() => {}} />);
+    await waitFor(() => expect(check()).toBeEnabled());
+    await user.clear(screen.getByLabelText("Максимум реплик"));
+    expect(check()).toBeDisabled();
+    await user.type(screen.getByLabelText("Максимум реплик"), "1");
+    expect(check(), "минимум 2 больше максимума 1").toBeDisabled();
+    await user.clear(screen.getByLabelText("Минимум реплик"));
+    expect(check(), "минимум не задан").toBeEnabled();
+    expect(api.previewChange).not.toHaveBeenCalled();
+  });
+
+  it("Esc в подтверждении закрывает форму один раз; после «Проверить» с клавиатуры фокус в диалоге", async () => {
+    vi.mocked(api.previewChange).mockImplementation(async (_id, c) => preview(c));
+    const onClose = vi.fn();
+    const user = userEvent.setup();
+    const scale: Change = { kind: "scale", namespace: "team-a", workload: web, replicas: 2 };
+    renderWithClient(<ChangeDialog connectionId="c1" initial={scale} onClose={onClose} />);
+    screen.getByRole("button", { name: "Проверить" }).focus();
+    await user.keyboard("{Enter}");
+    const apply = await screen.findByRole("button", { name: "Применить" });
+    expect(screen.getByRole("dialog")).toHaveFocus();
+    apply.focus();
+    await user.keyboard("{Escape}");
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it("под без контроллера удаляется только с его именем; prod — с именем подключения", async () => {

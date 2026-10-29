@@ -112,6 +112,10 @@ export function openNotes(view: HealthView | undefined): Annotation[] {
   return (view?.annotations ?? []).filter((a) => a.status === "open");
 }
 
+/**
+ * Открытые предложения LLM подключения — их показывают блок объекта и значки (`itemsFor`, `badgeFor`); применённые,
+ * отклонённые и отозванные видны только в списке «Закрытые» раздела «Предложения LLM» экрана «Замечания».
+ */
 export function openProposals(view: HealthView | undefined): Proposal[] {
   return (view?.proposals ?? []).filter((p) => p.status === "open");
 }

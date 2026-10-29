@@ -60,6 +60,14 @@ export function ChangeDialog({ connectionId, initial, hints, notice, proposal, o
     };
   }, []);
 
+  const conflict = (apply.error as AppError | null)?.code === "CONFLICT";
+  // Предпросмотр или конфликт убирают кнопку, на которой был фокус («Проверить», «Применить»): фокус уходил в
+  // body, и Esc с ловушкой Tab переставали работать. Он возвращается диалогу, если его не взяло поле подтверждения.
+  useEffect(() => {
+    const root = rootRef.current;
+    if ((preview || conflict) && root && !root.contains(document.activeElement)) root.focus();
+  }, [preview, conflict]);
+
   const edit = (c: Change) => {
     setChange(c);
     setPreview(null);
@@ -68,12 +76,16 @@ export function ChangeDialog({ connectionId, initial, hints, notice, proposal, o
   };
   const onKeyDown = (e: KeyboardEvent) => {
     if (e.key === "Tab") trapTab(rootRef.current, e);
-    if (e.key === "Escape" && !busy) {
+    // Esc внутри подтверждения уже закрыл форму его «Отменой» (`ConfirmDialog`): второй раз `onClose` не зовётся.
+    const inConfirm = e.target instanceof Element && e.target.closest(".confirm") !== null;
+    if (e.key === "Escape" && !busy && !e.defaultPrevented && !inConfirm) {
       e.stopPropagation();
       onClose();
     }
   };
-  const conflict = (apply.error as AppError | null)?.code === "CONFLICT";
+  // Применить можно только против той версии, которую показал предпросмотр: после CONFLICT или без версии (Rust
+  // ответит CONFLICT) вместо подтверждения — «Обновить и повторить».
+  const stale = conflict || (preview !== null && preview.version == null);
   const title = `${t(`change.title.${change.kind}`)}: ${changeObject(change)}`;
 
   return (
@@ -103,7 +115,7 @@ export function ChangeDialog({ connectionId, initial, hints, notice, proposal, o
             </button>
           </div>
         )}
-        {preview && preview.dryRun.status !== "rejected" && connection && (
+        {preview && preview.dryRun.status !== "rejected" && connection && !stale && (
           <ConfirmDialog
             connection={connection}
             title={t("change.confirmTitle")}
@@ -117,10 +129,15 @@ export function ChangeDialog({ connectionId, initial, hints, notice, proposal, o
           />
         )}
         {apply.error && <ErrorBanner error={apply.error} />}
-        {conflict && (
-          <button type="button" disabled={busy} onClick={() => edit(change)}>
-            {t("change.refreshRetry")}
-          </button>
+        {stale && preview?.dryRun.status !== "rejected" && (
+          <div className="toolbar">
+            <button type="button" className="primary" disabled={busy} onClick={() => edit(change)}>
+              {t("change.refreshRetry")}
+            </button>
+            <button type="button" disabled={busy} onClick={onClose}>
+              {t("common.close")}
+            </button>
+          </div>
         )}
       </div>
     </div>

@@ -7,8 +7,8 @@ import { FindingItem, NoteItem, SeverityMark } from "./parts";
 import { ProposalItem } from "./ProposalItem";
 
 /**
- * Значок объекта: число находок и замечаний уровня «критично» и «предупреждение»; в подсказке — их заголовки.
- * Без `match` — значок всего подключения (пункт «Замечания» в дереве).
+ * Значок объекта: число находок, открытых замечаний и открытых предложений LLM уровня «критично» и
+ * «предупреждение»; в подсказке — их заголовки. Без `match` — значок всего подключения (пункт «Замечания» в дереве).
  */
 export function HealthBadge({ connectionId, match }: { connectionId: string; match?: Match }) {
   const { t } = useTranslation();
