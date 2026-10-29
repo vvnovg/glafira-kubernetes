@@ -562,7 +562,7 @@ export function findRustCyrillic(files) {
 }
 
 /** Главы руководства: тот же список, что `GUIDE_CHAPTERS` в `src/guide/chapters.ts`. */
-export const GUIDE_CHAPTERS = ["getting-started", "connections", "projects-workloads", "pods-logs", "health-check", "llm-mcp", "updates"];
+export const GUIDE_CHAPTERS = ["getting-started", "connections", "projects-workloads", "pods-logs", "health-check", "resources-changes", "llm-mcp", "updates"];
 
 const KEBAB = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 

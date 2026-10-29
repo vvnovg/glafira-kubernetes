@@ -31,6 +31,9 @@ it. The result is kept until the next check.
   not programmed.
 - Quotas, storage and scaling: a quota used at 90% or more, a PVC lost or waiting for a volume for more than 5
   minutes, an HPA at its maximum or unable to scale.
+- Resources over the last day from the metrics history (see [Resources and changes](resources-changes.md#source)):
+  CPU throttling above 25 %, memory near the limit (90 % or more), requests far above the usage. Without a history
+  source these rules do not run and the check is marked partial.
 
 ## Severity and environment {#severity}
 
@@ -47,7 +50,7 @@ On the [[ui:sidebar.findings]] tab, findings are grouped by rule; each has an ex
 project. The object link opens its tab: the workload, the pod, the nodes or the project.
 
 A badge with a number — on the [[ui:sidebar.findings]] item and on projects in the connection tree, in the workload
-and pod tables — shows how many findings and open LLM notes with severity [[ui:health.severity.critical]] or
+and pod tables — shows how many findings, open LLM notes and proposals with severity [[ui:health.severity.critical]] or
 [[ui:health.severity.warning]] concern the object. Point at the badge to see their titles. A pod screen also shows
 the findings of its workload that mention this pod.
 
@@ -67,6 +70,20 @@ formatting or links.
 - [[ui:health.resolve]] and [[ui:health.dismiss]] close a note; closed notes are kept in a collapsed section.
 - [[ui:common.delete]] deletes a note, [[ui:health.deleteAll]] deletes all notes of the connection.
 - A note is deleted automatically 7 days after it was created. A connection can have at most 200 open notes.
+
+## LLM proposals {#proposals}
+
+The assistant can propose a change: container resources, replicas, restart or HPA bounds (not pod deletion). Glafira
+checks a proposal by reading the cluster — the object and the containers exist, the values parse, `limits` are not
+below `requests`; the assistant gets `LimitRange` and quota violations as warnings. Proposals are shown in
+[[ui:health.proposals.title]] and on the object screens.
+
+- [[ui:health.proposals.openForm]] opens the change form with the fields filled in (see
+  [Resources and changes](resources-changes.md#proposals)); after it is applied the proposal is marked "applied" or
+  "applied with edits", and the assistant sees it. On a read-only connection the button is disabled.
+- [[ui:health.proposals.reject]] — with an optional reason the assistant sees; [[ui:health.reopen]] brings the
+  proposal back. The assistant can withdraw its own proposal.
+- An open proposal expires after 7 days; a connection has at most 50 open ones.
 
 ## With an LLM assistant {#with-llm}
 

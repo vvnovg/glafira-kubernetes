@@ -91,6 +91,20 @@ Deckhouse, k3s, RKE2). Platform V DropApp пока работает как Kuber
 `certificate-authority` в kubeconfig). Режим без проверки сертификата небезопасен; организация может его запретить.
 [[ui:connections.form.proxy]]: системный прокси (`HTTPS_PROXY` и `NO_PROXY`), без прокси или явный адрес.
 
+## Метрики {#metrics}
+
+[[ui:connections.form.metrics]] — откуда Glafira берёт историю потребления для вкладок «Ресурсы» и правил проверки
+(см. [Ресурсы и изменения](resources-changes.md#source)). [[ui:connections.form.metricsMode.auto]] ищет Thanos Querier
+у OpenShift и Prometheus через прокси API-сервера у остальных кластеров, а без них берёт текущие значения из
+`metrics.k8s.io`. [[ui:connections.form.metricsMode.thanos]] и [[ui:connections.form.metricsMode.prometheus]] — свой
+адрес (например, tenancy-endpoint, который открыли администраторы): [[ui:connections.form.metricsUrl]],
+[[ui:connections.form.metricsAuth]] (токен подключения, свой токен или без авторизации) и
+[[ui:connections.form.metricsCa]]. Свой источник другим не заменяется: если он не отвечает, вкладки «Ресурсы» говорят
+почему. Адрес `http://` допускается только без авторизации. Свой токен хранится в связке ключей системы. Настройка
+метрик остаётся на этом компьютере: экспорт её не пишет. Проверка подключения показывает шаг
+[[ui:connections.form.step.metrics]]: какой источник выбран и почему не подошли остальные; без источника шаг —
+предупреждение, а не ошибка.
+
 ## Права {#rights}
 
 Glafira работает только с вашими правами. При подключении она проверяет, что вам доступно на уровне кластера
@@ -119,7 +133,8 @@ Glafira работает только с вашими правами. При п�
 ## Окружения и только чтение {#environments}
 
 [[ui:connections.form.environment]] задаёт цвет подключения. Новое подключение `prod` — [[ui:common.readOnly]]:
-Glafira ничего не изменит в кластере через него.
+Glafira ничего не изменит в кластере через него. Если снять флажок, каждое изменение на prod-подключении требует ввести
+его имя (см. [Ресурсы и изменения](resources-changes.md#changes)).
 
 ## Доступ LLM {#llm}
 

@@ -147,9 +147,12 @@ crates/glafira-mcp-kubernetes — инструменты, типы ответо�
 - **Гарантия MCP «только чтение».** Крейты `glafira-mcp-*` не зависят от `kube`, `k8s-openapi`, `reqwest`, `hyper`,
   `tauri` и крейта приложения — `tests/manifest.rs` каждого крейта читает его `Cargo.toml`. Реализация `Backend`
   в `src-tauri/src/mcp/` получает только `ReadClient` (newtype без доступа к внутреннему `kube::Client`: get, list,
-  watch, logs и GET-запросы к Prometheus); тест-«сторожок» ищет по тексту файлов `src-tauri/src/mcp/` и не допускает
-  в них `ops::`, `ClusterWriter`, `kube_client(` (`Connected::kube_client`), `kube::Client`, `kube::Api`,
-  `kube::api::Api<`, `PostParams`, `PatchParams` и `DeleteParams`. Предложения и замечания пишутся только в файл Glafira.
+  watch, logs и GET-запросы к Prometheus); тест-«сторожок» разбирает `use`-деревья и пути файлов `src-tauri/src/mcp/`
+  (псевдонимы, `self`, вложенные группы; комментарии и строки не считаются) и не допускает в них `crate::ops`,
+  `crate::commands::changes`, `ClusterWriter`, `KubeWriter`, `kube_client`, `Api` и `Client` из `kube`, `Patch`,
+  `PostParams`, `PatchParams`, `DeleteParams`, `apply_change`, `preview_change`, `reqwest`, `hyper` и `http`; из `kube`
+  разрешены только `ListParams` и `Status` (поиск подстрок обходился `use kube::{Api, Client}`, этап O3). Предложения и
+  замечания пишутся только в файл Glafira.
 - **Длительные операции** (watch, логи, сбор метрик проекта, проверка) — фоновые tokio-задачи с `SessionId`; данные
   уходят во фронтенд через `tauri::ipc::Channel` батчами (до 200 элементов или раз в 100 мс; начальный снимок `Reset` уходит одним сообщением и бывает больше); отмена —
   `stop_session(id)` через `CancellationToken`.
@@ -158,7 +161,9 @@ crates/glafira-mcp-kubernetes — инструменты, типы ответо�
   открыто, открывает его сам (`AppState::read`, как вкладка, с теми же проверками политики); если для этого нужен вход,
   вызов получает ошибку, а вход человек выполняет в окне. Тексты ошибок с данными профиля (адрес API-сервера и прокси,
   команда exec-плагина, ответ OAuth-сервера, имя пользователя из 403) модель не получает: код остаётся, а текст
-  заменяется фиксированной английской фразой, подробности видит только человек (§10.7).
+  заменяется фиксированной английской фразой, подробности видит только человек (§10.7). С этапа O3 — по списку
+  разрешённых ключей (`LLM_TEXT_KEYS` в `mcp/map.rs`, не длиннее 500 символов): текст ошибки с другим ключом модель
+  получает общей фразой «The operation failed; the user can see the details in Glafira».
 - **Таймауты:** запрос — 30 с, подключение — 10 с (настраиваются в профиле); у каждой сетевой операции есть таймаут
   и отмена, UI не блокируется. Долгие потоки (watch, follow логов) защищает таймаут чтения клиента — 295 с без единого
   байта: соединение, умершее после сна, смены Wi-Fi или VPN, обрывается, а не висит молча (TCP keepalive у `kube`
@@ -379,7 +384,8 @@ oc. В тексте отказа — только имя ключа: значе�
 4. discovery: платформа и дистрибутив (§4.3), версия (`ClusterVersion`, если читается, иначе `/version`), найдены ли
    группы OpenShift и Gateway API;
 5. проекты: число доступных;
-6. метрики: какой источник выбран бы в режиме `auto` и почему отвергнуты остальные (§7.1).
+6. метрики: какой источник выбран бы в режиме `auto` и почему отвергнуты остальные (§7.1). Шаг — предупреждение:
+   без источника метрик подключение работает, итог проверки — успех.
 
 ### 5.4 Права (RBAC)
 
@@ -577,6 +583,11 @@ workloads, событий, PVC, нод, обзора проекта и дере�
 
 Явно выбранный источник не заменяется другим: при ошибке — `METRICS_UNAVAILABLE` с причиной.
 
+Настройка источника — локальное поле профиля (`metrics`): экспорт её не пишет, импорт нового подключения даёт `auto`,
+обновление существующего сохраняет её. Свой адрес `http://` допускается только без авторизации; свой токен — в
+keychain, ключ `<id>/metricsToken`. Выбор живёт в подключении 5 минут; ответы 403 при пробах не сбрасывают кэш прав
+проекта.
+
 ### 7.2 Сбор статистики
 
 - **Объект:** workload (все его поды за окно, включая уже удалённые) — по каждому контейнеру; init-контейнеры
@@ -765,7 +776,7 @@ request и limit, пометки и нарушения ограничений; �
 
 | `kind` | Поля | Как применяется | Особенности |
 |---|---|---|---|
-| `setResources` | `namespace`, `workload { kind, name }`, `containers [{ name, requests { cpu?, memory? }, limits { cpu?, memory? } }]` — значение quantity-строкой или `null` (убрать), отсутствие поля — не менять | strategic merge patch по имени контейнера; для DeploymentConfig — JSON patch по индексу контейнера с проверкой `resourceVersion` | `limits ≥ requests`; ошибки `LimitRange` и квоты видны на dry-run |
+| `setResources` | `namespace`, `workload { kind, name }`, `containers [{ name, requests { cpu?, memory? }, limits { cpu?, memory? } }]` — значение quantity-строкой или `null` (убрать), отсутствие поля — не менять | strategic merge patch по имени контейнера; для DeploymentConfig — JSON patch по индексу контейнера с проверкой `resourceVersion` | `limits ≥ requests`; ошибки `LimitRange` и квоты видны на dry-run; недоступно для Job (шаблон неизменяем) |
 | `scale` | `namespace`, `workload`, `replicas` (0–1000) | subresource `scale` | Deployment, StatefulSet, DeploymentConfig; у workload'а с HPA — предупреждение «HPA перезапишет число реплик» |
 | `rolloutRestart` | `namespace`, `workload` | аннотация `kubectl.kubernetes.io/restartedAt` в шаблоне; для DeploymentConfig — `instantiate` | недоступно для Job и CronJob |
 | `setHpaBounds` | `namespace`, `hpa`, `minReplicas?`, `maxReplicas` | merge patch | `1 ≤ min ≤ max` |
@@ -778,8 +789,12 @@ request и limit, пометки и нарушения ограничений; �
    - профиль «только чтение» → `READ_ONLY` (никакое подтверждение не помогает);
    - окружение `prod` и `confirm` ≠ имя подключения → `CONFIRMATION_REQUIRED`;
    - `deletePod` пода без контроллера — дополнительно ввод имени пода.
-3. Запрос с `fieldManager=glafira-kubernetes` и `expectedResourceVersion` из предпросмотра; объект изменился —
-   `CONFLICT` с кнопкой «Обновить и повторить».
+3. Запрос с `fieldManager=glafira-kubernetes` и версией из предпросмотра: `metadata.generation` (у пода — `uid`), а не
+   `resourceVersion` — идущая выкладка меняет статус, но не spec. Применение перечитывает объект; другая версия —
+   `CONFLICT` с кнопкой «Обновить и повторить». Значения пишутся абсолютными, как у `kubectl`; `resourceVersion`
+   прочитанного объекта требует только JSON patch DeploymentConfig (адресует контейнер по индексу). Ответ 409 из-за
+   обновления статуса между чтением и записью — повтор до 3 раз (и у dry-run предпросмотра). У DELETE dry-run и
+   предусловие `uid` передаются в теле `DeleteOptions`: строку запроса API-сервер у DELETE с телом не читает.
 4. Запись в журнал приложения (подключение, вид, объект, исход; без значений env и конфигурации).
 5. Если передан `proposalId` — отметка «применено» (§10.5).
 
@@ -860,8 +875,8 @@ request и limit, пометки и нарушения ограничений; �
 | `list_events` | metadata | `connectionId`, `namespace`, `object? { kind, name }`, `type?` (`Warning`), `sinceSeconds = 3600` (≤ 86400), `limit` | `{ items [{ lastSeen, type, reason, object, message, count }], truncated }` |
 | `get_quotas` | metadata | `connectionId`, `namespace` | ResourceQuota (использовано / лимит), LimitRange |
 | `get_network` | metadata | `connectionId`, `namespace`, `filter?` | Services (тип, порты, готовые endpoints), Routes (хост, путь, сервис, TLS-терминация, `admitted`, срок встроенного сертификата), Ingress (класс, хосты, пути → сервис и порт, TLS-хосты и имя Secret, адрес), HTTPRoute и GRPCRoute (хосты, родители с условиями, бэкенды), Gateway проекта (класс, listeners, `programmed`); виды без группы API в кластере не возвращаются |
-| `get_resource_usage` | metadata | `connectionId`, `namespace`, `workload { kind, name }`, `windowDays = 7` (1–30) | статистика §7.2 по контейнерам, ряды (≤ 200 точек), источник, окно, покрытие |
-| `recommend_resources` | metadata | `connectionId`, `namespace`, `workload`, `windowDays = 7` | результат движка §7.3 |
+| `get_resource_usage` | metadata | `connectionId`, `namespace`, `workload { kind, name }`, `windowDays = 7` (1, 7, 14 или 30) | статистика §7.2 по контейнерам, ряды (≤ 200 точек), источник, окно, покрытие |
+| `recommend_resources` | metadata | `connectionId`, `namespace`, `workload`, `windowDays = 7` (1, 7, 14 или 30) | результат движка §7.3 |
 | `observe_workload` | metadata | `connectionId`, `namespace`, `workload`, `durationSeconds = 30` (10–50) | хронология: `replicasChanged`, `podAdded`, `podRemoved`, `podReady`, `podNotReady`, `containerRestarted { reason, exitCode }`, `rolloutProgress`, `warningEvent { reason, message }`; не больше 500 событий; `summary` |
 | `get_pod_logs` | logs | `connectionId`, `namespace`, `pod`, `container?`, `previous = false`, `sinceSeconds?` (≤ 7 дней) или `sinceTime?`, `tailLines = 200` (≤ 2000), `filter? { contains? \| regex?, caseSensitive = false }` | `{ lines [{ ts, text }], scanned, returned, masked, truncated }` |
 | `search_workload_logs` | logs | `connectionId`, `namespace`, `workload`, `filter`, `sinceSeconds = 3600` (≤ 86400), `maxMatches = 200`, `contextLines = 0` (≤ 5) | совпадения по подам и контейнерам, `scanned`, `masked`, `truncated` |
@@ -1093,13 +1108,17 @@ keychain: сервис glafira-kubernetes, ключи <connection-id>/<field>
   ноде, поэтому образы не скачиваются. В O2 — ещё `it_health` и `it_mcp` на том же kind: минимальные CRD Route и Gateway
   API (`dev/kind/crds.yaml`, схема без проверки полей, без контроллеров и без групп `config.openshift.io` — платформа
   остаётся `kubernetes`; статус HTTPRoute пишет `setup.sh`) и объекты для правил (`dev/kind/health.yaml`); правила
-  ClusterOperator, ClusterVersion и MachineConfigPool проверяются unit-тестами на снимках и смоуком на OpenShift.
+  ClusterOperator, ClusterVersion и MachineConfigPool проверяются unit-тестами на снимках и смоуком на OpenShift. В O3
+  — ещё `it_ops` (каждый вид `Change` с dry-run, `CONFLICT`, стражи) и `it_metrics` на том же kind
+  (`dev/kind/ops.yaml`, `dev/kind/metrics.yaml`): образов с HTTP-сервером на ноде нет, поэтому поддельный Prometheus —
+  HTTP-сервер самого теста на рабочей машине; прокси API-сервера ведёт только на адреса подов, и за Service
+  `monitoring/prometheus-k8s` стоит под-заглушка с hostNetwork, чей порт `setup.sh` перенаправляет (DNAT в ноде) на
+  рабочую машину. kube-state-metrics, ingress-nginx и kube-prometheus на стенде не ставятся: настоящие метрики и
+  DeploymentConfig проверяет смоук на OpenShift.
 - **MCP-крейты:** фейковый `Backend`, MCP-клиент rmcp — список инструментов и аннотации, сторожок имён, уровни
   доступа (`not_allowed`, `logs_disabled`), `llmNamespaces`, маскировка в ответах, усечение до 100 КБ, лимиты,
   рукопожатие, журнал без содержимого; `tests/manifest.rs` каждого крейта — нет зависимости от `kube`, `k8s-openapi`,
-  `reqwest`, `hyper`, `tauri` и приложения; сторожок «`src-tauri/src/mcp/`» — поиск по тексту файлов: нет `ops::`,
-  `ClusterWriter`, `kube_client(`, `kube::Client`, `kube::Api`, `kube::api::Api<`, `PostParams`, `PatchParams`,
-  `DeleteParams`.
+  `reqwest`, `hyper`, `tauri` и приложения; сторожок «`src-tauri/src/mcp/`» — разбор `use`-деревьев и путей (§4.1).
 - **Фронтенд:** Vitest + Testing Library — формы подключения и импорта kubeconfig, дерево, вкладки проекта,
   workload'а и пода, логи, «Ресурсы» (таблица, итог, уверенность, переход к форме), формы изменений с diff и
   подтверждением, «Замечания», MCP-настройки; IPC мокается.
