@@ -13,6 +13,7 @@ pub mod logging;
 pub mod logs;
 pub mod mcp;
 pub mod metrics;
+pub mod ops;
 pub mod platform;
 pub mod policy;
 pub mod product;
@@ -162,6 +163,8 @@ pub fn run() {
             commands::resources::get_pod_usage,
             commands::resources::recommend_resources,
             commands::resources::get_project_usage,
+            commands::changes::preview_change,
+            commands::changes::apply_change,
             commands::health::run_health_check,
             commands::health::get_health,
             commands::health::set_finding_ignored,

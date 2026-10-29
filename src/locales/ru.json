@@ -214,7 +214,12 @@
       "hpaBounds": "Границы HPA: 1 ≤ minReplicas ≤ maxReplicas ≤ {{max}}",
       "noContainer": "В шаблоне подов нет контейнера {{container}}",
       "limitRangeMin": "Контейнер {{container}}: {{field}} ниже минимума LimitRange {{limit}}. API-сервер не проверяет шаблон, и поды новой ревизии не создадутся",
-      "limitRangeMax": "Контейнер {{container}}: {{field}} выше максимума LimitRange {{limit}}. API-сервер не проверяет шаблон, и поды новой ревизии не создадутся"
+      "limitRangeMax": "Контейнер {{container}}: {{field}} выше максимума LimitRange {{limit}}. API-сервер не проверяет шаблон, и поды новой ревизии не создадутся",
+      "resourcesKind": "Ресурсы Job изменить нельзя: шаблон его подов неизменяем"
+    },
+    "ops": {
+      "admissionDenied": "Кластер отклонил изменение: {{message}}",
+      "changed": "Объект изменился после предпросмотра: обновите и повторите"
     }
   },
   "messages": {

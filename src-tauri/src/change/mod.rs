@@ -213,7 +213,17 @@ pub fn validate_form(c: &Change) -> AppResult<()> {
         crate::k8s::read::check_name(&w.name)?;
     }
     match c {
-        Change::SetResources { containers, .. } => {
+        Change::SetResources {
+            workload,
+            containers,
+            ..
+        } => {
+            if workload.kind == WorkloadKind::Job {
+                return Err(invalid(crate::ltext!(
+                    "errors.change.resourcesKind",
+                    "The resources of a Job cannot be changed: its pod template is immutable"
+                )));
+            }
             if containers.is_empty() || containers.len() > MAX_CONTAINERS {
                 return Err(invalid(crate::ltext!(
                     "errors.change.containersCount",
@@ -532,6 +542,10 @@ mod tests {
             key(set(json!([{"name": "a/b", "requests": {"cpu": "1"}}]))).as_deref(),
             Some("errors.k8s.badName")
         );
+        let job: Change = serde_json::from_value(json!({"kind": "setResources", "namespace": "team-a",
+            "workload": {"kind": "Job", "name": "once"}, "containers": [{"name": "app", "requests": {"cpu": "1"}}]}))
+        .unwrap();
+        assert_eq!(key(job).as_deref(), Some("errors.change.resourcesKind"));
         let scale = |kind: WorkloadKind, replicas| Change::Scale {
             namespace: "team-a".into(),
             workload: WorkloadRef {

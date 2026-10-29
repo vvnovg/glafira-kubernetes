@@ -72,6 +72,12 @@ impl Connected {
         ReadClient::new(self.client.clone(), self.timeout)
     }
 
+    /// Запись в кластер — только для `ops` (изменяющие операции после стражей). MCP-шлюз её не
+    /// берёт (сторожок `mcp::guard`).
+    pub fn writer(&self) -> crate::ops::KubeWriter {
+        crate::ops::KubeWriter::new(self.client.clone(), self.timeout)
+    }
+
     /// Учётные данные истекают в ближайшую минуту: пора запустить плагин снова.
     pub fn expiring(&self, now: SystemTime) -> bool {
         self.expires_at

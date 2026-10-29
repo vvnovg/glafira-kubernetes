@@ -214,7 +214,12 @@
       "hpaBounds": "HPA bounds must be 1 ≤ minReplicas ≤ maxReplicas ≤ {{max}}",
       "noContainer": "There is no container {{container}} in the pod template",
       "limitRangeMin": "Container {{container}}: the {{field}} is below the LimitRange minimum {{limit}}; the API server does not check the template, so the pods of the new revision would be rejected",
-      "limitRangeMax": "Container {{container}}: the {{field}} is above the LimitRange maximum {{limit}}; the API server does not check the template, so the pods of the new revision would be rejected"
+      "limitRangeMax": "Container {{container}}: the {{field}} is above the LimitRange maximum {{limit}}; the API server does not check the template, so the pods of the new revision would be rejected",
+      "resourcesKind": "The resources of a Job cannot be changed: its pod template is immutable"
+    },
+    "ops": {
+      "admissionDenied": "The cluster rejected the change: {{message}}",
+      "changed": "The object has changed since the preview: refresh and retry"
     }
   },
   "messages": {
