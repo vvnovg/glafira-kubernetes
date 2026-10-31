@@ -278,14 +278,17 @@ crates/glafira-mcp-kubernetes — инструменты, типы ответо�
   пользователю список проектов (обычный Kubernetes без прав на `namespaces`);
 - **метрики:** `auto` (по умолчанию), свой URL Thanos, свой URL Prometheus; авторизация источника — токен
   подключения, отдельный bearer-токен или без авторизации; CA источника — как у подключения или свой;
-- **LLM:** уровень доступа `llmAccess` (`off` / `metadata` / `logs`, по умолчанию `off`; до O4 — `off` и `metadata`,
-  незнакомое значение читается как `off`), проекты для LLM (`llmNamespaces`: `null` — «все доступные», по умолчанию,
-  или список; пустой список — ни один проект LLM не виден), список имён полей для маскировки (с O4; до этого —
-  стандартный список крейта, §10.3);
+- **LLM:** уровень доступа `llmAccess` (`off` / `metadata` / `logs`, по умолчанию `off`; незнакомое значение
+  читается как `off`; при политике `mcpLogsEnabled = false` уровень `logs` действует как `metadata`, сохранённое
+  значение не меняется), проекты для LLM (`llmNamespaces`: `null` — «все доступные», по умолчанию, или список; пустой
+  список — ни один проект LLM не виден), список имён полей для маскировки (`llmMaskFields`: `null` — стандартный
+  список крейта, иначе свой, он заменяет стандартный; не больше 200 имён по 64 символа, повторы без учёта регистра
+  убираются; действует и проверяется только на уровне `logs`, §10.3);
 - таймауты: запрос (30 с), подключение (10 с).
 
-Поля `llmAccess`, `llmNamespaces`, папка и порядок — локальные: экспорт их не пишет, импорт не переносит (как
-`llmAccess` в Kafka G1), чтобы чужой файл не мог незаметно открыть кластер модели.
+Поля `llmAccess`, `llmNamespaces`, `llmMaskFields`, папка и порядок — локальные: экспорт их не пишет, импорт не
+переносит (как `llmAccess` в Kafka G1), чтобы чужой файл не мог незаметно открыть кластер модели или ослабить
+маскировку.
 
 ### 5.2 Аутентификация
 
@@ -861,24 +864,35 @@ request и limit, пометки и нарушения ограничений; �
 | никогда, на любом уровне | `data`/`stringData` Secret, `spec.tls.key` Route, токены, kubeconfig, адрес и параметры аутентификации профиля, настройки и журнал Glafira |
 
 **Политика:** `mcpEnabled = false` запрещает MCP целиком (как в Kafka-версии); `mcpLogsEnabled = false` — уровень
-`logs` недоступен в форме, подключения с ним работают как `metadata`, инструменты логов отвечают `logs_disabled`.
+`logs` недоступен в форме, подключения с ним работают как `metadata` (`list_connections` показывает `metadata`),
+инструменты логов отвечают `logs_disabled`. У подключения с уровнем `metadata` инструменты логов отвечают
+`logs_not_allowed` с просьбой к человеку выбрать «Метаданные и логи». Значения env на уровне `logs` — литералы из
+спецификации и ключи ConfigMap по `configMapKeyRef` (каждый ConfigMap читается один раз за вызов; не прочитался,
+нет ключа или данные двоичные — причина в `valueError`); у `envFrom` значений нет. Значение маскируется целиком и
+режется до 4 КБ (`valueCut: true`), чтобы один большой литерал не сделал ответ больше 100 КБ.
 
 ### 10.3 Маскировка
 
 Чистые функции крейта `glafira-mcp-kubernetes/src/mask.rs`, применяются к ответу до его сборки:
-- **имена полей** из списка подключения (по умолчанию: `password`, `passwd`, `secret`, `token`, `apikey`, `api_key`,
-  `api-key`, `credentials`, `private`, `authorization`, без учёта регистра; до O4 — только этот список, константой
-  крейта): значение env, ключа ConfigMap,
-  аннотации, флага `--name=value` в `command`/`args` и пары `name=value` / `"name": value` в строке лога;
+- **имена полей** из списка подключения (на уровне `logs` — `llmMaskFields`, иначе и по умолчанию стандартный:
+  `password`, `passwd`, `secret`, `token`, `apikey`, `api_key`, `api-key`, `credentials`, `private`, `authorization`;
+  совпадение — вхождением, без учёта регистра): значение env (у имени переменной или ключа ConfigMap из списка —
+  `***` целиком, иначе шаблоны и пары; затем до 4 КБ, `valueCut`), аннотации, флага `--name=value` в `command`/`args` и пары `name=value` / `"name": value` в строке лога;
 - **встроенные шаблоны:** JWT, `Bearer <токен>`, `user:pass@` в URL, email, номера карт с проверкой Луна, ключи
   `AKIA…`, PEM-блоки приватных ключей, токены `sha256~…`. Только они, без пар `имя=значение` (в прозе такие пары
   портят диагностику: «Failed to get secret: not found»), применяются ещё к тексту из кластера: сообщениям событий
   и условий, сообщениям состояний контейнеров, образам и строкам проб, сообщениям Route, HTTPRoute, GRPCRoute,
   ClusterOperator и ClusterVersion, сообщениям `warningEvent` в `observe_workload`, а у `health_check` — `title`,
   `details` и строкам в `params` находок;
-- замаскированное значение — `***`; счётчик `masked` в ответе в O2 есть у `describe_workload` и `describe_pod` (число
-  замен; у инструментов логов O4 свой счётчик `masked`), в остальных ответах шаблоны работают молча;
+- замаскированное значение — `***`; счётчик `masked` (число замен) есть у `describe_workload` и `describe_pod` и у
+  инструментов логов (замены в строках ответа и строках контекста), в остальных ответах шаблоны работают молча;
 - фильтры логов применяются к немаскированным данным (поиск по значению из ошибки работает), как в Kafka G4.
+  Поэтому маскировка прячет значения от чтения, но не от намеренного подбора через фильтр (попадания видны в
+  `matches`, попытки остаются в журнале MCP: фильтр — в аргументах вызова); логи, секреты которых должны остаться
+  скрытыми от модели, не открывают;
+- строка лога маскируется целиком, как её прочитал бэкенд (до 8 КБ; остаток длинной строки читается и отбрасывается,
+  его байты идут в бюджет 50 МБ), и только затем обрезается до 4 КБ (`cut: true`): секрет на границе обрезки не
+  остаётся наполовину открытым.
 
 ### 10.4 Инструменты
 
@@ -904,8 +918,8 @@ request и limit, пометки и нарушения ограничений; �
 | `get_resource_usage` | metadata | `connectionId`, `namespace`, `workload { kind, name }`, `windowDays = 7` (1, 7, 14 или 30) | статистика §7.2 по контейнерам, ряды (≤ 200 точек), источник, окно, покрытие |
 | `recommend_resources` | metadata | `connectionId`, `namespace`, `workload`, `windowDays = 7` (1, 7, 14 или 30) | результат движка §7.3 |
 | `observe_workload` | metadata | `connectionId`, `namespace`, `workload`, `durationSeconds = 30` (10–50) | хронология: `replicasChanged`, `podAdded`, `podRemoved`, `podReady`, `podNotReady`, `containerRestarted { reason, exitCode }`, `rolloutProgress`, `warningEvent { reason, message }`; не больше 500 событий; `summary` |
-| `get_pod_logs` | logs | `connectionId`, `namespace`, `pod`, `container?`, `previous = false`, `sinceSeconds?` (≤ 7 дней) или `sinceTime?`, `tailLines = 200` (≤ 2000), `filter? { contains? \| regex?, caseSensitive = false }` | `{ lines [{ ts, text }], scanned, returned, masked, truncated }` |
-| `search_workload_logs` | logs | `connectionId`, `namespace`, `workload`, `filter`, `sinceSeconds = 3600` (≤ 86400), `maxMatches = 200`, `contextLines = 0` (≤ 5) | совпадения по подам и контейнерам, `scanned`, `masked`, `truncated` |
+| `get_pod_logs` | logs | `connectionId`, `namespace`, `pod`, `container?`, `previous = false`, `sinceSeconds?` (≤ 7 дней) или `sinceTime?`, `tailLines = 200` (≤ 2000), `filter? { contains? \| regex?, caseSensitive = false }` | `{ pod, container, lines [{ ts, text, cut? }], scanned, returned, masked, truncated, hint? }` |
+| `search_workload_logs` | logs | `connectionId`, `namespace`, `workload`, `filter`, `sinceSeconds = 3600` (≤ 86400), `maxMatches = 200` (≤ 1000), `contextLines = 0` (≤ 5) | `{ matches [{ pod, container, ts, text, cut?, before?, after? }], pods, podsTotal, scanned, returned, masked, truncated, stopped?, errors?, hint? }` |
 | `health_check` | metadata | `connectionId`, `namespaces?`, `maxAgeSeconds = 300`, `runId?`, `ruleIds?`, `minSeverity`, `includeIgnored = true`, `offset`, `limit` | как в Kafka G2: `runId`, `incomplete`, `reused`, `scope`, `summary`, `findings` с `ignored`, `nextOffset?` |
 | `annotate` | metadata | `connectionId`, `target`, `severity`, `title`, `body`, `relatedRuleId?` | `{ annotationId, created }` |
 | `list_annotations` | metadata | `connectionId`, `status = open` | `{ items [...] }` |
@@ -926,9 +940,13 @@ request и limit, пометки и нарушения ограничений; �
   только затем модели отдаются первые 20; в тексте находки в приложении — тоже первые 20 и «…»); если
   причин неполноты не осталось, находка отбрасывается и `incomplete` сбрасывается. `scope.pods` и `scope.nodes`
   остаются итогами всей проверки: число по проекту его не раскрывает;
-- логи: строка длиннее 4 КБ обрезается; `search_workload_logs` просматривает не больше 20 подов, 50 МБ и 40 с
-  (запрос логов с `limitBytes`); `get_pod_logs` и `search_workload_logs` — одна длительная операция на сессию, общая
-  с `observe_workload`;
+- логи: строка длиннее 4 КБ обрезается; `search_workload_logs` просматривает не больше 20 подов (по имени), 50 МБ и
+  40 с (запрос логов с `limitBytes` — остаток бюджета; бюджет считает байты, реально прочитанные, включая
+  отброшенные хвосты длинных строк) — `stopped: pods | bytes | time`; читаются текущие экземпляры
+  обычных контейнеров (прошлый запуск — `get_pod_logs` с `previous`), контейнер, лог которого не прочитался, — в
+  `errors`; `get_pod_logs` без `container` берёт контейнер по умолчанию (аннотация
+  `kubectl.kubernetes.io/default-container`, иначе первый), не помещается в 100 КБ — отбрасываются самые старые
+  строки; `get_pod_logs` и `search_workload_logs` — одна длительная операция на сессию, общая с `observe_workload`;
 - `get_resource_usage` и `recommend_resources` без источника истории отвечают по `metrics.k8s.io` с
   `confidence: "low"`, а при недоступности всех источников — ошибкой `metrics_unavailable` с причинами;
 - замечания и предложения: `target` сверяется с кластером (объект существует), лимиты 200 открытых замечаний и 50
@@ -979,7 +997,7 @@ request и limit, пометки и нарушения ограничений; �
   исходом, кодом, размером и длительностью; у логов — число просмотренных, отданных и замаскированных строк; тексты
   замечаний, обоснования предложений, содержимое ответов и логов не пишутся.
 - коды ошибок инструментов: `not_allowed`, `client_not_approved`, `client_rejected`, `mcp_disabled`, `logs_disabled`,
-  `rate_limited`, `invalid_argument`, `not_found`, `busy`, `response_too_large`, `metrics_unavailable`,
+  `logs_not_allowed`, `rate_limited`, `invalid_argument`, `not_found`, `busy`, `response_too_large`, `metrics_unavailable`,
   `limit_reached`, `check_in_progress_timeout`, `internal` и коды приложения из `ErrorCode` (`SESSION_EXPIRED`,
   `FORBIDDEN`, `TIMEOUT`, `CONNECTION_FAILED`, …) с английским текстом, как в Kafka G1.
 - тексты с данными профиля модель не получает: у `errors.exec.*`, `errors.oauth.*`, `errors.connections.*` и

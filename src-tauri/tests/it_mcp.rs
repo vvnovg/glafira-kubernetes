@@ -130,6 +130,20 @@ async fn the_gateway_reads_the_stand_within_the_llm_scope() {
         "{env}"
     );
     assert!(v["masked"].as_u64().is_some());
+    assert!(
+        env.as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e.get("value").is_none()),
+        "уровень metadata — без значений env: {env}"
+    );
+    let msg = err(&call(
+        &c,
+        "get_pod_logs",
+        json!({"connectionId": id, "namespace": NS, "pod": "web-1"}),
+    )
+    .await);
+    assert!(msg.starts_with("logs_not_allowed:"), "{msg}");
 
     let v = ok(call(
         &c,
@@ -293,4 +307,123 @@ async fn the_gateway_reads_the_stand_within_the_llm_scope() {
         .await
         .expect("сервер остановился");
     assert!(files::read(dir.path()).is_none(), "mcp.json удалён");
+}
+
+/// Уровень logs: значения env и ConfigMap, логи подов — после маскировки; пароль из лога и
+/// значение Secret в ответы не попадают.
+#[tokio::test]
+async fn the_gateway_reads_logs_on_the_logs_level() {
+    let Some(path) = kubeconfig_path() else {
+        return;
+    };
+    let (mut profile, secrets) = import(&path, "admin");
+    profile.llm_access = LlmAccess::Logs;
+    profile.llm_namespaces = Some(vec![NS.into()]);
+    let id = profile.id.clone();
+    let dir = tempfile::tempdir().unwrap();
+    let st = AppState::new(dir.path(), secrets).unwrap();
+    st.connections.upsert(profile).unwrap();
+    st.settings.remember_client("rmcp", "it", 0).unwrap();
+    st.settings.set_mcp_enabled(true).unwrap();
+    let ctl = McpController::new(st.clone(), dir.path());
+    ctl.apply().await;
+    let f = files::read(dir.path()).unwrap();
+    let mut s = glafira_mcp_core::endpoint::connect(&f.endpoint)
+        .await
+        .unwrap();
+    glafira_mcp_core::handshake::client(&mut s, &f.token)
+        .await
+        .unwrap();
+    let c = ().serve(s).await.unwrap();
+    const LOG_SECRET: &str = "hunter2-kind";
+
+    let v = ok(call(
+        &c,
+        "describe_workload",
+        json!({"connectionId": id, "namespace": NS, "kind": "Deployment", "name": "web"}),
+    )
+    .await);
+    let env = v["containers"][0]["env"].as_array().unwrap().clone();
+    let by = |n: &str| env.iter().find(|e| e["name"] == n).unwrap().clone();
+    assert_eq!(by("LOG_LEVEL")["value"], "debug", "{env:?}");
+    assert!(by("DB_PASSWORD").get("value").is_none(), "{env:?}");
+
+    // Прошлый запуск crash: строка с паролем находится по немаскированному тексту.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
+    let line = loop {
+        let pods = ok(call(
+            &c,
+            "list_pods",
+            json!({"connectionId": id, "namespace": NS, "workload": {"kind": "Deployment", "name": "crash"}}),
+        )
+        .await);
+        let pod = pods["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["restarts"].as_u64().unwrap_or(0) > 0)
+            .map(|p| p["name"].as_str().unwrap().to_string());
+        if let Some(pod) = pod {
+            let r = call(
+                &c,
+                "get_pod_logs",
+                json!({"connectionId": id, "namespace": NS, "pod": pod, "previous": true,
+                    "filter": {"contains": LOG_SECRET}}),
+            )
+            .await;
+            if r.is_error == Some(false) {
+                let v = ok(r);
+                if v["returned"] == 1 {
+                    break v;
+                }
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "прошлый запуск crash не прочитался"
+        );
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    };
+    assert_eq!(line["lines"][0]["text"], "connect db password=*** user=app");
+    assert_eq!(line["masked"], 1);
+    assert!(!line.to_string().contains(LOG_SECRET), "{line}");
+
+    let v = ok(call(
+        &c,
+        "search_workload_logs",
+        json!({"connectionId": id, "namespace": NS, "workload": {"kind": "Deployment", "name": "logger"},
+            "filter": {"regex": "^line [0-9]+$"}, "maxMatches": 3, "contextLines": 1, "sinceSeconds": 3600}),
+    )
+    .await);
+    assert_eq!(
+        (&v["returned"], &v["truncated"]),
+        (&json!(3), &json!(true)),
+        "{v}"
+    );
+    assert_eq!(v["podsTotal"], 1);
+    assert!(
+        v["matches"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("line ")
+    );
+
+    let calls: Vec<Value> = ctl.audit_recent(20);
+    let read = calls
+        .iter()
+        .find(|a| a["tool"] == "search_workload_logs")
+        .unwrap();
+    assert_eq!(read["returned"], 3, "{read}");
+    assert!(read["scanned"].as_u64().unwrap() >= 3);
+    // Строк лога в журнале нет; аргументы (и фильтр, которым искали) — есть, как у всех вызовов.
+    let journal = serde_json::to_string(&calls).unwrap();
+    assert!(
+        !journal.contains("connect db") && !journal.contains("\"line "),
+        "{journal}"
+    );
+
+    drop(c);
+    tokio::time::timeout(Duration::from_secs(10), ctl.shutdown())
+        .await
+        .expect("сервер остановился");
 }

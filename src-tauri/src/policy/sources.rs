@@ -219,6 +219,7 @@ mod tests {
             "пример запрещает подключения без проверки TLS"
         );
         assert!(!p.status.allow_exec_auth, "пример запрещает exec-плагины");
+        assert!(!p.status.mcp_logs_enabled, "пример запрещает логи для LLM");
 
         // Профиль MDM: содержимое PayloadContent[0] попадает в Managed Preferences как есть.
         let profile = plist::Value::from_file(format!("{base}/policy.mobileconfig")).unwrap();
@@ -240,6 +241,7 @@ mod tests {
             "mcpEnabled",
             "allowInsecureTls",
             "allowExecAuth",
+            "mcpLogsEnabled",
         ] {
             assert!(content.contains_key(key), "{key}");
         }
@@ -260,5 +262,6 @@ mod tests {
             "{reg}"
         );
         assert!(reg.contains(r#""allowExecAuth"=dword:00000000"#), "{reg}");
+        assert!(reg.contains(r#""mcpLogsEnabled"=dword:00000000"#), "{reg}");
     }
 }

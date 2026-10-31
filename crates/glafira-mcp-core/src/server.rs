@@ -17,7 +17,9 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::audit::{AuditConnection, AuditEvent, AuditLog, Outcome, now_ms, truncate_args};
+use crate::audit::{
+    AuditConnection, AuditEvent, AuditLog, Outcome, now_ms, read_counts, truncate_args,
+};
 use crate::endpoint::{BoxStream, Endpoint, Listener};
 use crate::fit::HARD_LIMIT_BYTES;
 use crate::limits::{CALLS_PER_MINUTE, GLOBAL_CONCURRENCY, RateLimiter, SESSION_CONCURRENCY};
@@ -464,6 +466,7 @@ impl Session {
                 Ok(v)
             }
         });
+        let counts = result.as_ref().ok().and_then(read_counts);
         let (out, outcome, code, bytes) = match result {
             Ok(v) => {
                 let r = CallToolResult::structured(v);
@@ -489,6 +492,9 @@ impl Session {
             code,
             bytes,
             ms: started.elapsed().as_millis() as u64,
+            scanned: counts.map(|c| c.0),
+            returned: counts.map(|c| c.1),
+            masked: counts.map(|c| c.2),
         });
         out
     }

@@ -6,6 +6,7 @@
 //! ([`proposals`]) LLM пишутся в Glafira, а не в кластер: изменение применяет человек.
 
 pub mod health;
+pub mod logs;
 pub mod mask;
 pub mod model;
 pub mod observe;

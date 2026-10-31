@@ -38,9 +38,13 @@ const FORBIDDEN_PATHS: &[&str] = &[
     "http",
 ];
 
-/// Из `kube` разрешено только это (и то, что внутри): параметры списка для `ReadClient` и тело
-/// ответа об ошибке API-сервера (моки в тестах).
-const KUBE_ALLOWED: &[&str] = &["kube::api::ListParams", "kube::core::Status"];
+/// Из `kube` разрешено только это (и то, что внутри): параметры списка и лога для `ReadClient`
+/// (`ReadClient::log_stream` — только чтение) и тело ответа об ошибке API-сервера (моки в тестах).
+const KUBE_ALLOWED: &[&str] = &[
+    "kube::api::ListParams",
+    "kube::api::LogParams",
+    "kube::core::Status",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Tok {

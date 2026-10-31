@@ -146,10 +146,14 @@ on a prod connection requires typing its name (see [Resources and changes](resou
 
 [[ui:connections.form.llmAccess]] decides what an LLM assistant connected over MCP sees: [[ui:connections.form.llmAccessOff]]
 (the default) — the connection does not exist for it; [[ui:connections.form.llmAccessMetadata]] — objects, statuses,
-events and quotas without the values of Secrets, ConfigMaps and environment variables. [[ui:connections.form.llmScope]]
-narrows the access down to the listed projects; the assistant sees the cluster and the nodes if you can read them.
-Both settings stay on this computer: export does not write them, and import does not change them for connections you
-already have. More in [LLM assistants (MCP)](llm-mcp.md#what-llm-sees).
+events and quotas without the values of Secrets, ConfigMaps and environment variables;
+[[ui:connections.form.llmAccessLogs]] — also pod logs and the values of environment variables and ConfigMaps, masked
+(Secret values never). For this level, [[ui:connections.form.mask]] sets the names whose values are hidden: the
+standard list or your own. If your organization's policy forbids logs for LLM assistants, the level is unavailable.
+[[ui:connections.form.llmScope]] narrows the access down to the listed projects; the assistant sees the cluster and
+the nodes if you can read them. These settings stay on this computer: export does not write them, and import does not
+change them for connections you already have. More in [LLM assistants (MCP)](llm-mcp.md#what-llm-sees) and
+[Logs](llm-mcp.md#logs).
 
 ## Folders, export and import {#folders}
 

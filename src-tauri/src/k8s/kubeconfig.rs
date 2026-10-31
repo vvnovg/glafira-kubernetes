@@ -425,6 +425,7 @@ pub fn import_context(
         order: 0,
         llm_access: Default::default(),
         llm_namespaces: None,
+        llm_mask_fields: None,
         metrics: Default::default(),
         extra: Default::default(),
     };

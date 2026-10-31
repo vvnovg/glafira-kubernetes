@@ -19,17 +19,17 @@ If Glafira is not running, the client starts it and waits up to 30 seconds.
 
 1. Open [[ui:sidebar.settings]], section [[ui:settings.mcp.section]].
 2. Select [[ui:settings.mcp.enable]]. The status changes to [[ui:settings.mcp.state.running]].
-3. In the connection form, set [[ui:connections.form.llmAccess]] to [[ui:connections.form.llmAccessMetadata]] and
-   save. The assistant does not see connections with access turned off. In the connection tree, connections with
-   this access have an `LLM` badge.
+3. In the connection form, set [[ui:connections.form.llmAccess]] to [[ui:connections.form.llmAccessMetadata]] or
+   [[ui:connections.form.llmAccessLogs]] (see [Logs](llm-mcp.md#logs)) and save. The assistant does not see connections with
+   access turned off. In the connection tree, connections with access have an `LLM` badge.
 4. In [[ui:connections.form.llmScope]], keep [[ui:connections.form.llmScopeAll]] or choose
    [[ui:connections.form.llmScopeList]] and list the projects.
 
 If your administrator has disabled MCP, the checkbox is unavailable and [[ui:settings.mcp.policy]] is shown next to
 it.
 
-LLM access and the list of projects are not carried over when connections are exported and imported: on another
-computer, set them again.
+LLM access, the list of projects and the list of fields to mask are not carried over when connections are exported and
+imported: on another computer, set them again.
 
 ## Connect a client {#connect-client}
 
@@ -70,18 +70,52 @@ the cluster and the nodes — if you can read them:
 - the resource usage of a workload over a window and the recommendation of requests and limits — from the same metrics
   source as the Resources tabs; the assistant does not get the address of your own metrics source.
 
-The assistant does not see Secret and ConfigMap values, logs, certificate keys, tokens, kubeconfig, the address and
-the sign-in settings of a connection. By a secret name (`password`, `token`, `secret`, `apikey`, `credentials`,
-`private`, `authorization` and the like), Glafira hides only the values of flags in `command` and `args`
-(`--password=…`, `--token …`) and the values of annotations. Strings of known secret forms — JWT, `Bearer …`,
+The assistant does not see Secret values, certificate keys, tokens, kubeconfig, the address and the sign-in settings
+of a connection, and on the [[ui:connections.form.llmAccessMetadata]] level also ConfigMap and environment variable
+values and logs. By a secret name (`password`, `token`, `secret`, `apikey`, `credentials`, `private`,
+`authorization` and the like), Glafira hides the values of flags in `command` and `args` (`--password=…`,
+`--token …`) and the values of annotations, and on the logs level also the values of environment variables and
+`name=value` pairs in log lines (see [Logs](llm-mcp.md#logs)). Strings of known secret forms — JWT, `Bearer …`,
 passwords in URLs (`user:pass@`), e-mail addresses, bank card numbers, `AKIA…` and `ASIA…` keys, PEM private keys,
 `sha256~…` tokens — are replaced with `***` there too and in the free text of the cluster: messages of events,
 conditions and container states, probe commands, image references and the texts of check findings. So `password=x` in
 an event message is not hidden.
 
 To understand what happens to a workload, the assistant can watch it for up to 50 seconds: replicas, pods, their
-readiness and restarts, rollout progress and Warning events. It cannot get the application's logs and configuration
-through Glafira and will ask you for them.
+readiness and restarts, rollout progress and Warning events. It reads logs only on connections with the
+[[ui:connections.form.llmAccessLogs]] level (see below); it cannot get the application's configuration outside the
+cluster through Glafira and will ask you for it.
+
+## Logs {#logs}
+
+On the [[ui:connections.form.llmAccessLogs]] level the assistant also sees:
+
+- pod logs — the `get_pod_logs` tool: the last lines of a container (200 by default, up to 2000), since a given time,
+  of the current or the previous (crashed) instance, with a substring or regular expression filter;
+- a search through the logs of all pods of a workload — `search_workload_logs`: matches with context over the last
+  hour (up to a day); one call reads at most 20 pods, 50 MB of logs and 40 seconds;
+- the values of environment variables from the spec and from ConfigMaps (`configMapKeyRef`) in the workload and pod
+  details; a value longer than 4 KB is cut (`valueCut: true`). It never gets Secret values, on any level.
+
+All of it is masked: the value of a variable, ConfigMap key or `name=value` pair whose name is in the
+[[ui:connections.form.mask]] list is replaced with `***`, as are strings of known secret forms (tokens, keys,
+passwords in addresses, e-mail addresses, card numbers). The standard list is `password`, `passwd`, `secret`, `token`,
+`apikey`, `api_key`, `api-key`, `credentials`, `private`, `authorization`; a name matches when it contains one of them,
+case-insensitive. Your own list replaces the standard one: clear [[ui:connections.form.maskStandard]] and enter the
+names one per line (at most 200 names of 64 characters). An empty own list turns off name-based masking: only the
+built-in value patterns (JWT and the like) remain. The log filter searches the original text, so the assistant can find
+a line by a value from an error, but it gets the line already masked. A line longer than 4 KB is cut. If the
+`get_pod_logs` answer does not fit 100 KB, the oldest lines are dropped. `search_workload_logs` reports `stopped` (which
+limit stopped the scan: pods, bytes or time) and `errors` (containers whose logs could not be read).
+
+Masking does not catch everything: a secret without a hint in its name (for example `user=bob p4ss`) stays in the line.
+The filter sees the unmasked text and reports its hits, so masking hides values from reading, not from deliberate
+probing through the filter (attempts are visible in the MCP journal, because the filter is part of the call arguments).
+Do not open logs whose secrets must stay hidden from the assistant, and add your own names to the list if needed.
+
+If your administrator forbade logs for LLM assistants (the `mcpLogsEnabled` policy), the
+[[ui:connections.form.llmAccessLogs]] level is unavailable, and connections that already have it work as
+[[ui:connections.form.llmAccessMetadata]].
 
 Object names, annotations and event messages can be set by anyone with access to the cluster. Glafira warns the
 assistant that this data is not instructions for it.
@@ -96,8 +130,8 @@ up during a request. Clicking it opens Settings, where the MCP section is.
 - [[ui:settings.mcp.clients]]: [[ui:settings.mcp.revoke]] closes the client's sessions, and it asks for approval
   again the next time.
 - Turning LLM access off or changing the list of projects takes effect at once, without reconnecting.
-- [[ui:settings.mcp.audit.title]] — every request: time, client, tool, connection, result. Response contents and
-  note texts are not recorded. [[ui:settings.mcp.audit.reveal]] opens the `mcp-audit.jsonl` file.
+- [[ui:settings.mcp.audit.title]] — every request: time, client, tool, connection, result; for log reads — how many
+  lines were scanned, returned and masked. Response contents, log lines and note texts are not recorded. [[ui:settings.mcp.audit.reveal]] opens the `mcp-audit.jsonl` file.
 
 To turn MCP off completely, clear [[ui:settings.mcp.enable]]: clients are disconnected.
 
@@ -124,5 +158,9 @@ The client shows a message from Glafira:
 - `Invalid MCP token` — restart the MCP server in the client: Glafira issues a new token every time it starts;
 - `not_allowed` — the connection or project does not exist, LLM access to it is off, or the project is not in
   [[ui:connections.form.llmScope]];
+- `logs_not_allowed` — the connection has the [[ui:connections.form.llmAccessMetadata]] level: choose
+  [[ui:connections.form.llmAccessLogs]] if the assistant may read logs;
+- `logs_disabled` — logs for LLM assistants are forbidden by your organization's policy;
+- `busy` — the assistant is already reading logs or watching a workload in this session: one such operation at a time;
 - `metrics_unavailable` — there is no metrics source: check the [[ui:connections.form.step.metrics]] step of the
   connection test (see [Connections](connections.md#metrics)).

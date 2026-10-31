@@ -154,6 +154,7 @@ pub fn build_export(
             // не пишутся.
             profile.llm_access = Default::default();
             profile.llm_namespaces = None;
+            profile.llm_mask_fields = None;
             profile.metrics = Default::default();
             strip_exec_for_export(&mut profile);
             strip_pem_keys_for_export(&mut profile);
@@ -413,6 +414,7 @@ fn same_settings(local: &ConnectionProfile, incoming: &ConnectionProfile) -> boo
             order: 0,
             llm_access: Default::default(),
             llm_namespaces: None,
+            llm_mask_fields: None,
             metrics: Default::default(),
             extra: Default::default(),
             ..p.clone()
@@ -631,6 +633,7 @@ pub(crate) fn plan_import(
             profile.order = slot.order;
             profile.llm_access = slot.llm_access;
             profile.llm_namespaces = slot.llm_namespaces.take();
+            profile.llm_mask_fields = slot.llm_mask_fields.take();
             profile.metrics = std::mem::take(&mut slot.metrics);
             profile.extra = std::mem::take(&mut slot.extra);
             // Секреты exec-плагина тоже локальные: файл их не несёт. Подтверждение остаётся,
@@ -686,6 +689,7 @@ pub(crate) fn plan_import(
         // нового подключения выключен, источник метрик — автоматический.
         profile.llm_access = Default::default();
         profile.llm_namespaces = None;
+        profile.llm_mask_fields = None;
         profile.metrics = Default::default();
         profile.extra = Default::default();
         if needs.token || needs.client_key {
@@ -939,12 +943,17 @@ mod tests {
         let mut open = sample_profile("a");
         open.llm_access = LlmAccess::Metadata;
         open.llm_namespaces = Some(vec!["team-a".into()]);
+        open.llm_mask_fields = Some(vec!["inn".into()]);
         s.upsert(open.clone()).unwrap();
         let out = build_export(&s, &MemoryStore::default(), None, "1", "now").unwrap();
         let json = serde_json::to_value(&out).unwrap();
         assert!(json["connections"][0].get("llmAccess").is_none(), "{json}");
         assert!(
             json["connections"][0].get("llmNamespaces").is_none(),
+            "{json}"
+        );
+        assert!(
+            json["connections"][0].get("llmMaskFields").is_none(),
             "{json}"
         );
 
@@ -957,6 +966,8 @@ mod tests {
         let mut incoming_b = conn_json("b", "conn-b", None);
         incoming_b["llmAccess"] = "metadata".into();
         incoming_b["llmNamespaces"] = serde_json::json!(["prod"]);
+        incoming_a["llmMaskFields"] = serde_json::json!([]);
+        incoming_b["llmMaskFields"] = serde_json::json!([]);
         let p = plan(
             &data,
             &file(vec![], vec![incoming_a, incoming_b]),
@@ -964,15 +975,27 @@ mod tests {
         );
         let a = conn(&p.next, "a");
         assert_eq!(
-            (a.llm_access, a.llm_namespaces.clone()),
-            (LlmAccess::Metadata, Some(vec!["team-a".to_string()])),
+            (
+                a.llm_access,
+                a.llm_namespaces.clone(),
+                a.llm_mask_fields.clone()
+            ),
+            (
+                LlmAccess::Metadata,
+                Some(vec!["team-a".to_string()]),
+                Some(vec!["inn".to_string()])
+            ),
             "своё решение сохраняется"
         );
         let b = conn(&p.next, "b");
         assert_eq!(
-            (b.llm_access, b.llm_namespaces.clone()),
-            (LlmAccess::Off, None),
-            "файл не открывает доступ"
+            (
+                b.llm_access,
+                b.llm_namespaces.clone(),
+                b.llm_mask_fields.clone()
+            ),
+            (LlmAccess::Off, None, None),
+            "файл не открывает доступ и не убирает маскировку"
         );
 
         // Отличие только в доступе LLM — «без изменений».

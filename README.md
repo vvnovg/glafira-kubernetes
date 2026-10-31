@@ -227,8 +227,8 @@ GO_IT_KUBECONFIG="$PWD/dev/kind/out/kubeconfig" cargo test --manifest-path src-t
 - Логи: `RUST_LOG=debug pnpm tauri dev`; файлы — в папке логов ОС (путь — в «О программе»).
 
 ## Политика администратора
-Ключи `updatesEnabled`, `updateUrl`, `language`, `mcpEnabled`, `allowInsecureTls`, `allowExecAuth`; примеры —
-`docs/admin/`.
+Ключи `updatesEnabled`, `updateUrl`, `language`, `mcpEnabled`, `mcpLogsEnabled`, `allowInsecureTls`, `allowExecAuth`;
+примеры — `docs/admin/`.
 
 ## Языки
 Интерфейс и руководство — на английском и русском; остальные 10 языков Kafka-версии добавляет этап O6.

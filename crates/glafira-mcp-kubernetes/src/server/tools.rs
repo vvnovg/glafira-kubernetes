@@ -347,14 +347,50 @@ fn mask_state(m: &Masker, state: &mut Option<ContainerState>) -> usize {
     state.as_mut().map_or(0, |s| mask_opt(m, &mut s.message))
 }
 
-/// `command` и `args` контейнера — имена полей и пары, образ и пробы — встроенные шаблоны;
-/// возвращает число замен.
+/// Значение env (уровень `logs`): у имени переменной или ключа ConfigMap из списка — `***`
+/// целиком, иначе — шаблоны и пары; затем значение режется до [`crate::logs::MAX_LINE_BYTES`]
+/// (маскировка идёт по целому значению, чтобы секрет не пережил обрезку).
+fn mask_env(m: &Masker, e: &mut Env) -> usize {
+    let Some(v) = &mut e.value else {
+        return 0;
+    };
+    let key_secret = e.source == "configMapKeyRef"
+        && e.reference
+            .as_deref()
+            .and_then(|r| r.split_once('/'))
+            .is_some_and(|(_, key)| m.is_secret_name(key));
+    if key_secret || m.is_secret_name(&e.name) {
+        if v == crate::mask::MASK {
+            return 0;
+        }
+        *v = crate::mask::MASK.to_string();
+        return 1;
+    }
+    let (s, n) = m.text(v);
+    let (s, cut) = crate::logs::cut_to(&s, crate::logs::MAX_LINE_BYTES);
+    *v = s;
+    e.value_cut = cut;
+    n
+}
+
+/// Без уровня `logs` значений env в ответе нет, что бы ни вернул бэкенд.
+fn clear_env_values<'a>(containers: impl Iterator<Item = &'a mut ContainerSpec>) {
+    for e in containers.flat_map(|c| c.env.iter_mut()) {
+        e.value = None;
+        e.value_error = None;
+        e.value_cut = false;
+    }
+}
+
+/// `command`, `args` и значения env контейнера — имена полей и пары, образ и пробы —
+/// встроенные шаблоны; возвращает число замен.
 fn mask_spec(m: &Masker, c: &mut ContainerSpec) -> usize {
     let (command, a) = m.args(&c.command);
     let (args, b) = m.args(&c.args);
     c.command = command;
     c.args = args;
     a + b
+        + c.env.iter_mut().map(|e| mask_env(m, e)).sum::<usize>()
         + mask_text(m, &mut c.image)
         + mask_opt(m, &mut c.liveness)
         + mask_opt(m, &mut c.readiness)
@@ -809,7 +845,7 @@ impl KubeServer {
     }
 
     #[tool(
-        description = "Workload details: replicas, conditions, selector, strategy, containers (image, command and args with secrets masked, requests and limits, probes, environment variable names and sources without values), volume types, labels and annotations (secrets masked), HPA, PDB, rollout history (ReplicaSets, ReplicationControllers or ControllerRevisions) and active jobs of a CronJob.",
+        description = "Workload details: replicas, conditions, selector, strategy, containers (image, command and args with secrets masked, requests and limits, probes, environment variable names and sources; on the logs access level also literal and ConfigMap values, masked and cut to 4 KB with valueCut set; Secret values never), volume types, labels and annotations (secrets masked), HPA, PDB, rollout history (ReplicaSets, ReplicationControllers or ControllerRevisions) and active jobs of a CronJob.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -829,6 +865,7 @@ impl KubeServer {
                 args!(p),
                 Some(&p.connection_id),
                 async {
+                    let scope = self.scope(&p.connection_id, Some(&p.namespace))?;
                     let mut w = expect!(
                         self.read(ReadOp::DescribeWorkload {
                             connection_id: p.connection_id.clone(),
@@ -841,7 +878,10 @@ impl KubeServer {
                         .await?,
                         Workload
                     )?;
-                    let masked = mask_workload(&Masker::default(), &mut w);
+                    if scope.logs != LogsAccess::Allowed {
+                        clear_env_values(w.containers.iter_mut());
+                    }
+                    let masked = mask_workload(&scope.masker(), &mut w);
                     to_value(&Masked { body: w, masked })
                 },
             )
@@ -893,7 +933,7 @@ impl KubeServer {
     }
 
     #[tool(
-        description = "Pod details: phase, conditions, QoS, node, owner, every container (init ones too) with its image and digest, state and last state with reason and exit code, restarts, requests and limits, probes, command and args with secrets masked and environment variable names and sources without values; volumes, labels, annotations (secrets masked) and the latest events of the pod.",
+        description = "Pod details: phase, conditions, QoS, node, owner, every container (init ones too) with its image and digest, state and last state with reason and exit code, restarts, requests and limits, probes, command and args with secrets masked and environment variable names and sources (on the logs access level also literal and ConfigMap values, masked and cut to 4 KB with valueCut set; Secret values never); volumes, labels, annotations (secrets masked) and the latest events of the pod.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -913,6 +953,7 @@ impl KubeServer {
                 args!(p),
                 Some(&p.connection_id),
                 async {
+                    let scope = self.scope(&p.connection_id, Some(&p.namespace))?;
                     let mut pod = expect!(
                         self.read(ReadOp::DescribePod {
                             connection_id: p.connection_id.clone(),
@@ -922,7 +963,10 @@ impl KubeServer {
                         .await?,
                         Pod
                     )?;
-                    let masked = mask_pod(&Masker::default(), &mut pod);
+                    if scope.logs != LogsAccess::Allowed {
+                        clear_env_values(pod.containers.iter_mut().map(|c| &mut c.spec));
+                    }
+                    let masked = mask_pod(&scope.masker(), &mut pod);
                     to_value(&Masked { body: pod, masked })
                 },
             )

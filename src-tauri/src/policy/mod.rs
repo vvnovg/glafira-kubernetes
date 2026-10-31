@@ -14,6 +14,7 @@ pub const KEY_LANGUAGE: &str = "language";
 pub const KEY_MCP_ENABLED: &str = "mcpEnabled";
 pub const KEY_ALLOW_INSECURE_TLS: &str = "allowInsecureTls";
 pub const KEY_ALLOW_EXEC_AUTH: &str = "allowExecAuth";
+pub const KEY_MCP_LOGS_ENABLED: &str = "mcpLogsEnabled";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PolicyValue {
@@ -74,6 +75,9 @@ pub struct PolicyStatus {
     pub language: Option<String>,
     /// `false` — MCP-шлюз запрещён администратором (спец. G1 §9).
     pub mcp_enabled: bool,
+    /// `false` — уровень доступа LLM `logs` запрещён администратором: такие подключения работают
+    /// как `metadata`, инструменты логов отвечают `logs_disabled` (спец. §10.2).
+    pub mcp_logs_enabled: bool,
     /// `false` — подключения с `insecure-skip-tls-verify` запрещены администратором (спец. §12).
     pub allow_insecure_tls: bool,
     /// `false` — подключения с exec-плагином запрещены администратором (спец. §5.2, §12).
@@ -90,6 +94,7 @@ impl Default for PolicyStatus {
             update_url: None,
             language: None,
             mcp_enabled: true,
+            mcp_logs_enabled: true,
             allow_insecure_tls: true,
             allow_exec_auth: true,
             errors: Vec::new(),
@@ -114,6 +119,7 @@ pub fn resolve(source: &str, raw: RawPolicy) -> Policy {
                     source: Some(source.to_string()),
                     updates_enabled: false,
                     mcp_enabled: false,
+                    mcp_logs_enabled: false,
                     allow_insecure_tls: false,
                     allow_exec_auth: false,
                     errors: vec![ltext!(
@@ -166,6 +172,15 @@ pub fn resolve(source: &str, raw: RawPolicy) -> Policy {
             // Непонятое значение запрещает MCP, но обновления не выключает.
             (KEY_MCP_ENABLED, other) => {
                 status.mcp_enabled = false;
+                status.errors.push(other.invalid(&key));
+            }
+            (KEY_MCP_LOGS_ENABLED, PolicyValue::Bool(b)) => status.mcp_logs_enabled = b,
+            (KEY_MCP_LOGS_ENABLED, PolicyValue::Int(i @ (0 | 1))) => {
+                status.mcp_logs_enabled = i == 1
+            }
+            // Как у mcpEnabled: непонятое значение запрещает логи для LLM, обновления не трогает.
+            (KEY_MCP_LOGS_ENABLED, other) => {
+                status.mcp_logs_enabled = false;
                 status.errors.push(other.invalid(&key));
             }
             (KEY_ALLOW_INSECURE_TLS, PolicyValue::Bool(b)) => status.allow_insecure_tls = b,
@@ -413,6 +428,33 @@ mod tests {
             !resolve("src", RawPolicy::Unreadable("x".into()))
                 .status
                 .allow_exec_auth
+        );
+    }
+
+    #[test]
+    fn mcp_logs_policy() {
+        assert!(resolve("src", RawPolicy::Absent).status.mcp_logs_enabled);
+        for (v, allowed) in [
+            (PolicyValue::Bool(false), false),
+            (PolicyValue::Bool(true), true),
+            (PolicyValue::Int(0), false),
+            (PolicyValue::Int(1), true),
+        ] {
+            let p = resolve("src", values(&[("mcpLogsEnabled", v)]));
+            assert_eq!(p.status.mcp_logs_enabled, allowed);
+            assert!(p.status.errors.is_empty());
+        }
+        let p = resolve(
+            "src",
+            values(&[("mcpLogsEnabled", PolicyValue::Str("no".into()))]),
+        );
+        assert!(!p.status.mcp_logs_enabled, "непонятое значение запрещает");
+        assert!(p.status.updates_enabled);
+        assert!(p.status.mcp_enabled, "MCP целиком не задет");
+        assert!(
+            !resolve("src", RawPolicy::Unreadable("x".into()))
+                .status
+                .mcp_logs_enabled
         );
     }
 }

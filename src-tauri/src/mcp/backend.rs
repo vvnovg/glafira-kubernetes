@@ -9,7 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use glafira_mcp_core::{BackendError, BoxFuture, Hooks, SessionAccess, SessionView};
 use glafira_mcp_kubernetes::health as mh;
-use glafira_mcp_kubernetes::model::{self as m, Scope, not_allowed};
+use glafira_mcp_kubernetes::logs::{LogsOp, LogsOutput};
+use glafira_mcp_kubernetes::model::{self as m, LogsAccess, Scope, not_allowed};
 use glafira_mcp_kubernetes::{Backend, ReadOp, ReadOutput};
 use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
 use k8s_openapi::api::core::v1::{Node, PersistentVolumeClaim, Pod, ResourceQuota, Service};
@@ -29,13 +30,14 @@ use crate::health::store::{
     Trigger, sanitize,
 };
 use crate::health::texts;
+use crate::k8s::configs::{ConfigValue, config_map_values};
 use crate::k8s::events::{EventObject, list_events};
 use crate::k8s::network::{gateways, grpc_routes, http_routes, routes};
 use crate::k8s::pods::{WorkloadRef, get_pod, list_pods};
 use crate::k8s::read::{ReadClient, by_labels, check_field_value};
 use crate::k8s::workloads::{WorkloadKind, get_row, get_workload, list_workloads};
 use crate::state::AppState;
-use crate::storage::profile::{ConnectionProfile, is_valid_namespace};
+use crate::storage::profile::{ConnectionProfile, LlmAccess, is_valid_namespace};
 
 /// Что-то изменилось для интерфейса; `true` — нужен диалог подтверждения (привлечь внимание).
 pub type OnChange = Arc<dyn Fn(bool) + Send + Sync>;
@@ -81,6 +83,54 @@ fn now_s() -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
+/// Значения env контейнеров: без уровня logs — никаких; на нём литералы остаются, а ключи
+/// ConfigMap (`configMapKeyRef`) читаются — каждый ConfigMap один раз. Не прочиталось — причина
+/// в `valueError`. Маскирует крейт шлюза.
+async fn env_values<'a>(
+    r: &ReadClient,
+    namespace: &str,
+    containers: impl Iterator<Item = &'a mut m::ContainerSpec>,
+    values: bool,
+) {
+    let mut config_maps: std::collections::HashMap<
+        String,
+        Result<std::collections::BTreeMap<String, ConfigValue>, String>,
+    > = Default::default();
+    for c in containers {
+        for e in &mut c.env {
+            if !values {
+                e.value = None;
+                continue;
+            }
+            if e.source != "configMapKeyRef" {
+                continue;
+            }
+            let Some((name, key)) = e.reference.as_deref().and_then(|r| r.split_once('/')) else {
+                continue;
+            };
+            if !config_maps.contains_key(name) {
+                let read = config_map_values(r, namespace, name)
+                    .await
+                    .map_err(|e| error_text(&e));
+                config_maps.insert(name.to_string(), read);
+            }
+            match &config_maps[name] {
+                Err(error) => e.value_error = Some(error.clone()),
+                Ok(map) => match map.get(key) {
+                    Some(ConfigValue {
+                        text: Some(text), ..
+                    }) => e.value = Some(text.clone()),
+                    Some(ConfigValue {
+                        binary_size: Some(n),
+                        ..
+                    }) => e.value_error = Some(format!("binary data, {n} bytes")),
+                    _ => e.value_error = Some(format!("no key {key} in ConfigMap {name}")),
+                },
+            }
+        }
+    }
+}
+
 fn workload_kind(k: m::WorkloadKind) -> WorkloadKind {
     reshape(&k).unwrap_or(WorkloadKind::Deployment)
 }
@@ -111,10 +161,11 @@ impl AppBackend {
                     .ok()
                     .and_then(|v| v.as_str().map(String::from))
                     .unwrap_or_default(),
-                llm_access: serde_json::to_value(p.llm_access)
-                    .ok()
-                    .and_then(|v| v.as_str().map(String::from))
-                    .unwrap_or_default(),
+                llm_access: p
+                    .llm_access
+                    .effective(self.state.policy.status.mcp_logs_enabled)
+                    .as_str()
+                    .to_string(),
                 platform: self
                     .state
                     .pool
@@ -150,6 +201,11 @@ impl AppBackend {
                 Self::in_scope(&p, ns)?;
             }
         }
+        // Значения env и ConfigMap — только на уровне logs (спец. §10.2).
+        let values = op
+            .connection_id()
+            .and_then(|id| self.scope(id))
+            .is_some_and(|s| s.logs == LogsAccess::Allowed);
         let st = &self.state;
         let now = now_s();
         let out = match op {
@@ -269,17 +325,16 @@ impl AppBackend {
             } => {
                 let ns = namespace.clone();
                 let d = Box::pin(st.read_in(&connection_id, &namespace, |c| async move {
-                    get_workload(
-                        &c.reader(),
-                        &ns,
-                        workload_kind(workload.kind),
-                        &workload.name,
-                    )
-                    .await
+                    let r = c.reader();
+                    let d =
+                        get_workload(&r, &ns, workload_kind(workload.kind), &workload.name).await?;
+                    let mut d = map::workload_details(d, now);
+                    env_values(&r, &ns, d.containers.iter_mut(), values).await;
+                    Ok(d)
                 }))
                 .await
                 .map_err(to_backend)?;
-                ReadOutput::Workload(map::workload_details(d, now))
+                ReadOutput::Workload(d)
             }
             ReadOp::ListPods {
                 connection_id,
@@ -325,7 +380,15 @@ impl AppBackend {
                         ),
                         Err(e) => m::Part::error(error_text(&e)),
                     };
-                    Ok(map::pod_details(pod?, events, now))
+                    let mut d = map::pod_details(pod?, events, now);
+                    env_values(
+                        &r,
+                        &ns,
+                        d.containers.iter_mut().map(|c| &mut c.spec),
+                        values,
+                    )
+                    .await;
+                    Ok(d)
                 }))
                 .await
                 .map_err(to_backend)?;
@@ -848,10 +911,20 @@ impl Hooks for AppBackend {
 impl Backend for AppBackend {
     fn scope(&self, connection_id: &str) -> Option<Scope> {
         let p = self.allowed(connection_id).ok()?;
+        let logs = match (p.llm_access, self.state.policy.status.mcp_logs_enabled) {
+            (LlmAccess::Logs, true) => LogsAccess::Allowed,
+            (LlmAccess::Logs, false) => LogsAccess::Disabled,
+            _ => LogsAccess::Metadata,
+        };
         Some(Scope {
             namespaces: p
                 .llm_namespaces
                 .map(|v| v.into_iter().collect::<BTreeSet<_>>()),
+            // Свой список имён действует только на уровне `logs` (спец. §10.3).
+            mask_fields: (logs == LogsAccess::Allowed)
+                .then_some(p.llm_mask_fields)
+                .flatten(),
+            logs,
         })
     }
 
@@ -869,6 +942,80 @@ impl Backend for AppBackend {
     ) -> BoxFuture<'_, Result<glafira_mcp_kubernetes::proposals::ProposalOutput, BackendError>>
     {
         Box::pin(self.proposals_impl(op))
+    }
+
+    fn logs(&self, op: LogsOp) -> BoxFuture<'_, Result<LogsOutput, BackendError>> {
+        Box::pin(self.logs_impl(op))
+    }
+}
+
+impl AppBackend {
+    /// Логи подов (спец. §10.4): уровень `logs` и политика проверяются ещё раз — по профилю.
+    async fn logs_impl(&self, op: LogsOp) -> Result<LogsOutput, BackendError> {
+        let p = self.allowed(op.connection_id())?;
+        Self::in_scope(&p, op.namespace())?;
+        if p.llm_access != LlmAccess::Logs {
+            return Err(m::logs_not_allowed());
+        }
+        if !self.state.policy.status.mcp_logs_enabled {
+            return Err(m::logs_disabled());
+        }
+        let st = &self.state;
+        match op {
+            LogsOp::Pod {
+                connection_id,
+                namespace,
+                pod,
+                container,
+                previous,
+                since,
+                tail_lines,
+            } => {
+                let since_time = super::logs::since_time(&since)?;
+                let ns = namespace.clone();
+                let log = Box::pin(st.read_in(&connection_id, &namespace, |c| async move {
+                    super::logs::pod_log(
+                        &c.reader(),
+                        &ns,
+                        &pod,
+                        container,
+                        previous,
+                        since,
+                        since_time,
+                        tail_lines,
+                    )
+                    .await
+                }))
+                .await
+                .map_err(to_backend)?;
+                Ok(LogsOutput::Pod(log))
+            }
+            LogsOp::Workload {
+                connection_id,
+                namespace,
+                workload,
+                since_seconds,
+            } => {
+                let ns = namespace.clone();
+                let w = WorkloadRef {
+                    kind: workload_kind(workload.kind),
+                    name: workload.name,
+                };
+                let logs = Box::pin(st.read_in(&connection_id, &namespace, |c| async move {
+                    super::logs::workload_logs(
+                        &c.reader(),
+                        &ns,
+                        &w,
+                        since_seconds,
+                        super::logs::Limits::search(),
+                    )
+                    .await
+                }))
+                .await
+                .map_err(to_backend)?;
+                Ok(LogsOutput::Workload(logs))
+            }
+        }
     }
 }
 
@@ -1014,6 +1161,180 @@ mod tests {
         st.policy = Arc::new(policy);
         let b = AppBackend::new(st, b.approvals.clone(), Arc::new(|_| {}));
         assert_eq!(b.access(&view("s1", None)), SessionAccess::Disabled);
+    }
+
+    /// Уровень `logs`: доступ к логам по политике, свой список имён только на этом уровне.
+    #[test]
+    fn logs_level_and_mask_fields_reach_the_scope() {
+        let (_d, b) = backend();
+        let mut logs = sample_profile("logs");
+        logs.llm_access = LlmAccess::Logs;
+        logs.llm_mask_fields = Some(vec!["inn".into()]);
+        b.state.connections.upsert(logs).unwrap();
+        let mut meta = sample_profile("meta");
+        meta.llm_access = LlmAccess::Metadata;
+        meta.llm_mask_fields = Some(vec!["inn".into()]);
+        b.state.connections.upsert(meta).unwrap();
+
+        let s = b.scope("logs").unwrap();
+        assert_eq!(
+            (s.logs, s.mask_fields.as_deref()),
+            (LogsAccess::Allowed, Some(&["inn".to_string()][..]))
+        );
+        let s = b.scope("meta").unwrap();
+        assert_eq!(
+            (s.logs, s.mask_fields),
+            (LogsAccess::Metadata, None),
+            "свой список — только на уровне logs"
+        );
+        let level = |b: &AppBackend, id: &str| {
+            b.connections()
+                .into_iter()
+                .find(|c| c.id == id)
+                .map(|c| c.llm_access)
+        };
+        assert_eq!(level(&b, "logs").as_deref(), Some("logs"));
+
+        let mut st = b.state.clone();
+        let mut policy = (*st.policy).clone();
+        policy.status.mcp_logs_enabled = false;
+        st.policy = Arc::new(policy);
+        let b = AppBackend::new(st, b.approvals.clone(), Arc::new(|_| {}));
+        let s = b.scope("logs").unwrap();
+        assert_eq!((s.logs, s.mask_fields), (LogsAccess::Disabled, None));
+        assert_eq!(
+            level(&b, "logs").as_deref(),
+            Some("metadata"),
+            "при запрете логов уровень для модели — metadata"
+        );
+    }
+
+    /// Под с литералом и ключами ConfigMap в env: прочитанный, без ключа, без прав.
+    fn pod_with_env() -> serde_json::Value {
+        let mut p = running("web-1");
+        p["spec"]["containers"][0]["env"] = serde_json::json!([
+            {"name": "LOG_LEVEL", "value": "debug"},
+            {"name": "MODE", "valueFrom": {"configMapKeyRef": {"name": "app-config", "key": "mode"}}},
+            {"name": "COLOR", "valueFrom": {"configMapKeyRef": {"name": "app-config", "key": "color"}}},
+            {"name": "GONE", "valueFrom": {"configMapKeyRef": {"name": "app-config", "key": "nope"}}},
+            {"name": "OTHER", "valueFrom": {"configMapKeyRef": {"name": "locked", "key": "x"}}},
+            {"name": "DB_PASSWORD", "valueFrom": {"secretKeyRef": {"name": "db", "key": "password"}}},
+        ]);
+        p
+    }
+
+    #[tokio::test]
+    async fn env_values_only_on_the_logs_level() {
+        let (_d, b) = backend();
+        let mut logs = sample_profile("logs");
+        logs.llm_access = LlmAccess::Logs;
+        b.state.connections.upsert(logs).unwrap();
+        let config_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        for id in ["logs", "all"] {
+            let reads = config_reads.clone();
+            pooled(&b, id, move |s| match s.path() {
+                "/api/v1/namespaces/team-a/pods/web-1" => (200, pod_with_env()),
+                "/api/v1/namespaces/team-a/configmaps/app-config" => {
+                    reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    (
+                        200,
+                        serde_json::json!({"apiVersion": "v1", "kind": "ConfigMap",
+                            "metadata": {"name": "app-config"}, "data": {"mode": "blue"},
+                            "binaryData": {"color": "AAEC"}}),
+                    )
+                }
+                "/api/v1/namespaces/team-a/configmaps/locked" => {
+                    status(403, "Forbidden", "configmaps \"locked\" is forbidden")
+                }
+                "/api/v1/namespaces/team-a/secrets/db" => panic!("Secret не читается"),
+                _ => list(vec![]),
+            });
+        }
+        let describe = |id: &str| ReadOp::DescribePod {
+            connection_id: id.into(),
+            namespace: "team-a".into(),
+            name: "web-1".into(),
+        };
+        let ReadOutput::Pod(p) = b.read(describe("logs")).await.unwrap() else {
+            panic!("не под")
+        };
+        let env: Vec<(&str, Option<&str>, Option<&str>)> = p.containers[0]
+            .spec
+            .env
+            .iter()
+            .map(|e| {
+                (
+                    e.name.as_str(),
+                    e.value.as_deref(),
+                    e.value_error.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(env[0], ("LOG_LEVEL", Some("debug"), None));
+        assert_eq!(env[1], ("MODE", Some("blue"), None));
+        assert_eq!(env[2], ("COLOR", None, Some("binary data, 3 bytes")));
+        assert_eq!(
+            env[3],
+            ("GONE", None, Some("no key nope in ConfigMap app-config"))
+        );
+        assert!(env[4].2.unwrap().starts_with("FORBIDDEN"), "{:?}", env[4]);
+        assert_eq!(
+            env[5],
+            ("DB_PASSWORD", None, None),
+            "значения Secret — никогда"
+        );
+        assert_eq!(
+            config_reads.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "ConfigMap читается один раз"
+        );
+
+        let ReadOutput::Pod(p) = b.read(describe("all")).await.unwrap() else {
+            panic!("не под")
+        };
+        assert!(
+            p.containers[0]
+                .spec
+                .env
+                .iter()
+                .all(|e| e.value.is_none() && e.value_error.is_none()),
+            "уровень metadata — без значений"
+        );
+        assert_eq!(config_reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn logs_need_the_logs_level_and_the_policy_by_profile() {
+        let (_d, b) = backend();
+        let mut logs = sample_profile("logs");
+        logs.llm_access = LlmAccess::Logs;
+        logs.llm_namespaces = Some(vec!["team-a".into()]);
+        b.state.connections.upsert(logs).unwrap();
+        let op = |id: &str, ns: &str| LogsOp::Pod {
+            connection_id: id.into(),
+            namespace: ns.into(),
+            pod: "web-1".into(),
+            container: Some("web".into()),
+            previous: false,
+            since: None,
+            tail_lines: Some(10),
+        };
+        let code = |r: Result<LogsOutput, BackendError>| r.unwrap_err().code;
+        assert_eq!(code(b.logs(op("all", "team-a")).await), "logs_not_allowed");
+        assert_eq!(code(b.logs(op("closed", "team-a")).await), "not_allowed");
+        assert_eq!(code(b.logs(op("logs", "team-b")).await), "not_allowed");
+        let mut bad = op("logs", "team-a");
+        if let LogsOp::Pod { since, .. } = &mut bad {
+            *since = Some(glafira_mcp_kubernetes::logs::Since::Time("noon".into()));
+        }
+        assert_eq!(code(b.logs(bad).await), "invalid_argument");
+
+        let mut st = b.state.clone();
+        let mut policy = (*st.policy).clone();
+        policy.status.mcp_logs_enabled = false;
+        st.policy = Arc::new(policy);
+        let b = AppBackend::new(st, b.approvals.clone(), Arc::new(|_| {}));
+        assert_eq!(code(b.logs(op("logs", "team-a")).await), "logs_disabled");
     }
 
     #[tokio::test]

@@ -42,6 +42,13 @@ pub enum AuditEvent {
         code: Option<String>,
         bytes: usize,
         ms: u64,
+        /// Чтение логов (спец. §10.7): строк просмотрено, отдано и замаскировано.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scanned: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        returned: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        masked: Option<u64>,
     },
     #[serde(rename_all = "camelCase")]
     SessionStarted {
@@ -85,6 +92,14 @@ pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// Счётчики чтения для журнала: у ответа с числом `scanned` — `(scanned, returned, masked)`
+/// (отсутствующие — 0). Содержимое ответа в журнал не попадает.
+pub fn read_counts(v: &Value) -> Option<(u64, u64, u64)> {
+    let scanned = v.get("scanned")?.as_u64()?;
+    let n = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
+    Some((scanned, n("returned"), n("masked")))
 }
 
 /// Аргументы вызова для журнала — не длиннее [`MAX_ARGS_BYTES`] байт JSON.
@@ -203,6 +218,9 @@ mod tests {
             code: None,
             bytes: 10,
             ms: 3,
+            scanned: None,
+            returned: None,
+            masked: None,
         });
         let r = log.recent(10);
         assert_eq!(r.len(), 2);
@@ -212,6 +230,18 @@ mod tests {
         assert!(r[0]["ts"].as_u64().unwrap() > 0);
         assert_eq!(r[1]["event"], "sessionStarted");
         assert_eq!(log.recent(1).len(), 1);
+        assert!(r[0].get("scanned").is_none(), "без чтения счётчиков нет");
+    }
+
+    #[test]
+    fn read_counts_come_from_the_response() {
+        let v = serde_json::json!({"lines": [], "scanned": 10, "returned": 2, "masked": 1});
+        assert_eq!(read_counts(&v), Some((10, 2, 1)));
+        assert_eq!(
+            read_counts(&serde_json::json!({"scanned": 3})),
+            Some((3, 0, 0))
+        );
+        assert_eq!(read_counts(&serde_json::json!({"masked": 3})), None);
     }
 
     #[cfg(unix)]

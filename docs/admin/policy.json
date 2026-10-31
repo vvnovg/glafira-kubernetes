@@ -3,6 +3,7 @@
   "updateUrl": "https://mirror.example.corp/glafira-kubernetes/latest.json",
   "language": "en",
   "mcpEnabled": false,
+  "mcpLogsEnabled": false,
   "allowInsecureTls": false,
   "allowExecAuth": false
 }

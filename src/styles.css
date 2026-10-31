@@ -169,6 +169,9 @@ label.inline { display: inline-flex; gap: 4px; align-items: center; white-space:
 .help-content pre code { padding: 0; background: none; }
 .help-content a { color: var(--accent); }
 .llm-badge { font-size: 9px; padding: 0 3px; border: 1px solid var(--accent); border-radius: 3px; color: var(--accent); }
+.form .llm-mask label { color: var(--fg); }
+.llm-mask { display: flex; flex-direction: column; gap: 4px; }
+.llm-mask code { white-space: normal; }
 .mcp-config pre { margin: 4px 0 8px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-alt); white-space: pre-wrap; word-break: break-all; font-size: 12px; }
 .mcp-indicator.active::before { content: "● "; color: var(--accent); }
 

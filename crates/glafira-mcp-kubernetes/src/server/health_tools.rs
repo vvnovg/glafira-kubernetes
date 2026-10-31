@@ -634,6 +634,7 @@ mod tests {
     fn scope_of(names: &[&str]) -> Scope {
         Scope {
             namespaces: Some(names.iter().map(|n| n.to_string()).collect()),
+            ..Scope::default()
         }
     }
 

@@ -13,6 +13,7 @@
       <key>updateUrl</key><string>https://mirror.example.corp/glafira-kubernetes/latest.json</string>
       <key>language</key><string>en</string>
       <key>mcpEnabled</key><false/>
+      <key>mcpLogsEnabled</key><false/>
       <key>allowInsecureTls</key><false/>
       <key>allowExecAuth</key><false/>
     </dict>
