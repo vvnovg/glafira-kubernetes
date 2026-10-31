@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use glafira_mcp_core::{BackendError, BoxFuture, Hooks, SessionAccess, SessionView};
 use glafira_mcp_kubernetes::health as mh;
+use glafira_mcp_kubernetes::logs::{LogsOp, LogsOutput};
 use glafira_mcp_kubernetes::model::{self as m, LogsAccess, Scope, not_allowed};
 use glafira_mcp_kubernetes::{Backend, ReadOp, ReadOutput};
 use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
@@ -942,6 +943,80 @@ impl Backend for AppBackend {
     {
         Box::pin(self.proposals_impl(op))
     }
+
+    fn logs(&self, op: LogsOp) -> BoxFuture<'_, Result<LogsOutput, BackendError>> {
+        Box::pin(self.logs_impl(op))
+    }
+}
+
+impl AppBackend {
+    /// Логи подов (спец. §10.4): уровень `logs` и политика проверяются ещё раз — по профилю.
+    async fn logs_impl(&self, op: LogsOp) -> Result<LogsOutput, BackendError> {
+        let p = self.allowed(op.connection_id())?;
+        Self::in_scope(&p, op.namespace())?;
+        if p.llm_access != LlmAccess::Logs {
+            return Err(m::logs_not_allowed());
+        }
+        if !self.state.policy.status.mcp_logs_enabled {
+            return Err(m::logs_disabled());
+        }
+        let st = &self.state;
+        match op {
+            LogsOp::Pod {
+                connection_id,
+                namespace,
+                pod,
+                container,
+                previous,
+                since,
+                tail_lines,
+            } => {
+                let since_time = super::logs::since_time(&since)?;
+                let ns = namespace.clone();
+                let log = Box::pin(st.read_in(&connection_id, &namespace, |c| async move {
+                    super::logs::pod_log(
+                        &c.reader(),
+                        &ns,
+                        &pod,
+                        container,
+                        previous,
+                        since,
+                        since_time,
+                        tail_lines,
+                    )
+                    .await
+                }))
+                .await
+                .map_err(to_backend)?;
+                Ok(LogsOutput::Pod(log))
+            }
+            LogsOp::Workload {
+                connection_id,
+                namespace,
+                workload,
+                since_seconds,
+            } => {
+                let ns = namespace.clone();
+                let w = WorkloadRef {
+                    kind: workload_kind(workload.kind),
+                    name: workload.name,
+                };
+                let logs = Box::pin(st.read_in(&connection_id, &namespace, |c| async move {
+                    super::logs::workload_logs(
+                        &c.reader(),
+                        &ns,
+                        &w,
+                        since_seconds,
+                        super::logs::Limits::search(),
+                    )
+                    .await
+                }))
+                .await
+                .map_err(to_backend)?;
+                Ok(LogsOutput::Workload(logs))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1226,6 +1301,40 @@ mod tests {
             "уровень metadata — без значений"
         );
         assert_eq!(config_reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn logs_need_the_logs_level_and_the_policy_by_profile() {
+        let (_d, b) = backend();
+        let mut logs = sample_profile("logs");
+        logs.llm_access = LlmAccess::Logs;
+        logs.llm_namespaces = Some(vec!["team-a".into()]);
+        b.state.connections.upsert(logs).unwrap();
+        let op = |id: &str, ns: &str| LogsOp::Pod {
+            connection_id: id.into(),
+            namespace: ns.into(),
+            pod: "web-1".into(),
+            container: Some("web".into()),
+            previous: false,
+            since: None,
+            tail_lines: Some(10),
+        };
+        let code = |r: Result<LogsOutput, BackendError>| r.unwrap_err().code;
+        assert_eq!(code(b.logs(op("all", "team-a")).await), "logs_not_allowed");
+        assert_eq!(code(b.logs(op("closed", "team-a")).await), "not_allowed");
+        assert_eq!(code(b.logs(op("logs", "team-b")).await), "not_allowed");
+        let mut bad = op("logs", "team-a");
+        if let LogsOp::Pod { since, .. } = &mut bad {
+            *since = Some(glafira_mcp_kubernetes::logs::Since::Time("noon".into()));
+        }
+        assert_eq!(code(b.logs(bad).await), "invalid_argument");
+
+        let mut st = b.state.clone();
+        let mut policy = (*st.policy).clone();
+        policy.status.mcp_logs_enabled = false;
+        st.policy = Arc::new(policy);
+        let b = AppBackend::new(st, b.approvals.clone(), Arc::new(|_| {}));
+        assert_eq!(code(b.logs(op("logs", "team-a")).await), "logs_disabled");
     }
 
     #[tokio::test]

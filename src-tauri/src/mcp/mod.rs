@@ -8,6 +8,7 @@ pub mod controller;
 pub mod files;
 #[cfg(test)]
 mod guard;
+pub mod logs;
 pub mod map;
 pub mod proposals;
 pub mod resources;
