@@ -304,6 +304,8 @@ export interface McpSession {
   calls: number;
   /** Идёт вызов. */
   active: boolean;
+  /** Вызовов сессии в журнале, включая отказы: растёт с каждой записью. */
+  logged: number;
   approved: boolean;
 }
 

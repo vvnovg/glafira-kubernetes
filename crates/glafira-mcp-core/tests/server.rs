@@ -35,6 +35,8 @@ struct Fake {
     /// Операций с кластером сейчас и наибольшее число одновременных.
     active: AtomicUsize,
     peak: AtomicUsize,
+    /// Сколько раз сервер сообщил об изменении сессий (событие статуса для интерфейса).
+    changed: AtomicUsize,
 }
 
 impl Fake {
@@ -46,6 +48,7 @@ impl Fake {
             names: BTreeMap::from([("c1", "dev")]),
             active: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
+            changed: AtomicUsize::new(0),
         })
     }
 }
@@ -64,7 +67,9 @@ impl Hooks for Fake {
         self.closed.lock().unwrap().push(session_id.to_string());
     }
 
-    fn sessions_changed(&self) {}
+    fn sessions_changed(&self) {
+        self.changed.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -520,6 +525,34 @@ async fn cancelled_waiter_leaves_the_queue_without_freeing_the_slot() {
     assert!(msg.starts_with("busy:"), "{msg}");
     ok(long.await.unwrap());
     ok(call(&c, "long", json!({"ms": 10, "waitMs": 50})).await);
+}
+
+#[tokio::test]
+async fn every_audited_call_moves_the_log_counter_and_reports_it() {
+    let fake = Fake::new(SessionAccess::Pending);
+    let e = env(fake.clone()).await;
+    let c = Arc::new(client(&e.ep).await);
+    // Отказ до вызова: счётчик вызовов не растёт, а запись в журнале и событие статуса есть.
+    let before = fake.changed.load(Ordering::SeqCst);
+    let msg = err(&call(&c, "echo", json!({"connectionId": "c1"})).await);
+    assert!(msg.starts_with("client_not_approved:"), "{msg}");
+    let s = &e.handle.sessions()[0];
+    assert_eq!((s.calls, s.logged), (0, 1));
+    assert!(fake.changed.load(Ordering::SeqCst) > before);
+    // Вызов закончился, пока другой ещё идёт: `active` и `calls` не меняются, `logged` растёт.
+    *fake.access.lock().unwrap() = SessionAccess::Approved;
+    let slow = {
+        let c = c.clone();
+        tokio::spawn(async move { call(&c, "slow", json!({"ms": 500})).await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let s = e.handle.sessions()[0].clone();
+    ok(call(&c, "echo", json!({"connectionId": "c1"})).await);
+    let after = e.handle.sessions()[0].clone();
+    assert!(after.active);
+    assert_eq!(after.logged, s.logged + 1);
+    ok(slow.await.unwrap());
+    assert_eq!(e.handle.sessions()[0].logged, 3);
 }
 
 #[tokio::test]

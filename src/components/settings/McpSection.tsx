@@ -68,9 +68,9 @@ function auditWhat(e: McpAuditEntry, t: (k: string, o?: Record<string, string>) 
   return key ? t(key) : e.event;
 }
 
-/** Что меняется вместе с журналом: состояние сервера, сессии, их вызовы и клиенты. */
+/** Что меняется вместе с журналом: состояние сервера, сессии, их записи в журнале и клиенты. */
 function activity(s: McpStatus): string {
-  const sessions = s.sessions.map((x) => `${x.id}:${x.calls}:${x.active}`).join(",");
+  const sessions = s.sessions.map((x) => `${x.id}:${x.logged}`).join(",");
   const clients = s.approvedClients.map((c) => c.name).join(",");
   return `${s.state}|${s.enabled}|${sessions}|${clients}|${s.pending.length}`;
 }
@@ -100,7 +100,7 @@ export function McpSection() {
   });
   const reveal = useMutation({ mutationFn: () => api.revealMcpAudit() });
   // Журнал перечитывается сам, пока раздел открыт: статус приходит событиями из Rust, и его
-  // изменение (новый или завершённый вызов, сессия, клиент) значит новые записи журнала.
+  // изменение (записанный вызов или отказ — счётчик `logged`, сессия, клиент) значит новые записи журнала.
   const seen = useRef<string | undefined>(undefined);
   const now = status.data ? activity(status.data) : undefined;
   useEffect(() => {

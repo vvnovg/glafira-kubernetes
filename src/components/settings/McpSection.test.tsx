@@ -83,7 +83,7 @@ describe("McpSection", () => {
 
   it("сессии, отзыв клиента и журнал", async () => {
     const status = mcpStatus({
-      sessions: [{ id: "s1", clientName: "claude-ai", clientVersion: "1.2", startedMs: 0, calls: 7, active: false, approved: true }],
+      sessions: [{ id: "s1", clientName: "claude-ai", clientVersion: "1.2", startedMs: 0, calls: 7, active: false, logged: 0, approved: true }],
       approvedClients: [{ name: "claude-ai", version: "1.2", firstSeenMs: 0, lastSeenMs: 0 }],
     });
     vi.mocked(api.getMcpStatus).mockResolvedValue(status);
@@ -111,7 +111,7 @@ describe("McpSection", () => {
   });
 
   it("журнал обновляется сам, когда статус сообщает о новых вызовах", async () => {
-    const session = { id: "s1", clientName: "claude-ai", clientVersion: "1.2", startedMs: 0, calls: 0, active: false, approved: true };
+    const session = { id: "s1", clientName: "claude-ai", clientVersion: "1.2", startedMs: 0, calls: 0, active: false, logged: 0, approved: true };
     vi.mocked(api.getMcpStatus).mockResolvedValue(mcpStatus({ sessions: [session] }));
     const { client } = renderWithClient(<McpSection />);
     expect(await screen.findByText("Журнал пуст.")).toBeInTheDocument();
@@ -119,9 +119,12 @@ describe("McpSection", () => {
     vi.mocked(api.getMcpAudit).mockResolvedValue([
       { ts: 0, event: "call", client: "claude-ai 1.2", tool: "get_pod_logs", outcome: "ok", ms: 9 },
     ]);
-    // Событие статуса из Rust: вызов завершился.
-    act(() => client.setQueryData(MCP_STATUS_KEY, mcpStatus({ sessions: [{ ...session, calls: 1 }] })));
+    // Событие статуса из Rust: вызов записан в журнал, а другой ещё идёт (`active`, `calls` те же).
+    act(() => client.setQueryData(MCP_STATUS_KEY, mcpStatus({ sessions: [{ ...session, calls: 2, active: true }] })));
+    act(() => client.setQueryData(MCP_STATUS_KEY, mcpStatus({ sessions: [{ ...session, calls: 2, active: true, logged: 1 }] })));
     expect(await screen.findByText("get_pod_logs")).toBeInTheDocument();
-    expect(api.getMcpAudit).toHaveBeenCalledTimes(2);
+    // Отказ до вызова (rate_limited): меняется только `logged`.
+    act(() => client.setQueryData(MCP_STATUS_KEY, mcpStatus({ sessions: [{ ...session, calls: 2, active: true, logged: 2 }] })));
+    await waitFor(() => expect(api.getMcpAudit).toHaveBeenCalledTimes(3));
   });
 });

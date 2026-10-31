@@ -35,6 +35,9 @@ pub struct SessionSnapshot {
     pub calls: u64,
     /// Идёт вызов (для подсветки индикатора).
     pub active: bool,
+    /// Вызовов сессии, записанных в журнал, включая отказы до вызова (`rate_limited`, право):
+    /// растёт с каждой записью, по нему интерфейс перечитывает журнал.
+    pub logged: u64,
 }
 
 struct SessionEntry {
@@ -42,6 +45,7 @@ struct SessionEntry {
     started_ms: u64,
     calls: u64,
     in_flight: u32,
+    logged: u64,
     limiter: RateLimiter,
     cancel: CancellationToken,
 }
@@ -80,6 +84,7 @@ impl McpServerHandle {
                 started_ms: e.started_ms,
                 calls: e.calls,
                 active: e.in_flight > 0,
+                logged: e.logged,
             })
             .collect();
         v.sort_by_key(|s| s.started_ms);
@@ -205,6 +210,7 @@ async fn handle_conn<H, F>(
             started_ms: now_ms(),
             calls: 0,
             in_flight: 0,
+            logged: 0,
             limiter: RateLimiter::new(CALLS_PER_MINUTE),
             cancel: ct.clone(),
         },
@@ -474,7 +480,7 @@ impl Session {
         let started = tokio::time::Instant::now();
         let view = self.identify(ctx.client_info());
         // Отметка «идёт вызов» снимается после записи в журнал: интерфейс перечитывает журнал по
-        // событию статуса и должен застать в нём этот вызов.
+        // событию статуса (счётчик `logged`) и должен застать в нём этот вызов.
         let (flag, result) = match self.admit(&view) {
             Ok(flag) => (Some(flag), body.await),
             Err(e) => (None, Err(e)),
@@ -519,7 +525,14 @@ impl Session {
             returned: counts.map(|c| c.1),
             masked: counts.map(|c| c.2),
         });
-        drop(flag);
+        if let Some(e) = self.shared.sessions().get_mut(&self.id) {
+            e.logged += 1;
+        }
+        // Событие статуса: у принятого вызова — снятием отметки, у отказа до вызова — здесь.
+        match flag {
+            Some(flag) => drop(flag),
+            None => self.shared.hooks.sessions_changed(),
+        }
         out
     }
 }
