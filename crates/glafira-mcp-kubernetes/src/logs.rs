@@ -9,6 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::mask::Masker;
+use crate::model::WorkloadRef;
 
 /// Строка в ответе длиннее обрезается (по границе символа).
 pub const MAX_LINE_BYTES: usize = 4096;
@@ -23,6 +24,17 @@ pub const MAX_POD_SINCE_S: u32 = 7 * 86_400;
 pub const MAX_FILTER_CHARS: usize = 1024;
 /// Предел размера скомпилированного регулярного выражения.
 const REGEX_SIZE_LIMIT: usize = 1 << 20;
+
+pub const DEFAULT_SEARCH_SINCE_S: u32 = 3600;
+pub const MAX_SEARCH_SINCE_S: u32 = 86_400;
+pub const DEFAULT_MAX_MATCHES: u32 = 200;
+pub const MAX_MATCHES: u32 = 1000;
+pub const MAX_CONTEXT_LINES: u32 = 5;
+/// Пределы просмотра `search_workload_logs` (спец. §10.4): подов, байт логов и секунд. Бэкенд
+/// останавливается на первом и сообщает, на каком (`stopped`).
+pub const SEARCH_PODS: usize = 20;
+pub const SEARCH_BYTES: u64 = 50 * 1024 * 1024;
+pub const SEARCH_SECONDS: u64 = 40;
 
 pub const OLDER_LINES_HINT: &str = "The response was truncated to 100 KB: the oldest lines were dropped. Narrow the time range, lower tailLines or add a filter";
 
@@ -120,18 +132,28 @@ pub enum LogsOp {
         since: Option<Since>,
         tail_lines: Option<u32>,
     },
+    /// Логи всех контейнеров подов workload'а за `since_seconds`: не больше [`SEARCH_PODS`]
+    /// подов (по имени), [`SEARCH_BYTES`] байт и [`SEARCH_SECONDS`] секунд.
+    Workload {
+        connection_id: String,
+        namespace: String,
+        workload: WorkloadRef,
+        since_seconds: u32,
+    },
 }
 
 impl LogsOp {
     pub fn connection_id(&self) -> &str {
         match self {
-            LogsOp::Pod { connection_id, .. } => connection_id,
+            LogsOp::Pod { connection_id, .. } | LogsOp::Workload { connection_id, .. } => {
+                connection_id
+            }
         }
     }
 
     pub fn namespace(&self) -> &str {
         match self {
-            LogsOp::Pod { namespace, .. } => namespace,
+            LogsOp::Pod { namespace, .. } | LogsOp::Workload { namespace, .. } => namespace,
         }
     }
 }
@@ -153,9 +175,38 @@ pub struct ContainerLog {
     pub lines: Vec<RawLine>,
 }
 
+/// На каком пределе бэкенд остановил просмотр логов workload'а.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Stop {
+    Pods,
+    Bytes,
+    Time,
+}
+
+/// Контейнер, лог которого не прочитался (ещё не запускался, нет прав, обрыв).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogError {
+    pub pod: String,
+    pub container: String,
+    pub error: String,
+}
+
+/// Логи подов workload'а.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WorkloadLogs {
+    pub logs: Vec<ContainerLog>,
+    pub errors: Vec<LogError>,
+    /// Подов у workload'а (просмотрено — не больше [`SEARCH_PODS`]).
+    pub pods_total: usize,
+    pub stopped: Option<Stop>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LogsOutput {
     Pod(ContainerLog),
+    Workload(WorkloadLogs),
 }
 
 /// Строка в ответе: после маскировки и обрезки.
@@ -259,6 +310,132 @@ pub fn pod_logs(log: ContainerLog, matcher: &Matcher, m: &Masker) -> PodLogs {
     out.masked = lines.iter().map(|(_, n)| *n as u64).sum();
     out.lines = lines.into_iter().map(|(l, _)| l).collect();
     out.returned = out.lines.len() as u64;
+    out
+}
+
+/// Совпадение в логе workload'а со строками контекста.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Match {
+    pub pod: String,
+    pub container: String,
+    #[serde(flatten)]
+    pub line: Line,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub before: Vec<Line>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub after: Vec<Line>,
+}
+
+/// Ответ `search_workload_logs`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Search {
+    pub matches: Vec<Match>,
+    /// Подов просмотрено и всего у workload'а.
+    pub pods: usize,
+    pub pods_total: usize,
+    /// Строк просмотрено, совпадений в ответе, замен маскировки (в совпадениях и контексте).
+    pub scanned: u64,
+    pub returned: u64,
+    pub masked: u64,
+    /// Совпадений больше `maxMatches` или ответ обрезан до 100 КБ.
+    pub truncated: bool,
+    /// Просмотр остановлен пределом: подов (20), байт (50 МБ) или времени (40 с).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<Stop>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<LogError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<&'static str>,
+}
+
+pub const MORE_MATCHES_HINT: &str = "There are more matches than returned: narrow the filter or the time range, or raise maxMatches (up to 1000)";
+pub const STOPPED_HINT: &str = "The scan stopped at a limit (20 pods, 50 MB of logs or 40 seconds, see stopped): the matches cover only the scanned part. Narrow the time range with sinceSeconds or read single pods with get_pod_logs";
+
+fn matches_of(s: &mut Search) -> &mut Vec<Match> {
+    &mut s.matches
+}
+
+/// Поиск по логам workload'а: совпадения по немаскированным строкам, контекст до и после,
+/// всё — после маскировки; не больше `max_matches`, ответ — до 100 КБ.
+pub fn search(
+    w: WorkloadLogs,
+    matcher: &Matcher,
+    m: &Masker,
+    max_matches: usize,
+    context: usize,
+) -> Search {
+    let pods: std::collections::BTreeSet<&str> = w
+        .logs
+        .iter()
+        .map(|l| l.pod.as_str())
+        .chain(w.errors.iter().map(|e| e.pod.as_str()))
+        .collect();
+    let mut out = Search {
+        matches: Vec::new(),
+        pods: pods.len(),
+        pods_total: w.pods_total,
+        scanned: 0,
+        returned: 0,
+        masked: 0,
+        truncated: false,
+        stopped: w.stopped,
+        errors: w.errors.clone(),
+        hint: None,
+    };
+    let mut masked = Vec::new();
+    'logs: for log in &w.logs {
+        out.scanned += log.lines.len() as u64;
+        for (i, raw) in log.lines.iter().enumerate() {
+            if !matcher.matches(&raw.text) {
+                continue;
+            }
+            if out.matches.len() == max_matches {
+                out.truncated = true;
+                break 'logs;
+            }
+            let mut n = 0;
+            let mut line = |r: &RawLine| {
+                let (l, k) = masked_line(m, r);
+                n += k;
+                l
+            };
+            let before = log.lines[i.saturating_sub(context)..i]
+                .iter()
+                .map(&mut line)
+                .collect();
+            let after = log.lines[i + 1..(i + 1 + context).min(log.lines.len())]
+                .iter()
+                .map(&mut line)
+                .collect();
+            let hit = line(raw);
+            out.matches.push(Match {
+                pod: log.pod.clone(),
+                container: log.container.clone(),
+                line: hit,
+                before,
+                after,
+            });
+            masked.push(n);
+        }
+    }
+    // После обрыва по maxMatches остальные строки не просмотрены — но прочитаны: счёт полный.
+    if out.truncated {
+        out.scanned = w.logs.iter().map(|l| l.lines.len() as u64).sum();
+    }
+    if glafira_mcp_core::fit::fit(&mut out, matches_of) {
+        out.truncated = true;
+    }
+    out.returned = out.matches.len() as u64;
+    out.masked = masked[..out.matches.len()].iter().map(|n| *n as u64).sum();
+    out.hint = if out.stopped.is_some() {
+        Some(STOPPED_HINT)
+    } else if out.truncated {
+        Some(MORE_MATCHES_HINT)
+    } else {
+        None
+    };
     out
 }
 
@@ -377,5 +554,81 @@ mod tests {
             out.lines.last().unwrap().text.starts_with("0399 "),
             "новые строки остаются"
         );
+    }
+
+    fn container(pod: &str, lines: &[&str]) -> ContainerLog {
+        ContainerLog {
+            pod: pod.into(),
+            container: "web".into(),
+            lines: lines.iter().map(|l| raw(l)).collect(),
+        }
+    }
+
+    #[test]
+    fn search_finds_matches_with_masked_context() {
+        let w = WorkloadLogs {
+            logs: vec![
+                container(
+                    "web-a",
+                    &["start", "token=abc retry", "ERROR db down", "after", "end"],
+                ),
+                container("web-b", &["ERROR disk full password=x"]),
+            ],
+            errors: vec![LogError {
+                pod: "web-c".into(),
+                container: "web".into(),
+                error: "BAD_REQUEST: container is waiting to start".into(),
+            }],
+            pods_total: 3,
+            stopped: None,
+        };
+        let m = Matcher::new(Some(&filter(Some("error"), None, None))).unwrap();
+        let s = search(w, &m, &Masker::default(), 200, 1);
+        assert_eq!((s.pods, s.pods_total, s.scanned), (3, 3, 6));
+        assert_eq!((s.returned, s.masked, s.truncated), (2, 2, false));
+        assert_eq!(s.matches[0].line.text, "ERROR db down");
+        assert_eq!(s.matches[0].before[0].text, "token=*** retry");
+        assert_eq!(s.matches[0].after[0].text, "after");
+        assert_eq!(s.matches[1].pod, "web-b");
+        assert_eq!(s.matches[1].line.text, "ERROR disk full password=***");
+        assert!(s.matches[1].before.is_empty() && s.matches[1].after.is_empty());
+        assert_eq!(s.errors.len(), 1);
+        assert!(s.hint.is_none());
+    }
+
+    #[test]
+    fn search_stops_at_max_matches_and_reports_the_stop() {
+        let lines: Vec<String> = (0..10).map(|i| format!("hit {i}")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let w = WorkloadLogs {
+            logs: vec![container("a", &refs), container("b", &refs)],
+            errors: vec![],
+            pods_total: 25,
+            stopped: Some(Stop::Pods),
+        };
+        let m = Matcher::new(Some(&filter(Some("hit"), None, None))).unwrap();
+        let s = search(w, &m, &Masker::default(), 3, 0);
+        assert_eq!((s.returned, s.scanned, s.truncated), (3, 20, true));
+        assert_eq!((s.pods, s.pods_total, s.stopped), (2, 25, Some(Stop::Pods)));
+        assert_eq!(s.hint, Some(STOPPED_HINT));
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["stopped"], "pods");
+        assert_eq!(v["matches"][0]["text"], "hit 0");
+    }
+
+    #[test]
+    fn search_fits_100_kb() {
+        let long = format!("hit {}", "x".repeat(3000));
+        let refs: Vec<&str> = (0..100).map(|_| long.as_str()).collect();
+        let w = WorkloadLogs {
+            logs: vec![container("a", &refs)],
+            pods_total: 1,
+            ..WorkloadLogs::default()
+        };
+        let m = Matcher::new(Some(&filter(Some("hit"), None, None))).unwrap();
+        let s = search(w, &m, &Masker::default(), 1000, 0);
+        assert!(s.truncated && (s.returned as usize) < 100);
+        assert!(size(&s) <= glafira_mcp_core::fit::MAX_RESPONSE_BYTES);
+        assert_eq!(s.hint, Some(MORE_MATCHES_HINT));
     }
 }
