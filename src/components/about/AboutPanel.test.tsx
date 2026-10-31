@@ -25,6 +25,7 @@ beforeEach(() => {
     managed: true, source: "/etc/x", updatesEnabled: true, updateUrl: null, language: null, mcpEnabled: true,
     allowInsecureTls: false,
     allowExecAuth: false,
+    mcpLogsEnabled: true,
     errors: [{ key: "errors.policy.invalidBool", params: { key: "mcpEnabled", value: "2" }, text: "x" }],
   });
 });

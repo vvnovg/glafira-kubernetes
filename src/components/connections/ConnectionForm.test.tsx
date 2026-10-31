@@ -38,6 +38,7 @@ const POLICY: PolicyStatus = {
   mcpEnabled: true,
   allowInsecureTls: true,
   allowExecAuth: true,
+  mcpLogsEnabled: true,
   errors: [],
 };
 

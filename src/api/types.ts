@@ -254,6 +254,8 @@ export interface PolicyStatus {
   updateUrl: string | null;
   language: string | null;
   mcpEnabled: boolean;
+  /** false — уровень доступа LLM «Метаданные и логи» запрещён администратором. */
+  mcpLogsEnabled: boolean;
   /** false — подключения без проверки TLS запрещены администратором. */
   allowInsecureTls: boolean;
   /** false — подключения с exec-плагином запрещены администратором. */
