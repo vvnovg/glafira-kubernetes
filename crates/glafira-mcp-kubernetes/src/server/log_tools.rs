@@ -115,17 +115,19 @@ impl KubeServer {
                 "container must not be empty",
             ));
         }
-        let _busy = self.session.exclusive(ctx, self.options.long_wait).await?;
         let (out, scope) = self
-            .logs(LogsOp::Pod {
-                connection_id: p.connection_id.clone(),
-                namespace: p.namespace.clone(),
-                pod: p.pod.clone(),
-                container: p.container.clone(),
-                previous: p.previous.unwrap_or(false),
-                since,
-                tail_lines: Some(tail),
-            })
+            .logs(
+                ctx,
+                LogsOp::Pod {
+                    connection_id: p.connection_id.clone(),
+                    namespace: p.namespace.clone(),
+                    pod: p.pod.clone(),
+                    container: p.container.clone(),
+                    previous: p.previous.unwrap_or(false),
+                    since,
+                    tail_lines: Some(tail),
+                },
+            )
             .await?;
         let LogsOutput::Pod(log) = out else {
             return Err(BackendError::unexpected());
@@ -161,14 +163,16 @@ impl KubeServer {
         )?;
         let context = range(p.context_lines, 0, 0, MAX_CONTEXT_LINES, "contextLines")?;
         let matcher = Matcher::new(Some(&p.filter))?;
-        let _busy = self.session.exclusive(ctx, self.options.long_wait).await?;
         let (out, scope) = self
-            .logs(LogsOp::Workload {
-                connection_id: p.connection_id.clone(),
-                namespace: p.namespace.clone(),
-                workload: p.workload.clone(),
-                since_seconds: since,
-            })
+            .logs(
+                ctx,
+                LogsOp::Workload {
+                    connection_id: p.connection_id.clone(),
+                    namespace: p.namespace.clone(),
+                    workload: p.workload.clone(),
+                    since_seconds: since,
+                },
+            )
             .await?;
         let LogsOutput::Workload(w) = out else {
             return Err(BackendError::unexpected());

@@ -19,10 +19,12 @@ use glafira_mcp_kubernetes::proposals::*;
 use glafira_mcp_kubernetes::resources::*;
 use glafira_mcp_kubernetes::{GatewayOptions, INSTRUCTIONS};
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig, Implementation,
-    ProtocolVersion,
+    CallToolRequest, CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig,
+    ClientRequest, Implementation, ProtocolVersion,
 };
-use rmcp::service::{ClientLifecycleMode, RunningService, serve_client_with_lifecycle};
+use rmcp::service::{
+    ClientLifecycleMode, PeerRequestOptions, RunningService, serve_client_with_lifecycle,
+};
 use rmcp::{RoleClient, ServiceExt};
 use serde_json::{Value, json};
 
@@ -1429,6 +1431,79 @@ async fn logs_and_observation_queue_for_one_long_operation_per_session() {
     let msg = err(&second);
     assert!(msg.starts_with("busy:"), "{msg}");
     assert!(msg.contains("after waiting 100 ms"), "{msg}");
+}
+
+#[tokio::test]
+async fn logs_refusals_do_not_wait_in_the_queue() {
+    let fake = Fake::new();
+    *fake.log_delay.lock().unwrap() = Duration::from_secs(2);
+    let e = env(fake).await;
+    let c = Arc::new(client(&e.ep).await);
+    let long = {
+        let c = c.clone();
+        tokio::spawn(async move {
+            call(
+                &c,
+                "get_pod_logs",
+                json!({"connectionId": "c5", "namespace": "team-a", "pod": "web-1"}),
+            )
+            .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Подключение только с метаданными: отказ сразу, а не после чужого чтения.
+    let started = std::time::Instant::now();
+    let msg = err(&call(
+        &c,
+        "get_pod_logs",
+        json!({"connectionId": "c1", "namespace": "team-a", "pod": "web-1"}),
+    )
+    .await);
+    assert!(msg.starts_with("logs_not_allowed:"), "{msg}");
+    let msg = err(&call(
+        &c,
+        "search_workload_logs",
+        json!({"connectionId": "c1", "namespace": "team-a",
+            "workload": {"kind": "Deployment", "name": "web"}, "filter": {"contains": "x"}}),
+    )
+    .await);
+    assert!(msg.starts_with("logs_not_allowed:"), "{msg}");
+    assert!(
+        started.elapsed() < Duration::from_millis(1000),
+        "отказы не ждали очереди: {:?}",
+        started.elapsed()
+    );
+    ok(long.await.unwrap());
+}
+
+#[tokio::test]
+async fn cancelled_log_read_frees_the_long_operation_slot() {
+    let fake = Fake::new();
+    *fake.log_delay.lock().unwrap() = Duration::from_secs(2);
+    let e = env_with(fake, |o| o.long_wait = Duration::from_millis(500)).await;
+    let c = client(&e.ep).await;
+    let p = CallToolRequestParams::new("get_pod_logs").with_arguments(
+        json!({"connectionId": "c5", "namespace": "team-a", "pod": "web-1"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    let read = c
+        .send_cancellable_request(
+            ClientRequest::CallToolRequest(CallToolRequest::new(p)),
+            PeerRequestOptions::no_options(),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    read.cancel(Some("test".into())).await.unwrap();
+    // Слот освободился сразу: следующее чтение не ждёт 2 с отменённого и не получает `busy`.
+    ok(call(
+        &c,
+        "get_pod_logs",
+        json!({"connectionId": "c5", "namespace": "team-a", "pod": "web-1"}),
+    )
+    .await);
 }
 
 #[tokio::test]

@@ -65,7 +65,8 @@ in a session, and a second one waits in a queue for up to 60 seconds before it a
 /// Сколько длительная операция (наблюдение, логи) ждёт в очереди сессии, пока идёт другая,
 /// прежде чем ответить `busy`. Клиенты (Claude Code) шлют вызовы пачкой, и второй должен
 /// пережить одну идущую операцию целиком: самая долгая — `observe_workload` (до 50 с окна и 3 с
-/// на последний образец), чтение и поиск логов — до 40 с. Отсюда 60 с.
+/// на последний образец), чтение и поиск логов — до 40 с. Отсюда 60 с. Клиент с таймаутом
+/// запроса около 60 с может не дождаться ответа вызова из очереди (ожидание плюс своя операция).
 pub const LONG_OPERATION_WAIT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
@@ -164,17 +165,31 @@ impl KubeServer {
         self.backend.read(op).await
     }
 
-    /// Чтение логов: область LLM и уровень `logs`, затем слоты. Длительная операция сессии
-    /// (`exclusive`) — у вызывающего: одна на сессию, общая с `observe_workload`; следующая ждёт
-    /// в очереди до `long_wait`.
+    /// Чтение логов: область LLM и уровень `logs` — до очереди (отказ не ждёт чужую операцию до
+    /// 60 с) и ещё раз после неё (за время ожидания человек мог закрыть доступ); затем длительная
+    /// операция сессии (одна на сессию, общая с `observe_workload`, следующая ждёт в очереди до
+    /// `long_wait`) и слоты. Отмена запроса клиентом прерывает чтение и освобождает слот.
     async fn logs(
         &self,
+        ctx: &RequestContext<RoleServer>,
         op: crate::logs::LogsOp,
     ) -> Result<(crate::logs::LogsOutput, Scope), BackendError> {
-        let scope = self.scope(op.connection_id(), Some(op.namespace()))?;
-        scope.require_logs()?;
+        let (id, ns) = (op.connection_id().to_string(), op.namespace().to_string());
+        let allowed = || -> Result<Scope, BackendError> {
+            let scope = self.scope(&id, Some(&ns))?;
+            scope.require_logs()?;
+            Ok(scope)
+        };
+        allowed()?;
+        let _busy = self.session.exclusive(ctx, self.options.long_wait).await?;
+        let scope = allowed()?;
         let _slots = self.session.slots().await?;
-        let out = self.backend.logs(op).await?;
+        let out = tokio::select! {
+            out = self.backend.logs(op) => out?,
+            _ = ctx.ct.cancelled() => {
+                return Err(BackendError::new("cancelled", "The request was cancelled"));
+            }
+        };
         Ok((out, scope))
     }
 }
