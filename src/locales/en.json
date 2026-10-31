@@ -81,7 +81,9 @@
       "pemContainsKey": "A certificate field contains a private key — put the key into the key field",
       "credentialsInUrl": "Remove the user name and password from “{{url}}”: credentials do not belong in the address (a proxy with a password is set via the system HTTPS_PROXY)",
       "badMetricsUrl": "Invalid metrics source address “{{url}}”: use https://host[:port][/path]",
-      "metricsHttpsRequired": "A metrics source with a token needs an https:// address"
+      "metricsHttpsRequired": "A metrics source with a token needs an https:// address",
+      "maskFieldsTooMany": "At most {{max}} field names to mask",
+      "maskFieldTooLong": "A field name to mask is longer than {{max}} characters: {{name}}"
     },
     "folders": {
       "notFound": "Folder {{id}} not found",

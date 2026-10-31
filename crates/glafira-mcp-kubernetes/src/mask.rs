@@ -31,6 +31,10 @@ pub const DEFAULT_NAMES: [&str; 10] = [
     "authorization",
 ];
 
+/// Сколько имён полей может быть в списке подключения и какой длины (спец. §10.3).
+pub const MAX_MASK_FIELDS: usize = 200;
+pub const MAX_MASK_FIELD_CHARS: usize = 64;
+
 /// Имя заголовка, у которого значение — несколько слов (схема и учётные данные).
 const HEADER_NAME: &str = "authorization";
 

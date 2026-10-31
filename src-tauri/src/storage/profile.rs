@@ -158,13 +158,14 @@ fn default_connect_timeout() -> u64 {
 }
 
 /// Доступ LLM к подключению через MCP (спец. §10.2): `off` — подключения для LLM нет,
-/// `metadata` — объекты, статусы и события без значений конфигурации. Уровень `logs` — этап O4.
-/// Неизвестное значение из файла более новой версии читается как `Off`: старая версия доступ
-/// только сужает.
+/// `metadata` — объекты, статусы и события без значений конфигурации, `logs` — ещё логи подов,
+/// литеральные значения env и значения ConfigMap (после маскировки). Неизвестное значение из
+/// файла более новой версии читается как `Off`: старая версия доступ только сужает.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LlmAccess {
     Metadata,
+    Logs,
     #[default]
     #[serde(other)]
     Off,
@@ -173,6 +174,24 @@ pub enum LlmAccess {
 impl LlmAccess {
     pub fn is_off(&self) -> bool {
         *self == LlmAccess::Off
+    }
+
+    /// Уровень с учётом политики: при запрете логов (`mcpLogsEnabled = false`) `Logs` действует
+    /// как `Metadata`; сохранённое значение не меняется.
+    pub fn effective(self, logs_allowed: bool) -> Self {
+        if self == LlmAccess::Logs && !logs_allowed {
+            LlmAccess::Metadata
+        } else {
+            self
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LlmAccess::Metadata => "metadata",
+            LlmAccess::Logs => "logs",
+            LlmAccess::Off => "off",
+        }
     }
 }
 
@@ -280,6 +299,10 @@ pub struct ConnectionProfile {
     /// Проекты, которые видит LLM; `None` — все доступные пользователю. Локальное поле.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_namespaces: Option<Vec<String>>,
+    /// Имена полей для маскировки в ответах LLM (спец. §10.3); `None` — стандартный список крейта.
+    /// Действует на уровне `logs`. Локальное поле, как `llm_access`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_mask_fields: Option<Vec<String>>,
     /// Источник метрик. Локальное поле.
     #[serde(default, skip_serializing_if = "MetricsConfig::is_auto")]
     pub metrics: MetricsConfig,
@@ -310,6 +333,14 @@ pub fn normalize_profile(p: &mut ConnectionProfile) {
         list.retain_mut(|n| {
             *n = n.trim().to_string();
             !n.is_empty() && seen.insert(n.clone())
+        });
+    }
+    // Имена полей сравниваются без учёта регистра: повтор в другом регистре лишний.
+    if let Some(fields) = p.llm_mask_fields.as_mut() {
+        let mut seen = std::collections::HashSet::new();
+        fields.retain_mut(|f| {
+            *f = f.trim().to_string();
+            !f.is_empty() && seen.insert(f.to_lowercase())
         });
     }
 }
@@ -396,6 +427,30 @@ pub fn is_valid_namespace(name: &str) -> bool {
 
 fn invalid(key_and_text: crate::i18n::LocalizedText) -> AppError {
     AppError::localized(ErrorCode::InvalidInput, key_and_text)
+}
+
+/// Список полей маскировки: не больше 200 имён по 64 символа (пределы крейта MCP).
+fn validate_mask_fields(fields: &[String]) -> AppResult<()> {
+    use glafira_mcp_kubernetes::mask::{MAX_MASK_FIELD_CHARS, MAX_MASK_FIELDS};
+    if fields.len() > MAX_MASK_FIELDS {
+        return Err(invalid(ltext!(
+            "errors.connections.maskFieldsTooMany",
+            "At most {{max}} field names to mask",
+            max = MAX_MASK_FIELDS
+        )));
+    }
+    if let Some(long) = fields
+        .iter()
+        .find(|f| f.chars().count() > MAX_MASK_FIELD_CHARS)
+    {
+        return Err(invalid(ltext!(
+            "errors.connections.maskFieldTooLong",
+            "A field name to mask is longer than {{max}} characters: {{name}}",
+            max = MAX_MASK_FIELD_CHARS,
+            name = long.escape_debug()
+        )));
+    }
+    Ok(())
 }
 
 /// В адресе есть имя пользователя или пароль (`https://user:pass@host`).
@@ -510,6 +565,12 @@ pub fn validate_profile(p: &ConnectionProfile) -> AppResult<()> {
             "“{{name}}” is not a valid project name: use lowercase letters, digits and “-”",
             name = bad.escape_debug()
         )));
+    }
+    // На других уровнях список скрыт в форме и не применяется.
+    if p.llm_access == LlmAccess::Logs
+        && let Some(fields) = &p.llm_mask_fields
+    {
+        validate_mask_fields(fields)?;
     }
     if let ProxyConfig::Url { url } = &p.proxy {
         let proxy = url::Url::parse(url.trim())
@@ -675,6 +736,7 @@ pub fn sample_profile(id: &str) -> ConnectionProfile {
         order: 0,
         llm_access: LlmAccess::Off,
         llm_namespaces: None,
+        llm_mask_fields: None,
         metrics: MetricsConfig::Auto,
         extra: Default::default(),
     }
@@ -708,12 +770,83 @@ mod tests {
         );
         assert!(p.extra.is_empty(), "известные поля не уходят в extra");
         v["llmAccess"] = "logs".into();
+        v["llmMaskFields"] = serde_json::json!(["inn"]);
+        let p: ConnectionProfile = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(
+            (p.llm_access, p.llm_mask_fields.as_deref()),
+            (LlmAccess::Logs, Some(&["inn".to_string()][..]))
+        );
+        assert_eq!(serde_json::to_value(&p).unwrap()["llmMaskFields"][0], "inn");
+        v["llmAccess"] = "everything".into();
         let p: ConnectionProfile = serde_json::from_value(v).unwrap();
         assert_eq!(
             p.llm_access,
             LlmAccess::Off,
             "уровень более новой версии сужается до off"
         );
+    }
+
+    #[test]
+    fn logs_level_acts_as_metadata_when_the_policy_forbids_logs() {
+        assert_eq!(LlmAccess::Logs.effective(true), LlmAccess::Logs);
+        assert_eq!(LlmAccess::Logs.effective(false), LlmAccess::Metadata);
+        assert_eq!(LlmAccess::Metadata.effective(false), LlmAccess::Metadata);
+        assert_eq!(LlmAccess::Off.effective(true), LlmAccess::Off);
+        for a in [LlmAccess::Off, LlmAccess::Metadata, LlmAccess::Logs] {
+            assert_eq!(serde_json::to_value(a).unwrap(), a.as_str());
+        }
+    }
+
+    #[test]
+    fn mask_fields_are_cleaned_and_limited_on_the_logs_level() {
+        let mut p = sample_profile("a");
+        p.llm_access = LlmAccess::Logs;
+        p.llm_mask_fields = Some(vec![" inn ".into(), "".into(), "INN".into(), "pin".into()]);
+        normalize_profile(&mut p);
+        assert_eq!(
+            p.llm_mask_fields.as_deref(),
+            Some(&["inn".to_string(), "pin".to_string()][..])
+        );
+        assert!(validate_profile(&p).is_ok());
+        p.llm_mask_fields = Some((0..201).map(|i| format!("f{i}")).collect());
+        assert_eq!(
+            validate_profile(&p).unwrap_err().key,
+            "errors.connections.maskFieldsTooMany"
+        );
+        p.llm_mask_fields = Some(vec!["x".repeat(65)]);
+        assert_eq!(
+            validate_profile(&p).unwrap_err().key,
+            "errors.connections.maskFieldTooLong"
+        );
+        p.llm_access = LlmAccess::Metadata;
+        assert!(
+            validate_profile(&p).is_ok(),
+            "на других уровнях список не применяется"
+        );
+        p.llm_access = LlmAccess::Logs;
+        p.llm_mask_fields = Some(vec![]);
+        assert!(
+            validate_profile(&p).is_ok(),
+            "пустой список — маскируются только шаблоны"
+        );
+    }
+
+    #[test]
+    fn standard_mask_fields_match_the_form() {
+        // Форма показывает стандартный список, крейт маскирует по DEFAULT_NAMES: списки одинаковы.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/components/connections/maskFields.ts"
+        );
+        let ts = std::fs::read_to_string(path).unwrap();
+        let start = ts.find('[').unwrap();
+        let end = ts.rfind(']').unwrap();
+        let form: Vec<String> = ts[start + 1..end]
+            .split(',')
+            .map(|s| s.trim().trim_matches('"').to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert_eq!(form, glafira_mcp_kubernetes::mask::DEFAULT_NAMES.to_vec());
     }
 
     #[test]
