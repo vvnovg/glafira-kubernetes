@@ -166,6 +166,7 @@ The client shows a message from Glafira:
   instance, or the node has already removed its previous log: look at the pod state; `search_workload_logs` lists such
   containers in `errors` with the same reason;
 - `busy` — the assistant is reading logs or watching a workload in this session, and another such request did not get
-  its turn within 60 seconds: these operations run one at a time, and the next one waits in a queue;
+  its turn within 60 seconds: these operations run one at a time, and the next one waits in a queue (a client with
+  a 60-second request timeout may give up before the queued request answers);
 - `metrics_unavailable` — there is no metrics source: check the [[ui:connections.form.step.metrics]] step of the
   connection test (see [Connections](connections.md#metrics)).
