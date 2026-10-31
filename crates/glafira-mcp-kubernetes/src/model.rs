@@ -586,6 +586,9 @@ pub struct Env {
     /// Значение ConfigMap не прочиталось: нет прав, ключа или данные двоичные.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value_error: Option<String>,
+    /// The value was cut to 4 KB after masking.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub value_cut: bool,
 }
 
 /// Контейнер шаблона или пода. `command` и `args` — после маскировки (спец. §10.3).

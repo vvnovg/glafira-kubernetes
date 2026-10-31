@@ -114,6 +114,7 @@ fn container(name: &str) -> ContainerSpec {
                 reference: Some("db/password".into()),
                 value: None,
                 value_error: None,
+                value_cut: false,
             },
             // Литерал на уровне logs: значение с секретом в URL маскируется шаблоном.
             Env {
@@ -122,6 +123,7 @@ fn container(name: &str) -> ContainerSpec {
                 reference: None,
                 value: Some("postgres://app:hunter2@db:5432/app".into()),
                 value_error: None,
+                value_cut: false,
             },
             Env {
                 name: "TEAM".into(),
@@ -129,6 +131,7 @@ fn container(name: &str) -> ContainerSpec {
                 reference: None,
                 value: Some("payments".into()),
                 value_error: None,
+                value_cut: false,
             },
         ],
     }
@@ -1063,7 +1066,7 @@ async fn workload_details_are_masked() {
     let v = ok(call(
         &c,
         "describe_workload",
-        json!({"connectionId": "c1", "namespace": "team-a", "kind": "Deployment", "name": "web"}),
+        json!({"connectionId": "c5", "namespace": "team-a", "kind": "Deployment", "name": "web"}),
     )
     .await);
     let ct = &v["containers"][0];
@@ -1092,7 +1095,7 @@ async fn workload_details_are_masked() {
     let v = ok(call(
         &c,
         "describe_pod",
-        json!({"connectionId": "c1", "namespace": "team-a", "name": "web-1"}),
+        json!({"connectionId": "c5", "namespace": "team-a", "name": "web-1"}),
     )
     .await);
     assert_eq!(v["containers"][0]["args"][1], "***");
@@ -1626,6 +1629,9 @@ enum Mode {
     Capped,
     /// В тексте кластера лежат секреты.
     Leaky,
+    /// Среди env контейнеров лежат огромный литерал с секретом и ключ ConfigMap с секретным
+    /// именем, значения приходят при любом уровне доступа.
+    BigEnv,
     /// Проверка отдаёт эту запись (запущенную человеком, например) вместо записи `Fake`.
     Run(Box<HealthRun>),
 }
@@ -1671,6 +1677,28 @@ fn leak_spec(c: &mut ContainerSpec) {
         Some("exec curl -H 'Authorization: Bearer abc.def-123' http://localhost/health".into());
     c.readiness = Some("http-get http://app:hunter2@localhost:8080/ready".into());
     c.startup = Some(format!("exec check {JWT}"));
+}
+
+/// Env с огромным литералом (секрет у его начала) и ключом ConfigMap `db_password`.
+fn big_env(c: &mut ContainerSpec) {
+    c.env = vec![
+        Env {
+            name: "BIG".into(),
+            source: "literal".into(),
+            reference: None,
+            value: Some(format!("password=hunter2 {}", "x".repeat(200_000))),
+            value_error: None,
+            value_cut: false,
+        },
+        Env {
+            name: "MODE".into(),
+            source: "configMapKeyRef".into(),
+            reference: Some("app-config/db_password".into()),
+            value: Some("plain-text".into()),
+            value_error: None,
+            value_cut: false,
+        },
+    ];
 }
 
 fn leaky_overview() -> ClusterOverview {
@@ -1792,6 +1820,12 @@ impl Backend for Odd {
                     for w in &mut l.items {
                         w.images = vec![CRED_IMAGE.into()];
                     }
+                }
+                (Mode::BigEnv, ReadOutput::Workload(w)) => {
+                    w.containers.iter_mut().for_each(big_env);
+                }
+                (Mode::BigEnv, ReadOutput::Pod(p)) => {
+                    p.containers.iter_mut().for_each(|c| big_env(&mut c.spec));
                 }
                 (Mode::Leaky, ReadOutput::Workload(w)) => {
                     w.workload.images = vec![CRED_IMAGE.into()];
@@ -1971,7 +2005,7 @@ async fn cluster_text_of_workloads_goes_through_the_builtin_patterns() {
     let v = ok(call(
         &c,
         "describe_workload",
-        json!({"connectionId": "c1", "namespace": "team-a", "kind": "Deployment", "name": "web"}),
+        json!({"connectionId": "c5", "namespace": "team-a", "kind": "Deployment", "name": "web"}),
     )
     .await);
     assert_eq!(v["images"], json!([CRED_IMAGE_MASKED]));
@@ -2012,7 +2046,7 @@ async fn cluster_text_of_pods_and_events_goes_through_the_builtin_patterns() {
     let v = ok(call(
         &c,
         "describe_pod",
-        json!({"connectionId": "c1", "namespace": "team-a", "name": "web-1"}),
+        json!({"connectionId": "c5", "namespace": "team-a", "name": "web-1"}),
     )
     .await);
     assert_eq!(v["conditions"][0]["message"], "rejected ***");
@@ -2914,4 +2948,55 @@ async fn proposals_are_checked_scoped_and_listed() {
     )
     .await);
     assert!(msg.starts_with("not_allowed"), "{msg}");
+}
+
+#[tokio::test]
+async fn a_huge_env_value_is_masked_then_cut_and_the_describe_still_succeeds() {
+    let e = env_over(odd(Mode::BigEnv)).await;
+    let c = client(&e.ep).await;
+    for (tool, args) in [
+        (
+            "describe_workload",
+            json!({"connectionId": "c5", "namespace": "team-a", "kind": "Deployment", "name": "web"}),
+        ),
+        (
+            "describe_pod",
+            json!({"connectionId": "c5", "namespace": "team-a", "name": "web-1"}),
+        ),
+    ] {
+        let v = ok(call(&c, tool, args).await);
+        let env = &v["containers"][0]["env"];
+        let big = env[0]["value"].as_str().unwrap();
+        assert!(
+            big.len() <= 4096 && big.starts_with("password=***"),
+            "{tool}"
+        );
+        assert_eq!(env[0]["valueCut"], true, "{tool}");
+        assert!(!serde_json::to_string(&v).unwrap().contains("hunter2"));
+        assert_eq!(env[1]["value"], "***", "{tool}: ключ ConfigMap из списка");
+        assert!(env[1].get("valueCut").is_none(), "{tool}");
+    }
+}
+
+#[tokio::test]
+async fn env_values_never_leave_the_gateway_without_the_logs_level() {
+    let e = env_over(odd(Mode::BigEnv)).await;
+    let c = client(&e.ep).await;
+    // c1 — уровень metadata: бэкенд ошибся и отдал значения, шлюз их убирает.
+    for (tool, args) in [
+        (
+            "describe_workload",
+            json!({"connectionId": "c1", "namespace": "team-a", "kind": "Deployment", "name": "web"}),
+        ),
+        (
+            "describe_pod",
+            json!({"connectionId": "c1", "namespace": "team-a", "name": "web-1"}),
+        ),
+    ] {
+        let v = ok(call(&c, tool, args).await);
+        for env in v["containers"][0]["env"].as_array().unwrap() {
+            assert!(env.get("value").is_none(), "{tool}: {env}");
+            assert!(env.get("valueCut").is_none(), "{tool}: {env}");
+        }
+    }
 }

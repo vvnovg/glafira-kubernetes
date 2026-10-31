@@ -441,6 +441,7 @@ pub fn container_spec(c: ContainerSpecView) -> m::ContainerSpec {
                 reference: e.reference,
                 value: e.value,
                 value_error: None,
+                value_cut: false,
             })
             .collect(),
     }
