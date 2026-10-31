@@ -32,12 +32,18 @@ use crate::logs::{lossy_lines, split_line};
 const DEFAULT_CONTAINER: &str = "kubectl.kubernetes.io/default-container";
 /// Запас на время в начале строки (`2026-10-30T10:00:00.123456789Z `).
 const TS_ROOM: usize = 64;
-/// Ответ kubelet'а с кодом 200 вместо лога, который среда выполнения уже удалила (часто у
-/// `previous` в CrashLoopBackOff): одна строка без времени, хотя оно запрошено.
-const KUBELET_LOG_GONE: &str = "unable to retrieve container logs for ";
-/// Ответы 400 API-сервера на лог контейнера, который не запускался или не имел прошлого запуска.
+/// Ответы kubelet'а с кодом 200 вместо лога, который среда выполнения уже удалила (часто у
+/// `previous` в CrashLoopBackOff): одна строка без времени, хотя оно запрошено. Вторая — когда
+/// файла лога нет, а контейнер среда выполнения ещё помнит.
+const KUBELET_LOG_GONE: [&str; 2] = [
+    "unable to retrieve container logs for ",
+    "failed to try resolving symlinks in path ",
+];
+/// Ответы 400 API-сервера на лог контейнера, который не запускался, не имел прошлого запуска
+/// или завершился и узлом уже забыт.
 const WAITING_TO_START: &str = " is waiting to start";
 const NO_PREVIOUS: &str = "previous terminated container ";
+const TERMINATED: &str = " is terminated";
 /// Длина причины ожидания (из ответа API-сервера) в тексте для модели.
 const MAX_REASON_CHARS: usize = 200;
 
@@ -49,6 +55,8 @@ pub enum Unavailable {
     Waiting(String),
     /// Прошлого запуска нет (`previous` у контейнера без перезапусков).
     NoPrevious,
+    /// Контейнер завершился, и узел его больше не знает (`container "x" in pod "y" is terminated`).
+    Terminated,
     /// Среда выполнения узла уже удалила лог.
     Gone,
 }
@@ -60,7 +68,7 @@ impl Unavailable {
         if e.key != "errors.k8s.invalid" {
             return None;
         }
-        let msg = e.params.get("message")?;
+        let msg = e.params.get("message")?.trim();
         if let Some(i) = msg.find(WAITING_TO_START) {
             let reason = msg[i + WAITING_TO_START.len()..]
                 .trim_start_matches(':')
@@ -69,7 +77,10 @@ impl Unavailable {
                 reason.chars().take(MAX_REASON_CHARS).collect(),
             ));
         }
-        (msg.starts_with(NO_PREVIOUS) && msg.ends_with(" not found")).then_some(Self::NoPrevious)
+        if msg.starts_with(NO_PREVIOUS) && msg.ends_with(" not found") {
+            return Some(Self::NoPrevious);
+        }
+        (msg.starts_with("container ") && msg.ends_with(TERMINATED)).then_some(Self::Terminated)
     }
 
     /// Текст для модели: причина и что делать дальше.
@@ -83,6 +94,9 @@ impl Unavailable {
             ),
             Self::NoPrevious => format!(
                 "Container \"{container}\" has no previous terminated instance, so there is no previous log. Read the current log without previous, or check the pod state with describe_pod"
+            ),
+            Self::Terminated => format!(
+                "The log of container \"{container}\" is unavailable: the container has terminated and the node no longer keeps it. Check the pod state with describe_pod"
             ),
             Self::Gone if previous => format!(
                 "The previous log of container \"{container}\" is no longer available on the node: the container runtime has removed it. Read the current log without previous, or check the pod state with describe_pod"
@@ -205,13 +219,15 @@ impl Read {
 /// Весь ответ — одна строка kubelet'а без времени об удалённом логе. Строка без времени в
 /// другом месте лога — строка приложения, её не трогаем.
 fn kubelet_log_gone(lines: &[RawLine]) -> bool {
-    matches!(lines, [only] if only.ts.is_none() && only.text.starts_with(KUBELET_LOG_GONE))
+    matches!(lines, [only] if only.ts.is_none()
+        && KUBELET_LOG_GONE.iter().any(|p| only.text.starts_with(p)))
 }
 
 /// Строки лога до конца потока, `deadline` или исчерпания `budget` байт (`budget` уменьшается
-/// на прочитанное). Ошибка открытия потока — ошибка, кроме «контейнер не запускался» и «нет
-/// прошлого запуска» (`unavailable`); обрыв посреди — тоже ошибка. Ответ из одной строки
-/// kubelet'а об удалённом логе — тоже `unavailable`, а не строка лога.
+/// на прочитанное). Ошибка открытия потока — ошибка, кроме «контейнер не запускался», «нет
+/// прошлого запуска» и «завершился и забыт узлом» (`unavailable`); обрыв посреди — тоже
+/// ошибка. Ответ из одной строки kubelet'а об удалённом логе (или его файле) — тоже
+/// `unavailable`, а не строка лога.
 async fn read_log(
     r: &ReadClient,
     namespace: &str,
@@ -629,6 +645,18 @@ mod tests {
             (l.lines[0].ts.as_deref(), l.lines[0].text.as_str()),
             (None, "unable to retrieve container logs for x")
         );
+        // Файла лога нет, контейнер среда выполнения ещё помнит — тоже весь ответ.
+        let symlink = || {
+            (
+                200,
+                b"failed to try resolving symlinks in path \"/var/log/pods/team-a_web-1/crash/1.log\": lstat /var/log/pods/team-a_web-1/crash/1.log: no such file or directory".to_vec(),
+            )
+        };
+        assert!(
+            unavailable(pod_log_answered("crash", true, symlink).await).starts_with(
+                "The previous log of container \"crash\" is no longer available on the node"
+            )
+        );
         let after = || {
             (
                 200,
@@ -657,11 +685,17 @@ mod tests {
             unavailable(pod_log_answered("web", false, init).await)
                 .contains("waiting to start (PodInitializing)")
         );
+        // Перевод строки в конце ответа не мешает распознаванию.
         let none =
-            || bad_request("previous terminated container \"web\" in pod \"web-1\" not found");
+            || bad_request("previous terminated container \"web\" in pod \"web-1\" not found\n");
         assert_eq!(
             unavailable(pod_log_answered("web", true, none).await),
             "Container \"web\" has no previous terminated instance, so there is no previous log. Read the current log without previous, or check the pod state with describe_pod"
+        );
+        let terminated = || bad_request("container \"web\" in pod \"web-1\" is terminated");
+        assert_eq!(
+            unavailable(pod_log_answered("web", false, terminated).await),
+            "The log of container \"web\" is unavailable: the container has terminated and the node no longer keeps it. Check the pod state with describe_pod"
         );
         // Другой отказ 400 — по-прежнему ошибка запроса.
         let other = || bad_request("a container name must be specified for pod web-1");
