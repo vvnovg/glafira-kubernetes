@@ -420,13 +420,21 @@ impl Backend for Fake {
         if let Some(changed) = self.scope_overrides.lock().unwrap().get(connection_id) {
             return changed.clone().map(|namespaces| Scope {
                 namespaces: Some(namespaces),
+                ..Scope::default()
             });
         }
         match connection_id {
             "c1" => Some(Scope {
                 namespaces: Some(BTreeSet::from(["team-a".to_string()])),
+                ..Scope::default()
             }),
             "c2" => Some(Scope::default()),
+            // Уровень logs со своим списком имён полей (спец. §10.3).
+            "c3" => Some(Scope {
+                namespaces: Some(BTreeSet::from(["team-a".to_string()])),
+                logs: LogsAccess::Allowed,
+                mask_fields: Some(vec!["team".into()]),
+            }),
             _ => None,
         }
     }
@@ -990,6 +998,32 @@ async fn workload_details_are_masked() {
     assert_eq!(v["containers"][0]["state"]["reason"], "CrashLoopBackOff");
     assert_eq!(v["masked"], 3);
     assert_eq!(v["events"][0]["reason"], "BackOff");
+}
+
+#[tokio::test]
+async fn describe_masks_with_the_connection_field_names() {
+    let e = env(Fake::new()).await;
+    let c = client(&e.ep).await;
+    let v = ok(call(
+        &c,
+        "describe_workload",
+        json!({"connectionId": "c3", "namespace": "team-a", "kind": "Deployment", "name": "web"}),
+    )
+    .await);
+    assert_eq!(
+        v["annotations"],
+        json!({"example.com/api-token": "abc", "team": "***"}),
+        "свой список заменяет стандартный"
+    );
+    let ct = &v["containers"][0];
+    assert_eq!(ct["command"], json!(["/app", "--db-password=hunter2"]));
+    let v = ok(call(
+        &c,
+        "describe_pod",
+        json!({"connectionId": "c3", "namespace": "team-a", "name": "web-1"}),
+    )
+    .await);
+    assert_eq!(v["annotations"]["team"], "***");
 }
 
 #[tokio::test]

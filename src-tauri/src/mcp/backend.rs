@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use glafira_mcp_core::{BackendError, BoxFuture, Hooks, SessionAccess, SessionView};
 use glafira_mcp_kubernetes::health as mh;
-use glafira_mcp_kubernetes::model::{self as m, Scope, not_allowed};
+use glafira_mcp_kubernetes::model::{self as m, LogsAccess, Scope, not_allowed};
 use glafira_mcp_kubernetes::{Backend, ReadOp, ReadOutput};
 use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
 use k8s_openapi::api::core::v1::{Node, PersistentVolumeClaim, Pod, ResourceQuota, Service};
@@ -35,7 +35,7 @@ use crate::k8s::pods::{WorkloadRef, get_pod, list_pods};
 use crate::k8s::read::{ReadClient, by_labels, check_field_value};
 use crate::k8s::workloads::{WorkloadKind, get_row, get_workload, list_workloads};
 use crate::state::AppState;
-use crate::storage::profile::{ConnectionProfile, is_valid_namespace};
+use crate::storage::profile::{ConnectionProfile, LlmAccess, is_valid_namespace};
 
 /// Что-то изменилось для интерфейса; `true` — нужен диалог подтверждения (привлечь внимание).
 pub type OnChange = Arc<dyn Fn(bool) + Send + Sync>;
@@ -111,10 +111,11 @@ impl AppBackend {
                     .ok()
                     .and_then(|v| v.as_str().map(String::from))
                     .unwrap_or_default(),
-                llm_access: serde_json::to_value(p.llm_access)
-                    .ok()
-                    .and_then(|v| v.as_str().map(String::from))
-                    .unwrap_or_default(),
+                llm_access: p
+                    .llm_access
+                    .effective(self.state.policy.status.mcp_logs_enabled)
+                    .as_str()
+                    .to_string(),
                 platform: self
                     .state
                     .pool
@@ -848,10 +849,20 @@ impl Hooks for AppBackend {
 impl Backend for AppBackend {
     fn scope(&self, connection_id: &str) -> Option<Scope> {
         let p = self.allowed(connection_id).ok()?;
+        let logs = match (p.llm_access, self.state.policy.status.mcp_logs_enabled) {
+            (LlmAccess::Logs, true) => LogsAccess::Allowed,
+            (LlmAccess::Logs, false) => LogsAccess::Disabled,
+            _ => LogsAccess::Metadata,
+        };
         Some(Scope {
             namespaces: p
                 .llm_namespaces
                 .map(|v| v.into_iter().collect::<BTreeSet<_>>()),
+            // Свой список имён действует только на уровне `logs` (спец. §10.3).
+            mask_fields: (logs == LogsAccess::Allowed)
+                .then_some(p.llm_mask_fields)
+                .flatten(),
+            logs,
         })
     }
 
@@ -1014,6 +1025,52 @@ mod tests {
         st.policy = Arc::new(policy);
         let b = AppBackend::new(st, b.approvals.clone(), Arc::new(|_| {}));
         assert_eq!(b.access(&view("s1", None)), SessionAccess::Disabled);
+    }
+
+    /// Уровень `logs`: доступ к логам по политике, свой список имён только на этом уровне.
+    #[test]
+    fn logs_level_and_mask_fields_reach_the_scope() {
+        let (_d, b) = backend();
+        let mut logs = sample_profile("logs");
+        logs.llm_access = LlmAccess::Logs;
+        logs.llm_mask_fields = Some(vec!["inn".into()]);
+        b.state.connections.upsert(logs).unwrap();
+        let mut meta = sample_profile("meta");
+        meta.llm_access = LlmAccess::Metadata;
+        meta.llm_mask_fields = Some(vec!["inn".into()]);
+        b.state.connections.upsert(meta).unwrap();
+
+        let s = b.scope("logs").unwrap();
+        assert_eq!(
+            (s.logs, s.mask_fields.as_deref()),
+            (LogsAccess::Allowed, Some(&["inn".to_string()][..]))
+        );
+        let s = b.scope("meta").unwrap();
+        assert_eq!(
+            (s.logs, s.mask_fields),
+            (LogsAccess::Metadata, None),
+            "свой список — только на уровне logs"
+        );
+        let level = |b: &AppBackend, id: &str| {
+            b.connections()
+                .into_iter()
+                .find(|c| c.id == id)
+                .map(|c| c.llm_access)
+        };
+        assert_eq!(level(&b, "logs").as_deref(), Some("logs"));
+
+        let mut st = b.state.clone();
+        let mut policy = (*st.policy).clone();
+        policy.status.mcp_logs_enabled = false;
+        st.policy = Arc::new(policy);
+        let b = AppBackend::new(st, b.approvals.clone(), Arc::new(|_| {}));
+        let s = b.scope("logs").unwrap();
+        assert_eq!((s.logs, s.mask_fields), (LogsAccess::Disabled, None));
+        assert_eq!(
+            level(&b, "logs").as_deref(),
+            Some("metadata"),
+            "при запрете логов уровень для модели — metadata"
+        );
     }
 
     #[tokio::test]

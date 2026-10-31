@@ -373,6 +373,7 @@ mod tests {
     fn scope_keeps_cluster_objects_and_allowed_projects() {
         let scope = Scope {
             namespaces: Some(BTreeSet::from(["a".to_string()])),
+            ..Scope::default()
         };
         assert!(in_scope(&target(TargetKind::Cluster, None, None), &scope));
         assert!(in_scope(

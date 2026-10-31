@@ -20,11 +20,43 @@ pub fn not_allowed() -> BackendError {
     )
 }
 
-/// Что из подключения видит LLM (спец. §10.2): проекты из `llmNamespaces` или все доступные.
+/// Логи подов запрещены политикой администратора (`mcpLogsEnabled = false`, спец. §10.2).
+pub fn logs_disabled() -> BackendError {
+    BackendError::new(
+        "logs_disabled",
+        "Reading pod logs is disabled by the organization's policy",
+    )
+}
+
+/// У подключения уровень доступа `metadata`: логов и значений конфигурации модель не видит.
+pub fn logs_not_allowed() -> BackendError {
+    BackendError::new(
+        "logs_not_allowed",
+        "LLM access to this connection is limited to metadata. Ask the user to switch it to \"Metadata and logs\" in the connection settings in Glafira",
+    )
+}
+
+/// Доступ к логам и значениям конфигурации (уровень `logs`, спец. §10.2).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LogsAccess {
+    /// Уровень `metadata`: логи и значения не видны.
+    #[default]
+    Metadata,
+    /// Уровень `logs`.
+    Allowed,
+    /// Уровень `logs`, но политика запрещает логи: подключение работает как `metadata`.
+    Disabled,
+}
+
+/// Что из подключения видит LLM (спец. §10.2): проекты из `llmNamespaces` или все доступные,
+/// доступ к логам и имена полей для маскировки.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Scope {
     /// `None` — все проекты, доступные пользователю.
     pub namespaces: Option<BTreeSet<String>>,
+    pub logs: LogsAccess,
+    /// Имена полей для маскировки (спец. §10.3); `None` — стандартный список крейта.
+    pub mask_fields: Option<Vec<String>>,
 }
 
 impl Scope {
@@ -32,6 +64,23 @@ impl Scope {
         self.namespaces
             .as_ref()
             .is_none_or(|ns| ns.contains(namespace))
+    }
+
+    /// Маскировщик с именами полей подключения.
+    pub fn masker(&self) -> crate::mask::Masker {
+        match &self.mask_fields {
+            Some(fields) => crate::mask::Masker::new(fields),
+            None => crate::mask::Masker::default(),
+        }
+    }
+
+    /// Логи доступны; иначе — `logs_disabled` (политика) или `logs_not_allowed` (уровень).
+    pub fn require_logs(&self) -> Result<(), BackendError> {
+        match self.logs {
+            LogsAccess::Allowed => Ok(()),
+            LogsAccess::Disabled => Err(logs_disabled()),
+            LogsAccess::Metadata => Err(logs_not_allowed()),
+        }
     }
 }
 
@@ -924,4 +973,37 @@ pub struct WorkloadState {
     pub updated: Option<i32>,
     pub pods: Vec<PodState>,
     pub warnings: Vec<Warning>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logs_access_gives_its_own_error() {
+        let scope = |logs| Scope {
+            logs,
+            ..Scope::default()
+        };
+        assert!(scope(LogsAccess::Allowed).require_logs().is_ok());
+        assert_eq!(
+            scope(LogsAccess::Metadata).require_logs().unwrap_err().code,
+            "logs_not_allowed"
+        );
+        assert_eq!(
+            scope(LogsAccess::Disabled).require_logs().unwrap_err().code,
+            "logs_disabled"
+        );
+    }
+
+    #[test]
+    fn masker_uses_the_connection_names_or_the_default_list() {
+        let own = Scope {
+            mask_fields: Some(vec!["inn".into()]),
+            ..Scope::default()
+        };
+        assert!(own.masker().is_secret_name("CLIENT_INN"));
+        assert!(!own.masker().is_secret_name("PASSWORD"));
+        assert!(Scope::default().masker().is_secret_name("PASSWORD"));
+    }
 }

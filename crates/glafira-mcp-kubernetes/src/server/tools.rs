@@ -829,6 +829,7 @@ impl KubeServer {
                 args!(p),
                 Some(&p.connection_id),
                 async {
+                    let scope = self.scope(&p.connection_id, Some(&p.namespace))?;
                     let mut w = expect!(
                         self.read(ReadOp::DescribeWorkload {
                             connection_id: p.connection_id.clone(),
@@ -841,7 +842,7 @@ impl KubeServer {
                         .await?,
                         Workload
                     )?;
-                    let masked = mask_workload(&Masker::default(), &mut w);
+                    let masked = mask_workload(&scope.masker(), &mut w);
                     to_value(&Masked { body: w, masked })
                 },
             )
@@ -913,6 +914,7 @@ impl KubeServer {
                 args!(p),
                 Some(&p.connection_id),
                 async {
+                    let scope = self.scope(&p.connection_id, Some(&p.namespace))?;
                     let mut pod = expect!(
                         self.read(ReadOp::DescribePod {
                             connection_id: p.connection_id.clone(),
@@ -922,7 +924,7 @@ impl KubeServer {
                         .await?,
                         Pod
                     )?;
-                    let masked = mask_pod(&Masker::default(), &mut pod);
+                    let masked = mask_pod(&scope.masker(), &mut pod);
                     to_value(&Masked { body: pod, masked })
                 },
             )
