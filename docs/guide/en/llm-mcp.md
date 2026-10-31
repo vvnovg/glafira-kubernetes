@@ -95,18 +95,23 @@ On the [[ui:connections.form.llmAccessLogs]] level the assistant also sees:
 - a search through the logs of all pods of a workload — `search_workload_logs`: matches with context over the last
   hour (up to a day); one call reads at most 20 pods, 50 MB of logs and 40 seconds;
 - the values of environment variables from the spec and from ConfigMaps (`configMapKeyRef`) in the workload and pod
-  details. It never gets Secret values, on any level.
+  details; a value longer than 4 KB is cut (`valueCut: true`). It never gets Secret values, on any level.
 
-All of it is masked: the value of a variable, key or `name=value` pair whose name is in the
+All of it is masked: the value of a variable, ConfigMap key or `name=value` pair whose name is in the
 [[ui:connections.form.mask]] list is replaced with `***`, as are strings of known secret forms (tokens, keys,
 passwords in addresses, e-mail addresses, card numbers). The standard list is `password`, `passwd`, `secret`, `token`,
 `apikey`, `api_key`, `api-key`, `credentials`, `private`, `authorization`; a name matches when it contains one of them,
 case-insensitive. Your own list replaces the standard one: clear [[ui:connections.form.maskStandard]] and enter the
-names one per line. The log filter searches the original text, so the assistant can find a line by a value from an
-error, but it gets the line already masked. A line longer than 4 KB is cut.
+names one per line (at most 200 names of 64 characters). An empty own list turns off name-based masking: only the
+built-in value patterns (JWT and the like) remain. The log filter searches the original text, so the assistant can find
+a line by a value from an error, but it gets the line already masked. A line longer than 4 KB is cut. If the
+`get_pod_logs` answer does not fit 100 KB, the oldest lines are dropped. `search_workload_logs` reports `stopped` (which
+limit stopped the scan: pods, bytes or time) and `errors` (containers whose logs could not be read).
 
 Masking does not catch everything: a secret without a hint in its name (for example `user=bob p4ss`) stays in the line.
-Open logs to the assistant where this is acceptable, and add your own names to the list if needed.
+The filter sees the unmasked text and reports its hits, so masking hides values from reading, not from deliberate
+probing through the filter (attempts are visible in the MCP journal, because the filter is part of the call arguments).
+Do not open logs whose secrets must stay hidden from the assistant, and add your own names to the list if needed.
 
 If your administrator forbade logs for LLM assistants (the `mcpLogsEnabled` policy), the
 [[ui:connections.form.llmAccessLogs]] level is unavailable, and connections that already have it work as
