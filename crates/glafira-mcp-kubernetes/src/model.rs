@@ -257,6 +257,20 @@ pub trait Backend: Hooks {
         &self,
         op: crate::proposals::ProposalOp,
     ) -> BoxFuture<'_, Result<crate::proposals::ProposalOutput, BackendError>>;
+    /// Логи подов (уровень `logs`): сырые строки, маскирует и фильтрует шлюз. Реализация
+    /// приложения ещё раз проверяет уровень доступа и политику.
+    fn logs(
+        &self,
+        op: crate::logs::LogsOp,
+    ) -> BoxFuture<'_, Result<crate::logs::LogsOutput, BackendError>> {
+        let _ = op;
+        Box::pin(async {
+            Err(BackendError::new(
+                "not_supported",
+                "Reading pod logs is not supported by this Glafira build",
+            ))
+        })
+    }
 }
 
 /// Часть ответа: данные или причина, по которой их нет (права, ошибка чтения).

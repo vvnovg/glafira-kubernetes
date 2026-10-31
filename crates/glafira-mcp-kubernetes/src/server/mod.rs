@@ -18,6 +18,7 @@ use crate::mask::Masker;
 use crate::model::{Backend, ReadOp, ReadOutput, Scope, not_allowed};
 
 mod health_tools;
+mod log_tools;
 mod proposal_tools;
 mod resource_tools;
 mod tools;
@@ -120,7 +121,8 @@ impl KubeServer {
             tool_router: Self::tool_router()
                 + Self::health_router()
                 + Self::resource_router()
-                + Self::proposal_router(),
+                + Self::proposal_router()
+                + Self::log_router(),
         }
     }
 
@@ -140,6 +142,19 @@ impl KubeServer {
         }
         let _slots = self.session.slots().await?;
         self.backend.read(op).await
+    }
+
+    /// Чтение логов: область LLM и уровень `logs`, затем слоты. Длительная операция сессии
+    /// (`exclusive`) — у вызывающего: одна на сессию, общая с `observe_workload`.
+    async fn logs(
+        &self,
+        op: crate::logs::LogsOp,
+    ) -> Result<(crate::logs::LogsOutput, Scope), BackendError> {
+        let scope = self.scope(op.connection_id(), Some(op.namespace()))?;
+        scope.require_logs()?;
+        let _slots = self.session.slots().await?;
+        let out = self.backend.logs(op).await?;
+        Ok((out, scope))
     }
 }
 
