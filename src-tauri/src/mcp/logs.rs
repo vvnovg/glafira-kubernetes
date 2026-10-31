@@ -4,9 +4,14 @@
 //! и 40 с; на каком пределе остановился — `stopped`. Маскирует и фильтрует крейт шлюза; строки
 //! не хранятся дольше вызова.
 
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures::StreamExt;
+use futures::io::{AsyncBufRead, AsyncRead};
 use glafira_mcp_core::BackendError;
 use glafira_mcp_kubernetes::logs::{
     ContainerLog, LogError, READ_LINE_BYTES, RawLine, SEARCH_BYTES, SEARCH_PODS, SEARCH_SECONDS,
@@ -78,6 +83,38 @@ pub fn default_container(pod: &Pod) -> Option<String> {
         .or_else(|| names.first().map(|n| n.to_string()))
 }
 
+/// Читатель, считающий байты, снятые с потока: `lossy_lines` пропускает хвосты длинных строк,
+/// и по длине отданных строк расход бюджета занижался бы.
+struct Counting<R> {
+    inner: R,
+    read: Arc<AtomicU64>,
+}
+
+impl<R: AsyncBufRead + Unpin> AsyncRead for Counting<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let res = Pin::new(&mut self.inner).poll_read(cx, buf);
+        if let Poll::Ready(Ok(n)) = &res {
+            self.read.fetch_add(*n as u64, Ordering::Relaxed);
+        }
+        res
+    }
+}
+
+impl<R: AsyncBufRead + Unpin> AsyncBufRead for Counting<R> {
+    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<&[u8]>> {
+        Pin::new(&mut self.get_mut().inner).poll_fill_buf(cx)
+    }
+
+    fn consume(mut self: Pin<&mut Self>, amt: usize) {
+        self.read.fetch_add(amt as u64, Ordering::Relaxed);
+        Pin::new(&mut self.inner).consume(amt);
+    }
+}
+
 /// Прочитанные строки и причина остановки, если поток не дочитан до конца.
 struct Read {
     lines: Vec<RawLine>,
@@ -110,7 +147,14 @@ async fn read_log(
     let Ok(stream) = open else {
         return Ok(late());
     };
-    let mut lines = lossy_lines(stream?, cap);
+    // Бюджет списывается по байтам, снятым с потока, а не по длине отданных строк.
+    let start = *budget;
+    let consumed = Arc::new(AtomicU64::new(0));
+    let counting = Counting {
+        inner: stream?,
+        read: consumed.clone(),
+    };
+    let mut lines = lossy_lines(counting, cap);
     let mut out = Vec::new();
     loop {
         if *budget == 0 {
@@ -136,7 +180,7 @@ async fn read_log(
                 line.map_err(|e| crate::k8s::errors::from_transport_text(&e.to_string()))?
             }
         };
-        *budget = budget.saturating_sub(next.len() as u64 + 1);
+        *budget = start.saturating_sub(consumed.load(Ordering::Relaxed));
         let at_cap = next.len() >= cap;
         let (ts, text) = split_line(&next);
         let (text, cut) = glafira_mcp_kubernetes::logs::cut_to(text, READ_LINE_BYTES);
@@ -363,6 +407,26 @@ mod tests {
         .unwrap();
         assert!(l.lines[0].cut && l.lines[0].text.len() == READ_LINE_BYTES);
         assert_eq!((l.lines[1].text.as_str(), l.lines[1].cut), ("short", false));
+    }
+
+    #[tokio::test]
+    async fn skipped_tails_of_long_lines_are_charged_to_the_byte_budget() {
+        let long = "x".repeat(READ_LINE_BYTES * 4);
+        let r = reader(move |_| log(&[&long, "short"]));
+        let mut budget = (READ_LINE_BYTES + TS_ROOM + 100) as u64;
+        let read = read_log(
+            &r,
+            "team-a",
+            "web-1",
+            kube::api::LogParams::default(),
+            deadline(),
+            &mut budget,
+        )
+        .await
+        .unwrap();
+        assert_eq!(budget, 0);
+        assert_eq!(read.stopped, Some(Stop::Bytes));
+        assert_eq!(read.lines.len(), 1, "после бюджета строки не читаются");
     }
 
     #[tokio::test]
