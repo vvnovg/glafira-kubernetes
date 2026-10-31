@@ -1063,45 +1063,62 @@ async fn projects_are_limited_to_the_llm_scope() {
 async fn workload_details_are_masked() {
     let e = env(Fake::new()).await;
     let c = client(&e.ep).await;
-    let v = ok(call(
-        &c,
-        "describe_workload",
-        json!({"connectionId": "c5", "namespace": "team-a", "kind": "Deployment", "name": "web"}),
-    )
-    .await);
-    let ct = &v["containers"][0];
-    assert_eq!(ct["command"], json!(["/app", "--db-password=***"]));
-    assert_eq!(ct["args"], json!(["--client-secret", "***", "--port=8080"]));
-    assert_eq!(ct["env"][0]["source"], "secretKeyRef");
-    assert!(ct["env"][0].get("value").is_none(), "значений env нет");
-    assert_eq!(
-        v["annotations"],
-        json!({"example.com/api-token": "***", "team": "payments"}),
-        "без копии объекта, секрет — ***"
-    );
-    assert_eq!(
-        ct["env"][1]["value"], "postgres://app:***@db:5432/app",
-        "значение env (уровень logs) — после маскировки"
-    );
-    assert_eq!(v["masked"], 4);
-    assert_eq!(v["kind"], "Deployment");
-    assert!(v["pdb"]["error"].as_str().unwrap().starts_with("FORBIDDEN"));
-    let text = serde_json::to_string(&v).unwrap();
-    assert!(
-        !text.contains("hunter2") && !text.contains("s3cr3t"),
-        "{text}"
-    );
+    // c1 — уровень metadata (по умолчанию): значений env нет; c5 — уровень logs: значение
+    // литерала есть, после маскировки, и даёт одну замену сверх.
+    for (id, logs) in [("c1", false), ("c5", true)] {
+        let v = ok(call(
+            &c,
+            "describe_workload",
+            json!({"connectionId": id, "namespace": "team-a", "kind": "Deployment", "name": "web"}),
+        )
+        .await);
+        let ct = &v["containers"][0];
+        assert_eq!(ct["command"], json!(["/app", "--db-password=***"]), "{id}");
+        assert_eq!(
+            ct["args"],
+            json!(["--client-secret", "***", "--port=8080"]),
+            "{id}"
+        );
+        assert_eq!(ct["env"][0]["source"], "secretKeyRef", "{id}");
+        assert!(
+            ct["env"][0].get("value").is_none(),
+            "{id}: значений Secret нет"
+        );
+        assert_eq!(
+            v["annotations"],
+            json!({"example.com/api-token": "***", "team": "payments"}),
+            "{id}: без копии объекта, секрет — ***"
+        );
+        if logs {
+            assert_eq!(
+                ct["env"][1]["value"], "postgres://app:***@db:5432/app",
+                "значение env (уровень logs) — после маскировки"
+            );
+        } else {
+            for env in ct["env"].as_array().unwrap() {
+                assert!(env.get("value").is_none(), "{id}: {env}");
+            }
+        }
+        assert_eq!(v["masked"], 3 + usize::from(logs), "{id}");
+        assert_eq!(v["kind"], "Deployment", "{id}");
+        assert!(v["pdb"]["error"].as_str().unwrap().starts_with("FORBIDDEN"));
+        let text = serde_json::to_string(&v).unwrap();
+        assert!(
+            !text.contains("hunter2") && !text.contains("s3cr3t"),
+            "{id}: {text}"
+        );
 
-    let v = ok(call(
-        &c,
-        "describe_pod",
-        json!({"connectionId": "c5", "namespace": "team-a", "name": "web-1"}),
-    )
-    .await);
-    assert_eq!(v["containers"][0]["args"][1], "***");
-    assert_eq!(v["containers"][0]["state"]["reason"], "CrashLoopBackOff");
-    assert_eq!(v["masked"], 4);
-    assert_eq!(v["events"][0]["reason"], "BackOff");
+        let v = ok(call(
+            &c,
+            "describe_pod",
+            json!({"connectionId": id, "namespace": "team-a", "name": "web-1"}),
+        )
+        .await);
+        assert_eq!(v["containers"][0]["args"][1], "***", "{id}");
+        assert_eq!(v["containers"][0]["state"]["reason"], "CrashLoopBackOff");
+        assert_eq!(v["masked"], 3 + usize::from(logs), "{id}");
+        assert_eq!(v["events"][0]["reason"], "BackOff");
+    }
 }
 
 #[tokio::test]
@@ -1698,6 +1715,14 @@ fn big_env(c: &mut ContainerSpec) {
             value_error: None,
             value_cut: false,
         },
+        Env {
+            name: "MISSING".into(),
+            source: "configMapKeyRef".into(),
+            reference: Some("app-config/absent".into()),
+            value: None,
+            value_error: Some("key not found".into()),
+            value_cut: false,
+        },
     ];
 }
 
@@ -2002,32 +2027,36 @@ async fn a_project_list_capped_by_the_backend_is_marked_truncated() {
 async fn cluster_text_of_workloads_goes_through_the_builtin_patterns() {
     let e = env_over(odd(Mode::Leaky)).await;
     let c = client(&e.ep).await;
-    let v = ok(call(
-        &c,
-        "describe_workload",
-        json!({"connectionId": "c5", "namespace": "team-a", "kind": "Deployment", "name": "web"}),
-    )
-    .await);
-    assert_eq!(v["images"], json!([CRED_IMAGE_MASKED]));
-    assert_eq!(v["conditions"][0]["message"], "rejected ***");
-    assert_eq!(v["hpa"]["conditions"][0]["message"], "rejected ***");
-    assert_eq!(v["history"][0]["images"], json!([CRED_IMAGE_MASKED]));
-    let ct = &v["containers"][0];
-    assert_eq!(ct["image"], CRED_IMAGE_MASKED);
-    assert_eq!(
-        ct["liveness"],
-        "exec curl -H 'Authorization: Bearer ***' http://localhost/health"
-    );
-    assert_eq!(
-        ct["readiness"],
-        "http-get http://app:***@localhost:8080/ready"
-    );
-    assert_eq!(ct["startup"], "exec check ***");
-    // Четыре замены в command, args, значении env и аннотациях (как в
-    // workload_details_are_masked) и восемь в тексте кластера: образы (workload, контейнер,
-    // ревизия), условия (workload, HPA), три пробы.
-    assert_eq!(v["masked"], 12);
-    assert_masked(&v, 12);
+    // Тот же текст кластера на уровне metadata (c1) и logs (c5): отличается только значение env.
+    for (id, logs) in [("c1", false), ("c5", true)] {
+        let v = ok(call(
+            &c,
+            "describe_workload",
+            json!({"connectionId": id, "namespace": "team-a", "kind": "Deployment", "name": "web"}),
+        )
+        .await);
+        assert_eq!(v["images"], json!([CRED_IMAGE_MASKED]));
+        assert_eq!(v["conditions"][0]["message"], "rejected ***");
+        assert_eq!(v["hpa"]["conditions"][0]["message"], "rejected ***");
+        assert_eq!(v["history"][0]["images"], json!([CRED_IMAGE_MASKED]));
+        let ct = &v["containers"][0];
+        assert_eq!(ct["image"], CRED_IMAGE_MASKED);
+        assert_eq!(
+            ct["liveness"],
+            "exec curl -H 'Authorization: Bearer ***' http://localhost/health"
+        );
+        assert_eq!(
+            ct["readiness"],
+            "http-get http://app:***@localhost:8080/ready"
+        );
+        assert_eq!(ct["startup"], "exec check ***");
+        // Три замены в command, args и аннотациях плюс одна в значении env на уровне logs (как в
+        // workload_details_are_masked) и восемь в тексте кластера: образы (workload, контейнер,
+        // ревизия), условия (workload, HPA), три пробы.
+        let n = 11 + usize::from(logs);
+        assert_eq!(v["masked"], n, "{id}");
+        assert_masked(&v, n);
+    }
 
     let v = ok(call(
         &c,
@@ -2043,23 +2072,26 @@ async fn cluster_text_of_workloads_goes_through_the_builtin_patterns() {
 async fn cluster_text_of_pods_and_events_goes_through_the_builtin_patterns() {
     let e = env_over(odd(Mode::Leaky)).await;
     let c = client(&e.ep).await;
-    let v = ok(call(
-        &c,
-        "describe_pod",
-        json!({"connectionId": "c5", "namespace": "team-a", "name": "web-1"}),
-    )
-    .await);
-    assert_eq!(v["conditions"][0]["message"], "rejected ***");
-    assert_eq!(v["events"][0]["message"], "rejected ***");
-    let ct = &v["containers"][0];
-    assert_eq!(ct["imageId"], CRED_IMAGE_MASKED);
-    assert_eq!(ct["state"]["message"], "back-off ***");
-    assert_eq!(ct["lastState"]["message"], "panic: Bearer ***");
-    assert_eq!(ct["startup"], "exec check ***");
-    // Четыре замены в command, args, значении env и аннотациях и девять в тексте кластера:
-    // условие, событие, образ, три пробы, imageID, сообщения состояния и прошлого состояния.
-    assert_eq!(v["masked"], 13);
-    assert_masked(&v, 13);
+    for (id, logs) in [("c1", false), ("c5", true)] {
+        let v = ok(call(
+            &c,
+            "describe_pod",
+            json!({"connectionId": id, "namespace": "team-a", "name": "web-1"}),
+        )
+        .await);
+        assert_eq!(v["conditions"][0]["message"], "rejected ***");
+        assert_eq!(v["events"][0]["message"], "rejected ***");
+        let ct = &v["containers"][0];
+        assert_eq!(ct["imageId"], CRED_IMAGE_MASKED);
+        assert_eq!(ct["state"]["message"], "back-off ***");
+        assert_eq!(ct["lastState"]["message"], "panic: Bearer ***");
+        assert_eq!(ct["startup"], "exec check ***");
+        // Три замены в command, args и аннотациях плюс одна в значении env на уровне logs и девять в тексте кластера:
+        // условие, событие, образ, три пробы, imageID, сообщения состояния и прошлого состояния.
+        let n = 12 + usize::from(logs);
+        assert_eq!(v["masked"], n, "{id}");
+        assert_masked(&v, n);
+    }
 
     let v = ok(call(
         &c,
@@ -2982,21 +3014,27 @@ async fn a_huge_env_value_is_masked_then_cut_and_the_describe_still_succeeds() {
 async fn env_values_never_leave_the_gateway_without_the_logs_level() {
     let e = env_over(odd(Mode::BigEnv)).await;
     let c = client(&e.ep).await;
-    // c1 — уровень metadata: бэкенд ошибся и отдал значения, шлюз их убирает.
-    for (tool, args) in [
-        (
-            "describe_workload",
-            json!({"connectionId": "c1", "namespace": "team-a", "kind": "Deployment", "name": "web"}),
-        ),
-        (
-            "describe_pod",
-            json!({"connectionId": "c1", "namespace": "team-a", "name": "web-1"}),
-        ),
-    ] {
-        let v = ok(call(&c, tool, args).await);
-        for env in v["containers"][0]["env"].as_array().unwrap() {
-            assert!(env.get("value").is_none(), "{tool}: {env}");
-            assert!(env.get("valueCut").is_none(), "{tool}: {env}");
+    // c1 — уровень metadata, c4 — уровень logs, но политика логи запрещает: бэкенд ошибся и
+    // отдал значения и ошибку чтения, шлюз их убирает.
+    for id in ["c1", "c4"] {
+        for (tool, args) in [
+            (
+                "describe_workload",
+                json!({"connectionId": id, "namespace": "team-a", "kind": "Deployment", "name": "web"}),
+            ),
+            (
+                "describe_pod",
+                json!({"connectionId": id, "namespace": "team-a", "name": "web-1"}),
+            ),
+        ] {
+            let v = ok(call(&c, tool, args).await);
+            let envs = v["containers"][0]["env"].as_array().unwrap();
+            assert_eq!(envs.len(), 3, "{id} {tool}");
+            for env in envs {
+                for field in ["value", "valueError", "valueCut"] {
+                    assert!(env.get(field).is_none(), "{id} {tool}: {env}");
+                }
+            }
         }
     }
 }
