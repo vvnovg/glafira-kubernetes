@@ -63,7 +63,8 @@ spec:
         - name: crash
           image: __HELPER_IMAGE__
           imagePullPolicy: IfNotPresent
-          command: ["bash", "-c", "echo starting; echo boom >&2; exit 1"]
+          # Строка с паролем — для маскировки логов в ответах MCP (it_mcp).
+          command: ["bash", "-c", "echo starting; echo 'connect db password=hunter2-kind user=app'; echo boom >&2; exit 1"]
 ---
 apiVersion: apps/v1
 kind: Deployment
