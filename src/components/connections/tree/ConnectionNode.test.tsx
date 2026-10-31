@@ -147,6 +147,15 @@ describe("ConnectionNode", () => {
     expect(badges[0].closest(".tree-conn")).toHaveTextContent("prod");
   });
 
+  it("значок LLM уровня логов говорит о логах", () => {
+    renderWithClient(
+      <ul>
+        <ConnectionNode connection={{ ...conn, id: "c3", name: "stage", llmAccess: "logs" }} />
+      </ul>,
+    );
+    expect(screen.getByTitle("Открыто LLM-ассистентам по MCP, с логами")).toHaveTextContent("LLM");
+  });
+
   it("«Замечания» открывает вкладку находок подключения", async () => {
     const user = renderNode();
     await user.click(screen.getByRole("button", { name: "Замечания" }));

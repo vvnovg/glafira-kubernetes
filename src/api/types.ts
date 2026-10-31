@@ -87,6 +87,8 @@ export interface ConnectionProfile {
   llmAccess?: LlmAccess;
   /** Проекты для LLM; null или нет поля — все доступные. */
   llmNamespaces?: string[] | null;
+  /** Имена полей для маскировки на уровне `logs`; null или нет поля — стандартный список. Локальное поле. */
+  llmMaskFields?: string[] | null;
   /** Источник метрик; локальное поле: экспорт его не пишет. Нет поля — `auto`. */
   metrics?: MetricsConfig;
 }
@@ -105,8 +107,8 @@ export interface MetricsEndpoint {
 export type MetricsAuth = "connection" | "bearer" | "none";
 export type MetricsCa = { mode: "connection" } | { mode: "pem"; pem: string };
 
-/** Уровень доступа LLM: `logs` — этап O4. */
-export type LlmAccess = "off" | "metadata";
+/** Уровень доступа LLM: `logs` — ещё логи подов и значения env и ConfigMap (после маскировки). */
+export type LlmAccess = "off" | "metadata" | "logs";
 
 /** Секреты из формы: нет поля или null — оставить сохранённый, "" — удалить, иное — сохранить. */
 export interface SecretsInput {

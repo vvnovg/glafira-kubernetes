@@ -9,6 +9,7 @@ import { useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Hint } from "../common/Hint";
 import { formatArgs, formatEnv, hasSecretValues, launchKey, launchLine, maskArgs, maskEnv, needsExecConfirmation, newExec, parseArgs, parseEnv } from "./exec";
+import { STANDARD_MASK_FIELDS } from "./maskFields";
 import { formatNamespaces, newMetricsEndpoint, parseNamespaces, withAuthMethod, withCaMode, withMetricsMode, withProxyMode } from "./profile";
 import { ProjectListInput } from "./ProjectListInput";
 import { folderPaths } from "./tree/folderTree";
@@ -17,7 +18,12 @@ const ENVIRONMENTS: Environment[] = ["local", "dev", "test", "stage", "prod"];
 const AUTH_METHODS: AuthMethod[] = ["browser", "token", "clientCert", "exec"];
 const CA_MODES: CaMode[] = ["system", "pem", "insecure"];
 const PROXY_MODES: ProxyMode[] = ["system", "none", "url"];
-const LLM_ACCESS: LlmAccess[] = ["off", "metadata"];
+const LLM_ACCESS: LlmAccess[] = ["off", "metadata", "logs"];
+const LLM_ACCESS_KEYS: Record<LlmAccess, string> = {
+  off: "connections.form.llmAccessOff",
+  metadata: "connections.form.llmAccessMetadata",
+  logs: "connections.form.llmAccessLogs",
+};
 const METRICS_MODES: MetricsMode[] = ["auto", "thanos", "prometheus"];
 const METRICS_AUTH: MetricsAuth[] = ["connection", "bearer", "none"];
 
@@ -32,6 +38,7 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
   const [manual, setManual] = useState(formatNamespaces(initial.manualNamespaces));
   // Проекты для LLM: «все доступные» (null) или список; список не теряется при переключении туда и обратно.
   const [llmListed, setLlmListed] = useState(Boolean(initial.llmNamespaces));
+  const [maskText, setMaskText] = useState((initial.llmMaskFields ?? STANDARD_MASK_FIELDS).join("\n"));
   const [llmList, setLlmList] = useState(formatNamespaces(initial.llmNamespaces ?? []));
   // Последние введённые значения, чтобы переключение режима туда и обратно их не теряло.
   const [lastCert, setLastCert] = useState(initial.auth.method === "clientCert" ? initial.auth.certificatePem : "");
@@ -57,6 +64,7 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
   const policyQ = useQuery({ queryKey: ["policy"], queryFn: api.getPolicyStatus });
   const insecureForbidden = policyQ.data?.allowInsecureTls === false;
   const execForbidden = policyQ.data?.allowExecAuth === false;
+  const logsForbidden = policyQ.data?.mcpLogsEnabled === false;
   const paths = useMemo(() => folderPaths(foldersQ.data ?? []), [foldersQ.data]);
   // Подсказки полей проектов: проекты, которые уже прочитало дерево (из кэша, без нового запроса), и
   // проекты сохранённого профиля — не недописанный текст полей.
@@ -90,6 +98,7 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
     manualNamespaces: parseNamespaces(manual),
     llmAccess: profile.llmAccess ?? "off",
     llmNamespaces: llmListed ? parseNamespaces(llmList) : null,
+    llmMaskFields: profile.llmMaskFields == null ? null : maskText.split("\n"),
   });
   const secrets = (): SecretsInput => ({
     token: profile.auth.method === "token" && token.trim() ? token : null,
@@ -535,11 +544,58 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
         </span>
         <select id="cf-llm" value={profile.llmAccess ?? "off"} onChange={(e) => update({ llmAccess: e.target.value as LlmAccess })}>
           {LLM_ACCESS.map((a) => (
-            <option key={a} value={a}>
-              {t(a === "off" ? "connections.form.llmAccessOff" : "connections.form.llmAccessMetadata")}
+            <option key={a} value={a} disabled={a === "logs" && logsForbidden && profile.llmAccess !== "logs"}>
+              {t(LLM_ACCESS_KEYS[a])}
             </option>
           ))}
         </select>
+        {logsForbidden && (
+          <span className="muted full">
+            {t(profile.llmAccess === "logs" ? "connections.form.llmLogsAsMetadata" : "connections.form.llmLogsPolicy")}
+          </span>
+        )}
+        {profile.llmAccess === "logs" && !logsForbidden && (
+          <>
+            {/* Подпись блока, а не флажка: щелчок по ней не должен переключать «Стандартный список» и стирать свой. */}
+            <span className="field-label">
+              <span id="cf-mask-label">{t("connections.form.mask")}</span>
+              <Hint k="hints.connections.mask" label={t("connections.form.mask")} />
+            </span>
+            <div className="llm-mask" role="group" aria-labelledby="cf-mask-label" aria-describedby="cf-mask-note">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={profile.llmMaskFields == null}
+                  onChange={(e) => {
+                    if (e.target.checked) {
+                      update({ llmMaskFields: null });
+                    } else {
+                      setMaskText(STANDARD_MASK_FIELDS.join("\n"));
+                      update({ llmMaskFields: [...STANDARD_MASK_FIELDS] });
+                    }
+                  }}
+                />{" "}
+                {t("connections.form.maskStandard")}
+              </label>
+              {profile.llmMaskFields == null ? (
+                <code className="muted">{STANDARD_MASK_FIELDS.join(", ")}</code>
+              ) : (
+                <textarea
+                  aria-label={t("connections.form.maskFieldsAria")}
+                  rows={6}
+                  value={maskText}
+                  onChange={(e) => {
+                    setMaskText(e.target.value);
+                    update({ llmMaskFields: e.target.value.split("\n") });
+                  }}
+                />
+              )}
+              <span id="cf-mask-note" className="muted">
+                {t("connections.form.maskNote")}
+              </span>
+            </div>
+          </>
+        )}
         {(profile.llmAccess ?? "off") !== "off" && (
           <>
             <span className="field-label">

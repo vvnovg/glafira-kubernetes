@@ -284,10 +284,11 @@
       "favorites": "Shown first in the tree. Separate with commas.",
       "manualNamespaces": "If the cluster does not let you list projects, list the ones you work with here.",
       "test": "Checks step by step: address, TLS, sign-in, platform and projects. Unsaved fields are tested too.",
-      "llmAccess": "What an LLM assistant connected over MCP may read. Metadata: objects, statuses, events, quotas — no secret, env or ConfigMap values. Off: the LLM does not see this connection.",
+      "llmAccess": "What an LLM assistant over MCP may read. Metadata: objects, statuses, events — no env, ConfigMap or Secret values. With logs: also pod logs, env and ConfigMap values, masked. Off: nothing.",
       "llmScope": "Projects the LLM may read; an empty list means it sees no projects. The cluster itself and nodes stay visible if you can read them. The setting stays on this computer: export does not write it.",
       "metrics": "Automatic: Thanos Querier on OpenShift, Prometheus through the API server elsewhere, then metrics.k8s.io. Own: a Thanos or Prometheus address. Not exported.",
-      "metricsAuth": "Connection token — the token of this connection. Own token — saved in the system secret store. A token is sent only over https."
+      "metricsAuth": "Connection token — the token of this connection. Own token — saved in the system secret store. A token is sent only over https.",
+      "mask": "The list replaces the standard one. Not exported: each user decides it."
     },
     "cluster": {
       "platform": "Detected from the API groups and the version: OpenShift, or Kubernetes with its distribution (EKS, GKE, AKS, Rancher, Deckhouse, k3s, RKE2).",
@@ -414,7 +415,14 @@
         "connection": "As the connection",
         "pem": "Certificates (PEM)"
       },
-      "metricsCaPem": "Source CA certificates (PEM)"
+      "metricsCaPem": "Source CA certificates (PEM)",
+      "llmAccessLogs": "Metadata and logs",
+      "llmLogsPolicy": "Logs for LLM assistants are disabled by your organization.",
+      "llmLogsAsMetadata": "Logs for LLM assistants are disabled by your organization: the connection works as “Metadata only”.",
+      "mask": "Fields to mask",
+      "maskStandard": "Standard list",
+      "maskFieldsAria": "Field names to mask, one per line",
+      "maskNote": "A value is masked as *** when the name of its variable, ConfigMap key, annotation, flag or name=value pair contains one of these words, case-insensitive. Tokens, private keys, e-mails, card numbers and passwords in addresses are masked always."
     }
   },
   "cluster": {
@@ -544,7 +552,8 @@
     "noProjects": "No projects",
     "noProjectsFromProfile": "The cluster does not list projects for you, and the profile has none",
     "llmAccess": "Open to LLM assistants over MCP",
-    "findings": "Findings"
+    "findings": "Findings",
+    "llmAccessLogs": "Open to LLM assistants over MCP, with logs"
   },
   "settings": {
     "title": "Settings",

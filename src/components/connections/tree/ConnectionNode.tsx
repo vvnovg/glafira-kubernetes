@@ -31,8 +31,8 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
         <span className="dot" style={{ background: c.color }} />
         <span className="tree-name">{c.name}</span>
         <EnvBadge environment={c.environment} readOnly={c.readOnly} />
-        {c.llmAccess === "metadata" && (
-          <span className="llm-badge" title={t("sidebar.llmAccess")}>
+        {(c.llmAccess === "metadata" || c.llmAccess === "logs") && (
+          <span className="llm-badge" title={t(c.llmAccess === "logs" ? "sidebar.llmAccessLogs" : "sidebar.llmAccess")}>
             LLM
           </span>
         )}

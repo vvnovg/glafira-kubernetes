@@ -378,6 +378,46 @@ describe("ConnectionForm", () => {
     });
   });
 
+  it("уровень «Метаданные и логи»: стандартный список маскировки или свой", async () => {
+    vi.mocked(api.saveConnection).mockImplementation(async (p) => ({ ...p, id: "c1" }));
+    const user = userEvent.setup();
+    const initial = { ...newProfile(), id: "c1", name: "dev", apiUrl: "https://api.dev:6443" };
+    renderWithClient(<ConnectionForm initial={initial} tabId="t" />);
+    expect(screen.queryByText("Поля для маскировки")).toBeNull();
+    await user.selectOptions(screen.getByLabelText("Доступ LLM (MCP)"), "logs");
+    const standard = screen.getByRole("checkbox", { name: "Стандартный список" });
+    expect(standard).toBeChecked();
+    expect(screen.getByText(/password, passwd, secret/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(api.saveConnection).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(api.saveConnection).mock.calls[0][0]).toMatchObject({ llmAccess: "logs", llmMaskFields: null });
+
+    await user.click(standard);
+    const list = screen.getByLabelText("Имена полей для маскировки, по одному в строке");
+    expect((list as HTMLTextAreaElement).value.split("\n")[0]).toBe("password");
+    await user.clear(list);
+    await user.type(list, "inn{Enter}pin");
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(api.saveConnection).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(api.saveConnection).mock.calls[1][0]).toMatchObject({ llmAccess: "logs", llmMaskFields: ["inn", "pin"] });
+
+    await user.click(standard);
+    expect(screen.queryByLabelText("Имена полей для маскировки, по одному в строке")).toBeNull();
+  });
+
+  it("политика запрещает логи для LLM: уровень недоступен, сохранённый работает как метаданные", async () => {
+    vi.mocked(api.getPolicyStatus).mockResolvedValue({ ...POLICY, mcpLogsEnabled: false });
+    const { unmount } = renderWithClient(<ConnectionForm initial={{ ...newProfile(), id: "c1" }} tabId="t" />);
+    const option = await screen.findByRole("option", { name: "Метаданные и логи" });
+    await waitFor(() => expect(option).toBeDisabled());
+    expect(screen.getByText("Логи для LLM-ассистентов запрещены вашей организацией.")).toBeInTheDocument();
+    unmount();
+
+    renderWithClient(<ConnectionForm initial={{ ...newProfile(), id: "c2", llmAccess: "logs", llmMaskFields: ["inn"] }} tabId="t" />);
+    expect(await screen.findByText(/подключение работает как «Только метаданные»/)).toBeInTheDocument();
+    expect(screen.queryByText("Поля для маскировки")).toBeNull();
+  });
+
   it("шаг «Метрики»: выбранный источник и причины, по которым не подошли остальные", async () => {
     vi.mocked(api.testConnection).mockResolvedValue({
       ok: true,
