@@ -91,6 +91,7 @@ describe("McpSection", () => {
     vi.mocked(api.getMcpAudit).mockResolvedValue([
       { ts: 0, event: "call", client: "claude-ai 1.2", tool: "describe_workload", connection: { id: "c1", name: "dev" }, outcome: "error", code: "not_allowed", ms: 3 },
       { ts: 0, event: "approved", session: "s1", client: "claude-ai" },
+      { ts: 0, event: "call", client: "claude-ai 1.2", tool: "get_pod_logs", outcome: "ok", ms: 9, scanned: 1500, returned: 200, masked: 3 },
     ]);
     const user = userEvent.setup();
     renderWithClient(<McpSection />);
@@ -101,6 +102,7 @@ describe("McpSection", () => {
     expect(await screen.findByText("describe_workload")).toBeInTheDocument();
     expect(screen.getByText("not_allowed")).toBeInTheDocument();
     expect(screen.getByText("Клиент подтверждён")).toBeInTheDocument();
+    expect(screen.getByText(/^get_pod_logs — 200 из 1[\s\u00a0]?500 строк, замаскировано: 3$/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Отозвать" }));
     expect(api.revokeMcpClient).toHaveBeenCalledWith("claude-ai");
     // отзыв и отключение обновляют журнал: первая загрузка + отключение + отзыв

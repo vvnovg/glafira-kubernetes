@@ -142,6 +142,18 @@ impl Toy {
             .await)
     }
 
+    #[tool(description = "Read some lines")]
+    async fn scan(&self, ctx: RequestContext<RoleServer>) -> Result<CallToolResult, ErrorData> {
+        Ok(self
+            .session
+            .call(&ctx, "scan", Value::Null, None, async {
+                to_value(
+                    &json!({ "lines": ["secret line"], "scanned": 7, "returned": 1, "masked": 2 }),
+                )
+            })
+            .await)
+    }
+
     #[tool(description = "Return a response that is too large")]
     async fn big(&self, ctx: RequestContext<RoleServer>) -> Result<CallToolResult, ErrorData> {
         Ok(self
@@ -363,6 +375,27 @@ async fn calls_are_rate_limited_and_audited() {
         recent.iter().any(|r| r["code"] == "rate_limited"),
         "{recent:?}"
     );
+}
+
+#[tokio::test]
+async fn read_counts_are_audited_without_the_content() {
+    let e = env(Fake::new(SessionAccess::Approved)).await;
+    let c = client(&e.ep).await;
+    ok(call(&c, "scan", json!({})).await);
+    ok(call(&c, "echo", json!({"connectionId": "c1"})).await);
+    let recent = e.audit.recent(2);
+    assert_eq!(recent[0]["tool"], "echo");
+    assert!(recent[0].get("scanned").is_none(), "{recent:?}");
+    assert_eq!(
+        (
+            &recent[1]["scanned"],
+            &recent[1]["returned"],
+            &recent[1]["masked"]
+        ),
+        (&json!(7), &json!(1), &json!(2))
+    );
+    let line = serde_json::to_string(&recent[1]).unwrap();
+    assert!(!line.contains("secret line"), "{line}");
 }
 
 #[tokio::test]

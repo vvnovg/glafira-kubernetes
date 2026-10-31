@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
 import type { McpAuditEntry, McpServerState, McpStatus } from "../../api/types";
 import { tr } from "../../i18n/text";
-import { formatTimestamp } from "../../lib/format";
+import { formatCount, formatTimestamp } from "../../lib/format";
 import { MCP_STATUS_KEY, useMcpStatus } from "../../lib/useMcpStatus";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Hint } from "../common/Hint";
@@ -58,7 +58,11 @@ function CopyBlock({ id, label, text }: { id: string; label: string; text: strin
   );
 }
 
-function auditWhat(e: McpAuditEntry, t: (k: string) => string): string {
+function auditWhat(e: McpAuditEntry, t: (k: string, o?: Record<string, string>) => string): string {
+  if (e.event === "call" && e.scanned !== undefined) {
+    const counts = { returned: formatCount(e.returned ?? 0), scanned: formatCount(e.scanned), masked: formatCount(e.masked ?? 0) };
+    return `${e.tool ?? ""} — ${t("settings.mcp.audit.lines", counts)}`;
+  }
   if (e.event === "call") return e.tool ?? "";
   const key = EVENT_KEYS[e.event];
   return key ? t(key) : e.event;

@@ -350,6 +350,10 @@ export interface McpAuditEntry {
   outcome?: "ok" | "error";
   code?: string | null;
   ms?: number;
+  /** Чтение логов: строк просмотрено, отдано и замаскировано. */
+  scanned?: number;
+  returned?: number;
+  masked?: number;
 }
 
 // --- Чтение кластера (этап O1b). Время — секунды Unix.

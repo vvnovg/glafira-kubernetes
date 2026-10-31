@@ -609,7 +609,8 @@
         "rejected": "Клиент отклонён",
         "revoked": "Доступ клиента отозван",
         "serverStarted": "Сервер запущен",
-        "serverStopped": "Сервер остановлен"
+        "serverStopped": "Сервер остановлен",
+        "lines": "{{returned}} из {{scanned}} строк, замаскировано: {{masked}}"
       }
     }
   },

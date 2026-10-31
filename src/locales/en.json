@@ -605,7 +605,8 @@
         "rejected": "Client rejected",
         "revoked": "Client access revoked",
         "serverStarted": "Server started",
-        "serverStopped": "Server stopped"
+        "serverStopped": "Server stopped",
+        "lines": "{{returned}} of {{scanned}} lines, masked: {{masked}}"
       }
     }
   },
