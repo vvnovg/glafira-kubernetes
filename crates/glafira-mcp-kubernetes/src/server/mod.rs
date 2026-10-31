@@ -55,7 +55,9 @@ connections logs are not available (logs_not_allowed: ask the user to switch the
 \"Metadata and logs\" in Glafira; logs_disabled: the organization's policy forbids it). If a \
 container has not started yet, has no previous instance or the node has already removed its log, \
 get_pod_logs answers log_unavailable with the reason and search_workload_logs lists the container \
-in errors: it is the state of the pod, not a wrong argument; check it with describe_pod. Secret \
+in errors: it is the state of the pod, not a wrong argument; check it with describe_pod. \
+search_workload_logs looks back only 3600 seconds by default: widen sinceSeconds (up to 86400) \
+before concluding that a line is absent. Secret \
 values, the application configuration outside the cluster, its external dependencies and logs \
 outside the cluster are never available here: ask the user for them.
 

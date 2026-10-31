@@ -43,7 +43,7 @@ pub const OLDER_LINES_HINT: &str = "The response was truncated to 100 KB: the ol
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LogFilter {
-    /// Substring to look for.
+    /// Substring to look for: matches anywhere in a line. To match a whole line exactly, use regex with ^…$.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contains: Option<String>,
     /// Regular expression (Rust regex syntax) to look for.
