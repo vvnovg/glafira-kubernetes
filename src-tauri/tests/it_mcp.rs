@@ -137,6 +137,18 @@ async fn the_gateway_reads_the_stand_within_the_llm_scope() {
             .all(|e| e.get("value").is_none()),
         "уровень metadata — без значений env: {env}"
     );
+    // Под Deployment pending не размещается: nodeSelector, которого нет у ноды, виден модели.
+    let v = ok(call(
+        &c,
+        "describe_workload",
+        json!({"connectionId": id, "namespace": NS, "kind": "Deployment", "name": "pending"}),
+    )
+    .await);
+    assert_eq!(
+        v["scheduling"]["nodeSelector"],
+        json!({"glafira/none": "true"}),
+        "{v}"
+    );
     let msg = err(&call(
         &c,
         "get_pod_logs",

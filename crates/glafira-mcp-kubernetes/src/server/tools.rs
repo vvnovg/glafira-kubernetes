@@ -403,11 +403,25 @@ fn mask_annotations(m: &Masker, a: &mut std::collections::BTreeMap<String, Strin
     n
 }
 
+/// Ограничения размещения: `nodeSelector` — как аннотации (значение ключа из списка имён —
+/// `***`, иначе шаблоны), термы affinity и толерантности — встроенные шаблоны.
+fn mask_scheduling(m: &Masker, s: &mut Scheduling) -> usize {
+    mask_annotations(m, &mut s.node_selector)
+        + mask_all(m, &mut s.node_affinity)
+        + mask_all(m, &mut s.pod_affinity)
+        + mask_all(m, &mut s.pod_anti_affinity)
+        + mask_all(m, &mut s.tolerations)
+        + mask_opt(m, &mut s.node_name)
+        + mask_opt(m, &mut s.priority_class_name)
+        + mask_opt(m, &mut s.scheduler_name)
+}
+
 /// Весь текст из кластера в `describe_workload`; возвращает число замен.
 fn mask_workload(m: &Masker, w: &mut WorkloadDetails) -> usize {
     let mut n = mask_all(m, &mut w.workload.images)
         + mask_conditions(m, &mut w.conditions)
-        + mask_annotations(m, &mut w.annotations);
+        + mask_annotations(m, &mut w.annotations)
+        + mask_scheduling(m, &mut w.scheduling);
     n += w
         .containers
         .iter_mut()
@@ -427,7 +441,9 @@ fn mask_workload(m: &Masker, w: &mut WorkloadDetails) -> usize {
 
 /// Весь текст из кластера в `describe_pod`; возвращает число замен.
 fn mask_pod(m: &Masker, p: &mut PodDetails) -> usize {
-    let mut n = mask_conditions(m, &mut p.conditions) + mask_annotations(m, &mut p.annotations);
+    let mut n = mask_conditions(m, &mut p.conditions)
+        + mask_annotations(m, &mut p.annotations)
+        + mask_scheduling(m, &mut p.scheduling);
     for c in &mut p.containers {
         n += mask_spec(m, &mut c.spec)
             + mask_opt(m, &mut c.image_id)
@@ -751,7 +767,7 @@ impl KubeServer {
     }
 
     #[tool(
-        description = "Node details: conditions, taints, capacity and allocatable, the number of pods on the node with the sum of their requests and limits, kubelet version, OS image, container runtime.",
+        description = "Node details: conditions, taints, labels (compare them with nodeSelector and node affinity of pending pods; secrets masked), capacity and allocatable, the number of pods on the node with the sum of their requests and limits, kubelet version, OS image, container runtime.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -780,6 +796,8 @@ impl KubeServer {
                         Node
                     )?;
                     mask_conditions(&text_masker(), &mut n.conditions);
+                    let scope = self.scope(&p.connection_id, None)?;
+                    mask_annotations(&scope.masker(), &mut n.labels);
                     to_value(&n)
                 },
             )
@@ -845,7 +863,7 @@ impl KubeServer {
     }
 
     #[tool(
-        description = "Workload details: replicas, conditions, selector, strategy, containers (image, command and args with secrets masked, requests and limits, probes, environment variable names and sources; on the logs access level also literal and ConfigMap values, masked and cut to 4 KB with valueCut set; Secret values never), volume types, labels and annotations (secrets masked), HPA, PDB, rollout history (ReplicaSets, ReplicationControllers or ControllerRevisions) and active jobs of a CronJob.",
+        description = "Workload details: replicas, conditions, selector, strategy, containers (image, command and args with secrets masked, requests and limits, probes, environment variable names and sources; on the logs access level also literal and ConfigMap values, masked and cut to 4 KB with valueCut set; Secret values never), volume types, scheduling constraints of the pod template (nodeSelector, node and pod (anti)affinity terms, tolerations, nodeName, priorityClassName, non-default schedulerName; omitted when none), labels and annotations (secrets masked), HPA, PDB, rollout history (ReplicaSets, ReplicationControllers or ControllerRevisions) and active jobs of a CronJob.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -933,7 +951,7 @@ impl KubeServer {
     }
 
     #[tool(
-        description = "Pod details: phase, conditions, QoS, node, owner, every container (init ones too) with its image and digest, state and last state with reason and exit code, restarts, requests and limits, probes, command and args with secrets masked and environment variable names and sources (on the logs access level also literal and ConfigMap values, masked and cut to 4 KB with valueCut set; Secret values never); volumes, labels, annotations (secrets masked) and the latest events of the pod.",
+        description = "Pod details: phase, conditions, QoS, node, owner, every container (init ones too) with its image and digest, state and last state with reason and exit code, restarts, requests and limits, probes, command and args with secrets masked and environment variable names and sources (on the logs access level also literal and ConfigMap values, masked and cut to 4 KB with valueCut set; Secret values never); volumes, scheduling constraints (nodeSelector, node and pod (anti)affinity terms, tolerations, priorityClassName, non-default schedulerName; omitted when none; explain FailedScheduling with them and the node labels from describe_node), labels, annotations (secrets masked) and the latest events of the pod.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,

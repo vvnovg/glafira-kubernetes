@@ -716,6 +716,9 @@ pub struct WorkloadDetails {
     /// Тома шаблона подов — только для MCP (интерфейс показывает тома на вкладке пода).
     #[serde(skip)]
     pub volumes: Vec<crate::k8s::pods::VolumeView>,
+    /// Ограничения размещения шаблона подов — только для MCP.
+    #[serde(skip)]
+    pub scheduling: crate::k8s::scheduling::SchedulingView,
 }
 
 fn owned_by(meta: &ObjectMeta, uid: Option<&str>) -> bool {
@@ -949,6 +952,12 @@ pub async fn get_workload(
             .as_ref()
             .and_then(|t| t.spec.as_ref())
             .map(crate::k8s::pods::volumes_of)
+            .unwrap_or_default(),
+        scheduling: p
+            .template
+            .as_ref()
+            .and_then(|t| t.spec.as_ref())
+            .map(crate::k8s::scheduling::scheduling_of)
             .unwrap_or_default(),
         workload: p.row,
     })

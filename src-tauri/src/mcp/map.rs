@@ -20,6 +20,7 @@ use crate::k8s::overview::ClusterOverview;
 use crate::k8s::pods::{PodDetails, PodRow, StateView, VolumeView};
 use crate::k8s::projects::ProjectRow;
 use crate::k8s::quotas::QuotasView;
+use crate::k8s::scheduling::SchedulingView;
 use crate::k8s::view::{ConditionView, Part};
 use crate::k8s::workloads::{WorkloadDetails, WorkloadRow};
 use crate::platform::adapters::PlatformOverview;
@@ -344,6 +345,7 @@ pub fn node_details(d: NodeDetails, usage: m::Part<m::NodeUsage>, now: i64) -> m
         unschedulable: d.node.unschedulable,
         conditions: conditions(&d.conditions, now),
         taints: d.taints,
+        labels: d.labels,
         capacity: d.capacity,
         allocatable: d.allocatable,
         usage,
@@ -455,6 +457,19 @@ fn volume(v: VolumeView) -> m::Volume {
     }
 }
 
+fn scheduling(s: SchedulingView) -> m::Scheduling {
+    m::Scheduling {
+        node_selector: s.node_selector,
+        node_affinity: s.node_affinity,
+        pod_affinity: s.pod_affinity,
+        pod_anti_affinity: s.pod_anti_affinity,
+        tolerations: s.tolerations,
+        node_name: s.node_name,
+        priority_class_name: s.priority_class_name,
+        scheduler_name: s.scheduler_name,
+    }
+}
+
 pub fn workload_details(d: WorkloadDetails, now: i64) -> m::WorkloadDetails {
     m::WorkloadDetails {
         workload: workload_item(d.workload, now),
@@ -463,6 +478,7 @@ pub fn workload_details(d: WorkloadDetails, now: i64) -> m::WorkloadDetails {
         conditions: conditions(&d.conditions, now),
         containers: d.containers.into_iter().map(container_spec).collect(),
         volumes: d.volumes.into_iter().map(volume).collect(),
+        scheduling: scheduling(d.scheduling),
         labels: d.labels,
         annotations: d.annotations,
         hpa: part(d.hpa, |h| {
@@ -568,6 +584,11 @@ pub fn pod_details(d: PodDetails, events: m::Part<Vec<m::Event>>, now: i64) -> m
             })
             .collect(),
         volumes: d.volumes.into_iter().map(volume).collect(),
+        // Нода пода уже в поле `node`.
+        scheduling: m::Scheduling {
+            node_name: None,
+            ..scheduling(d.scheduling)
+        },
         labels: d.labels,
         annotations: d.annotations,
         events,
@@ -843,6 +864,67 @@ mod tests {
         );
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(v["owner"]["kind"], "Deployment");
+    }
+
+    fn pod_of(v: serde_json::Value) -> serde_json::Value {
+        let pod: Pod = serde_json::from_value(v).unwrap();
+        let d = pod_details(
+            crate::k8s::pods::pod_details(&pod),
+            m::Part::Data(vec![]),
+            0,
+        );
+        serde_json::to_value(&d).unwrap()
+    }
+
+    #[test]
+    fn pod_scheduling_constraints_reach_the_model() {
+        let mut p = crate::k8s::pods::fixtures::pod(
+            "pending-1",
+            "Pending",
+            serde_json::json!({"waiting": {"reason": "ContainerCreating"}}),
+        );
+        p["spec"]["nodeSelector"] = serde_json::json!({"glafira/none": "true"});
+        p["spec"]["affinity"] = serde_json::json!({"nodeAffinity": {
+            "requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [
+                {"matchExpressions": [{"key": "kubernetes.io/arch", "operator": "In", "values": ["amd64"]}]}]}}});
+        p["spec"]["tolerations"] = serde_json::json!([
+            {"key": "dedicated", "operator": "Equal", "value": "db", "effect": "NoExecute"}]);
+        p["spec"]["schedulerName"] = "default-scheduler".into();
+        let v = pod_of(p);
+        assert_eq!(
+            v["scheduling"],
+            serde_json::json!({
+                "nodeSelector": {"glafira/none": "true"},
+                "nodeAffinity": ["required: kubernetes.io/arch In [amd64]"],
+                "tolerations": ["dedicated=db:NoExecute"]
+            }),
+            "нода пода — в поле node, планировщик по умолчанию не нужен"
+        );
+        assert_eq!(v["node"], "w1");
+    }
+
+    #[test]
+    fn a_pod_without_constraints_has_no_scheduling_field() {
+        let v = pod_of(crate::k8s::pods::fixtures::running("web-1"));
+        assert!(v.get("scheduling").is_none(), "{v}");
+    }
+
+    #[test]
+    fn node_labels_reach_the_model() {
+        let n: k8s_openapi::api::core::v1::Node = serde_json::from_value(
+            crate::k8s::nodes::fixtures::node("w1", &["worker"], "True", false),
+        )
+        .unwrap();
+        let d = node_details(
+            crate::k8s::nodes::node_details(&n),
+            m::Part::error("FORBIDDEN"),
+            0,
+        );
+        let v = serde_json::to_value(&d).unwrap();
+        assert_eq!(
+            v["labels"],
+            serde_json::json!({"kubernetes.io/os": "linux", "node-role.kubernetes.io/worker": ""})
+        );
     }
 
     #[test]
