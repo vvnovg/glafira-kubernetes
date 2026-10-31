@@ -556,7 +556,7 @@ pub struct WorkloadList {
     pub truncated: bool,
 }
 
-/// Переменная окружения: имя и источник, без значения (уровень `metadata`).
+/// Переменная окружения: имя и источник; значение — только на уровне `logs` (спец. §10.2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Env {
@@ -565,6 +565,13 @@ pub struct Env {
     pub source: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
+    /// Литерал или значение ключа ConfigMap после маскировки (уровень `logs`). Значений Secret
+    /// нет ни на каком уровне.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// Значение ConfigMap не прочиталось: нет прав, ключа или данные двоичные.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value_error: Option<String>,
 }
 
 /// Контейнер шаблона или пода. `command` и `args` — после маскировки (спец. §10.3).

@@ -439,6 +439,8 @@ pub fn container_spec(c: ContainerSpecView) -> m::ContainerSpec {
                 source: name_of(&e.source),
                 name: e.name,
                 reference: e.reference,
+                value: e.value,
+                value_error: None,
             })
             .collect(),
     }

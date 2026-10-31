@@ -347,14 +347,32 @@ fn mask_state(m: &Masker, state: &mut Option<ContainerState>) -> usize {
     state.as_mut().map_or(0, |s| mask_opt(m, &mut s.message))
 }
 
-/// `command` и `args` контейнера — имена полей и пары, образ и пробы — встроенные шаблоны;
-/// возвращает число замен.
+/// Значение env (уровень `logs`): у имени из списка — `***` целиком, иначе — шаблоны и пары.
+fn mask_env(m: &Masker, e: &mut Env) -> usize {
+    let Some(v) = &mut e.value else {
+        return 0;
+    };
+    if m.is_secret_name(&e.name) {
+        if v == crate::mask::MASK {
+            return 0;
+        }
+        *v = crate::mask::MASK.to_string();
+        return 1;
+    }
+    let (s, n) = m.text(v);
+    *v = s;
+    n
+}
+
+/// `command`, `args` и значения env контейнера — имена полей и пары, образ и пробы —
+/// встроенные шаблоны; возвращает число замен.
 fn mask_spec(m: &Masker, c: &mut ContainerSpec) -> usize {
     let (command, a) = m.args(&c.command);
     let (args, b) = m.args(&c.args);
     c.command = command;
     c.args = args;
     a + b
+        + c.env.iter_mut().map(|e| mask_env(m, e)).sum::<usize>()
         + mask_text(m, &mut c.image)
         + mask_opt(m, &mut c.liveness)
         + mask_opt(m, &mut c.readiness)
@@ -809,7 +827,7 @@ impl KubeServer {
     }
 
     #[tool(
-        description = "Workload details: replicas, conditions, selector, strategy, containers (image, command and args with secrets masked, requests and limits, probes, environment variable names and sources without values), volume types, labels and annotations (secrets masked), HPA, PDB, rollout history (ReplicaSets, ReplicationControllers or ControllerRevisions) and active jobs of a CronJob.",
+        description = "Workload details: replicas, conditions, selector, strategy, containers (image, command and args with secrets masked, requests and limits, probes, environment variable names and sources; on the logs access level also literal and ConfigMap values, masked; Secret values never), volume types, labels and annotations (secrets masked), HPA, PDB, rollout history (ReplicaSets, ReplicationControllers or ControllerRevisions) and active jobs of a CronJob.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -894,7 +912,7 @@ impl KubeServer {
     }
 
     #[tool(
-        description = "Pod details: phase, conditions, QoS, node, owner, every container (init ones too) with its image and digest, state and last state with reason and exit code, restarts, requests and limits, probes, command and args with secrets masked and environment variable names and sources without values; volumes, labels, annotations (secrets masked) and the latest events of the pod.",
+        description = "Pod details: phase, conditions, QoS, node, owner, every container (init ones too) with its image and digest, state and last state with reason and exit code, restarts, requests and limits, probes, command and args with secrets masked and environment variable names and sources (on the logs access level also literal and ConfigMap values, masked; Secret values never); volumes, labels, annotations (secrets masked) and the latest events of the pod.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,

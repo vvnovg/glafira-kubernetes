@@ -29,6 +29,7 @@ use crate::health::store::{
     Trigger, sanitize,
 };
 use crate::health::texts;
+use crate::k8s::configs::{ConfigValue, config_map_values};
 use crate::k8s::events::{EventObject, list_events};
 use crate::k8s::network::{gateways, grpc_routes, http_routes, routes};
 use crate::k8s::pods::{WorkloadRef, get_pod, list_pods};
@@ -79,6 +80,54 @@ fn now_s() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
+}
+
+/// Значения env контейнеров: без уровня logs — никаких; на нём литералы остаются, а ключи
+/// ConfigMap (`configMapKeyRef`) читаются — каждый ConfigMap один раз. Не прочиталось — причина
+/// в `valueError`. Маскирует крейт шлюза.
+async fn env_values<'a>(
+    r: &ReadClient,
+    namespace: &str,
+    containers: impl Iterator<Item = &'a mut m::ContainerSpec>,
+    values: bool,
+) {
+    let mut config_maps: std::collections::HashMap<
+        String,
+        Result<std::collections::BTreeMap<String, ConfigValue>, String>,
+    > = Default::default();
+    for c in containers {
+        for e in &mut c.env {
+            if !values {
+                e.value = None;
+                continue;
+            }
+            if e.source != "configMapKeyRef" {
+                continue;
+            }
+            let Some((name, key)) = e.reference.as_deref().and_then(|r| r.split_once('/')) else {
+                continue;
+            };
+            if !config_maps.contains_key(name) {
+                let read = config_map_values(r, namespace, name)
+                    .await
+                    .map_err(|e| error_text(&e));
+                config_maps.insert(name.to_string(), read);
+            }
+            match &config_maps[name] {
+                Err(error) => e.value_error = Some(error.clone()),
+                Ok(map) => match map.get(key) {
+                    Some(ConfigValue {
+                        text: Some(text), ..
+                    }) => e.value = Some(text.clone()),
+                    Some(ConfigValue {
+                        binary_size: Some(n),
+                        ..
+                    }) => e.value_error = Some(format!("binary data, {n} bytes")),
+                    _ => e.value_error = Some(format!("no key {key} in ConfigMap {name}")),
+                },
+            }
+        }
+    }
 }
 
 fn workload_kind(k: m::WorkloadKind) -> WorkloadKind {
@@ -151,6 +200,11 @@ impl AppBackend {
                 Self::in_scope(&p, ns)?;
             }
         }
+        // Значения env и ConfigMap — только на уровне logs (спец. §10.2).
+        let values = op
+            .connection_id()
+            .and_then(|id| self.scope(id))
+            .is_some_and(|s| s.logs == LogsAccess::Allowed);
         let st = &self.state;
         let now = now_s();
         let out = match op {
@@ -270,17 +324,16 @@ impl AppBackend {
             } => {
                 let ns = namespace.clone();
                 let d = Box::pin(st.read_in(&connection_id, &namespace, |c| async move {
-                    get_workload(
-                        &c.reader(),
-                        &ns,
-                        workload_kind(workload.kind),
-                        &workload.name,
-                    )
-                    .await
+                    let r = c.reader();
+                    let d =
+                        get_workload(&r, &ns, workload_kind(workload.kind), &workload.name).await?;
+                    let mut d = map::workload_details(d, now);
+                    env_values(&r, &ns, d.containers.iter_mut(), values).await;
+                    Ok(d)
                 }))
                 .await
                 .map_err(to_backend)?;
-                ReadOutput::Workload(map::workload_details(d, now))
+                ReadOutput::Workload(d)
             }
             ReadOp::ListPods {
                 connection_id,
@@ -326,7 +379,15 @@ impl AppBackend {
                         ),
                         Err(e) => m::Part::error(error_text(&e)),
                     };
-                    Ok(map::pod_details(pod?, events, now))
+                    let mut d = map::pod_details(pod?, events, now);
+                    env_values(
+                        &r,
+                        &ns,
+                        d.containers.iter_mut().map(|c| &mut c.spec),
+                        values,
+                    )
+                    .await;
+                    Ok(d)
                 }))
                 .await
                 .map_err(to_backend)?;
@@ -1071,6 +1132,100 @@ mod tests {
             Some("metadata"),
             "при запрете логов уровень для модели — metadata"
         );
+    }
+
+    /// Под с литералом и ключами ConfigMap в env: прочитанный, без ключа, без прав.
+    fn pod_with_env() -> serde_json::Value {
+        let mut p = running("web-1");
+        p["spec"]["containers"][0]["env"] = serde_json::json!([
+            {"name": "LOG_LEVEL", "value": "debug"},
+            {"name": "MODE", "valueFrom": {"configMapKeyRef": {"name": "app-config", "key": "mode"}}},
+            {"name": "COLOR", "valueFrom": {"configMapKeyRef": {"name": "app-config", "key": "color"}}},
+            {"name": "GONE", "valueFrom": {"configMapKeyRef": {"name": "app-config", "key": "nope"}}},
+            {"name": "OTHER", "valueFrom": {"configMapKeyRef": {"name": "locked", "key": "x"}}},
+            {"name": "DB_PASSWORD", "valueFrom": {"secretKeyRef": {"name": "db", "key": "password"}}},
+        ]);
+        p
+    }
+
+    #[tokio::test]
+    async fn env_values_only_on_the_logs_level() {
+        let (_d, b) = backend();
+        let mut logs = sample_profile("logs");
+        logs.llm_access = LlmAccess::Logs;
+        b.state.connections.upsert(logs).unwrap();
+        let config_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        for id in ["logs", "all"] {
+            let reads = config_reads.clone();
+            pooled(&b, id, move |s| match s.path() {
+                "/api/v1/namespaces/team-a/pods/web-1" => (200, pod_with_env()),
+                "/api/v1/namespaces/team-a/configmaps/app-config" => {
+                    reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    (
+                        200,
+                        serde_json::json!({"apiVersion": "v1", "kind": "ConfigMap",
+                            "metadata": {"name": "app-config"}, "data": {"mode": "blue"},
+                            "binaryData": {"color": "AAEC"}}),
+                    )
+                }
+                "/api/v1/namespaces/team-a/configmaps/locked" => {
+                    status(403, "Forbidden", "configmaps \"locked\" is forbidden")
+                }
+                "/api/v1/namespaces/team-a/secrets/db" => panic!("Secret не читается"),
+                _ => list(vec![]),
+            });
+        }
+        let describe = |id: &str| ReadOp::DescribePod {
+            connection_id: id.into(),
+            namespace: "team-a".into(),
+            name: "web-1".into(),
+        };
+        let ReadOutput::Pod(p) = b.read(describe("logs")).await.unwrap() else {
+            panic!("не под")
+        };
+        let env: Vec<(&str, Option<&str>, Option<&str>)> = p.containers[0]
+            .spec
+            .env
+            .iter()
+            .map(|e| {
+                (
+                    e.name.as_str(),
+                    e.value.as_deref(),
+                    e.value_error.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(env[0], ("LOG_LEVEL", Some("debug"), None));
+        assert_eq!(env[1], ("MODE", Some("blue"), None));
+        assert_eq!(env[2], ("COLOR", None, Some("binary data, 3 bytes")));
+        assert_eq!(
+            env[3],
+            ("GONE", None, Some("no key nope in ConfigMap app-config"))
+        );
+        assert!(env[4].2.unwrap().starts_with("FORBIDDEN"), "{:?}", env[4]);
+        assert_eq!(
+            env[5],
+            ("DB_PASSWORD", None, None),
+            "значения Secret — никогда"
+        );
+        assert_eq!(
+            config_reads.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "ConfigMap читается один раз"
+        );
+
+        let ReadOutput::Pod(p) = b.read(describe("all")).await.unwrap() else {
+            panic!("не под")
+        };
+        assert!(
+            p.containers[0]
+                .spec
+                .env
+                .iter()
+                .all(|e| e.value.is_none() && e.value_error.is_none()),
+            "уровень metadata — без значений"
+        );
+        assert_eq!(config_reads.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

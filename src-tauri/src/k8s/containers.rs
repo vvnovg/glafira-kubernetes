@@ -39,6 +39,10 @@ pub struct EnvView {
     pub source: EnvSource,
     /// Объект и ключ источника: `app-config/LOG_LEVEL`, `metadata.name`, `limits.memory`.
     pub reference: Option<String>,
+    /// Литеральное значение — только для MCP на уровне `logs` (спец. §10.2): крейт шлюза
+    /// маскирует его. Интерфейс значений не получает.
+    #[serde(skip)]
+    pub value: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -119,6 +123,9 @@ fn env_views(c: &Container) -> Vec<EnvView> {
             };
             EnvView {
                 name: e.name.clone(),
+                value: (source == EnvSource::Literal)
+                    .then(|| e.value.clone())
+                    .flatten(),
                 source,
                 reference,
             }
@@ -131,6 +138,7 @@ fn env_views(c: &Container) -> Vec<EnvView> {
                 name: name.clone(),
                 source: EnvSource::ConfigMapRef,
                 reference: Some(r.name.clone()),
+                value: None,
             });
         }
         if let Some(r) = &f.secret_ref {
@@ -138,6 +146,7 @@ fn env_views(c: &Container) -> Vec<EnvView> {
                 name,
                 source: EnvSource::SecretRef,
                 reference: Some(r.name.clone()),
+                value: None,
             });
         }
     }

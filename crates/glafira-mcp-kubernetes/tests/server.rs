@@ -99,11 +99,30 @@ fn container(name: &str) -> ContainerSpec {
         liveness: None,
         readiness: Some("http-get :8080/ready".into()),
         startup: None,
-        env: vec![Env {
-            name: "DB_PASSWORD".into(),
-            source: "secretKeyRef".into(),
-            reference: Some("db/password".into()),
-        }],
+        env: vec![
+            Env {
+                name: "DB_PASSWORD".into(),
+                source: "secretKeyRef".into(),
+                reference: Some("db/password".into()),
+                value: None,
+                value_error: None,
+            },
+            // Литерал на уровне logs: значение с секретом в URL маскируется шаблоном.
+            Env {
+                name: "DATABASE_URL".into(),
+                source: "literal".into(),
+                reference: None,
+                value: Some("postgres://app:hunter2@db:5432/app".into()),
+                value_error: None,
+            },
+            Env {
+                name: "TEAM".into(),
+                source: "literal".into(),
+                reference: None,
+                value: Some("payments".into()),
+                value_error: None,
+            },
+        ],
     }
 }
 
@@ -979,7 +998,11 @@ async fn workload_details_are_masked() {
         json!({"example.com/api-token": "***", "team": "payments"}),
         "без копии объекта, секрет — ***"
     );
-    assert_eq!(v["masked"], 3);
+    assert_eq!(
+        ct["env"][1]["value"], "postgres://app:***@db:5432/app",
+        "значение env (уровень logs) — после маскировки"
+    );
+    assert_eq!(v["masked"], 4);
     assert_eq!(v["kind"], "Deployment");
     assert!(v["pdb"]["error"].as_str().unwrap().starts_with("FORBIDDEN"));
     let text = serde_json::to_string(&v).unwrap();
@@ -996,7 +1019,7 @@ async fn workload_details_are_masked() {
     .await);
     assert_eq!(v["containers"][0]["args"][1], "***");
     assert_eq!(v["containers"][0]["state"]["reason"], "CrashLoopBackOff");
-    assert_eq!(v["masked"], 3);
+    assert_eq!(v["masked"], 4);
     assert_eq!(v["events"][0]["reason"], "BackOff");
 }
 
@@ -1017,6 +1040,7 @@ async fn describe_masks_with_the_connection_field_names() {
     );
     let ct = &v["containers"][0];
     assert_eq!(ct["command"], json!(["/app", "--db-password=hunter2"]));
+    assert_eq!(ct["env"][2]["value"], "***", "TEAM — имя из своего списка");
     let v = ok(call(
         &c,
         "describe_pod",
@@ -1628,10 +1652,11 @@ async fn cluster_text_of_workloads_goes_through_the_builtin_patterns() {
         "http-get http://app:***@localhost:8080/ready"
     );
     assert_eq!(ct["startup"], "exec check ***");
-    // Три замены в command, args и аннотациях (как в workload_details_are_masked) и восемь в
-    // тексте кластера: образы (workload, контейнер, ревизия), условия (workload, HPA), три пробы.
-    assert_eq!(v["masked"], 11);
-    assert_masked(&v, 11);
+    // Четыре замены в command, args, значении env и аннотациях (как в
+    // workload_details_are_masked) и восемь в тексте кластера: образы (workload, контейнер,
+    // ревизия), условия (workload, HPA), три пробы.
+    assert_eq!(v["masked"], 12);
+    assert_masked(&v, 12);
 
     let v = ok(call(
         &c,
@@ -1660,10 +1685,10 @@ async fn cluster_text_of_pods_and_events_goes_through_the_builtin_patterns() {
     assert_eq!(ct["state"]["message"], "back-off ***");
     assert_eq!(ct["lastState"]["message"], "panic: Bearer ***");
     assert_eq!(ct["startup"], "exec check ***");
-    // Три замены в command, args и аннотациях и девять в тексте кластера: условие, событие,
-    // образ, три пробы, imageID, сообщения состояния и прошлого состояния.
-    assert_eq!(v["masked"], 12);
-    assert_masked(&v, 12);
+    // Четыре замены в command, args, значении env и аннотациях и девять в тексте кластера:
+    // условие, событие, образ, три пробы, imageID, сообщения состояния и прошлого состояния.
+    assert_eq!(v["masked"], 13);
+    assert_masked(&v, 13);
 
     let v = ok(call(
         &c,
