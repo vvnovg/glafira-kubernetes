@@ -566,7 +566,7 @@
     },
     "mcp": {
       "section": "LLM assistants (MCP)",
-      "intro": "An LLM assistant (Claude Desktop, Claude Code, Cursor and others) can connect to Glafira over MCP, read the metadata of the connections you open for it, run a cluster check and leave notes; at the «Metadata and logs» level it also reads pod logs and environment and ConfigMap values, with secrets masked. It cannot change anything in the clusters.",
+      "intro": "An LLM assistant (Claude Desktop, Claude Code, Cursor and others) can connect to Glafira over MCP, read the metadata of the connections you open for it, run a cluster check and leave notes; at the “Metadata and logs” level it also reads pod logs and environment and ConfigMap values, with secrets masked. It cannot change anything in the clusters.",
       "enable": "Allow the MCP server",
       "policy": "MCP is disabled by your organization",
       "state": {
