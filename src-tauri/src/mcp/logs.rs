@@ -108,11 +108,13 @@ impl Unavailable {
     }
 }
 
-/// Лог контейнера пода или причина, по которой его нет.
+/// Лог контейнера пода, причина, по которой его нет, или ошибка аргумента: такого контейнера
+/// у пода нет (текст для модели перечисляет его контейнеры).
 #[derive(Debug)]
 pub enum PodLog {
     Log(ContainerLog),
     Unavailable(String),
+    NoSuchContainer(String),
 }
 
 pub fn deadline() -> Instant {
@@ -164,6 +166,61 @@ pub fn default_container(pod: &Pod) -> Option<String> {
         .filter(|a| names.contains(&a.as_str()))
         .map(String::from)
         .or_else(|| names.first().map(|n| n.to_string()))
+}
+
+/// Контейнеры пода, чьи логи можно читать: основные, init и эфемерные (`kubectl debug`).
+fn container_names(pod: &Pod) -> [(&'static str, Vec<&str>); 3] {
+    let Some(s) = pod.spec.as_ref() else {
+        return [
+            ("containers", vec![]),
+            ("init containers", vec![]),
+            ("ephemeral containers", vec![]),
+        ];
+    };
+    [
+        (
+            "containers",
+            s.containers.iter().map(|c| c.name.as_str()).collect(),
+        ),
+        (
+            "init containers",
+            s.init_containers
+                .iter()
+                .flatten()
+                .map(|c| c.name.as_str())
+                .collect(),
+        ),
+        (
+            "ephemeral containers",
+            s.ephemeral_containers
+                .iter()
+                .flatten()
+                .map(|c| c.name.as_str())
+                .collect(),
+        ),
+    ]
+}
+
+/// Контейнера `container` у пода нет — текст для модели со списком его контейнеров; есть —
+/// `None`.
+fn no_such_container(pod: &Pod, pod_name: &str, container: &str) -> Option<String> {
+    let groups = container_names(pod);
+    if groups.iter().any(|(_, names)| names.contains(&container)) {
+        return None;
+    }
+    let list: Vec<String> = groups
+        .iter()
+        .filter(|(_, names)| !names.is_empty())
+        .map(|(what, names)| format!("{what}: {}", names.join(", ")))
+        .collect();
+    Some(format!(
+        "Container \"{container}\" is not in pod \"{pod_name}\"; {}",
+        if list.is_empty() {
+            "the pod has no containers".to_string()
+        } else {
+            list.join("; ")
+        }
+    ))
 }
 
 /// Читатель, считающий байты, снятые с потока: `lossy_lines` пропускает хвосты длинных строк,
@@ -316,12 +373,17 @@ pub async fn pod_log(
     since_time: Option<Timestamp>,
     tail_lines: Option<u32>,
 ) -> AppResult<PodLog> {
+    // Под читается всегда: без `container` — ради контейнера по умолчанию, с ним — чтобы
+    // неверное имя вернуть модели со списком контейнеров, не спрашивая лог.
+    let p: Pod = r.get(namespace, pod).await?;
     let container = match container {
-        Some(c) => c,
-        None => {
-            let p: Pod = r.get(namespace, pod).await?;
-            default_container(&p).unwrap_or_default()
+        Some(c) => {
+            if let Some(why) = no_such_container(&p, pod, &c) {
+                return Ok(PodLog::NoSuchContainer(why));
+            }
+            c
         }
+        None => default_container(&p).unwrap_or_default(),
     };
     let lp = kube::api::LogParams {
         container: (!container.is_empty()).then(|| container.clone()),
@@ -465,6 +527,7 @@ mod tests {
         match l {
             PodLog::Log(l) => l,
             PodLog::Unavailable(why) => panic!("лог недоступен: {why}"),
+            PodLog::NoSuchContainer(why) => panic!("нет контейнера: {why}"),
         }
     }
 
@@ -477,13 +540,26 @@ mod tests {
         )
     }
 
-    /// Лог контейнера `container` пода web-1 (`previous`), когда API-сервер отвечает `answer`.
+    /// Под web-1 с контейнерами web, crash и pull.
+    fn web_1() -> (u16, Vec<u8>) {
+        let mut p = running("web-1");
+        p["spec"]["containers"] = serde_json::json!([
+            {"name": "web", "image": "web:1"}, {"name": "crash", "image": "crash:1"},
+            {"name": "pull", "image": "pull:1"}]);
+        json(p)
+    }
+
+    /// Лог контейнера `container` пода web-1 (`previous`), когда API-сервер отвечает на запрос
+    /// лога `answer`.
     async fn pod_log_answered(
         container: &str,
         previous: bool,
         answer: impl Fn() -> (u16, Vec<u8>) + Send + 'static,
     ) -> AppResult<PodLog> {
-        let r = reader(move |_| answer());
+        let r = reader(move |s| match s.path() {
+            "/api/v1/namespaces/team-a/pods/web-1" => web_1(),
+            _ => answer(),
+        });
         pod_log(
             &r,
             "team-a",
@@ -501,6 +577,7 @@ mod tests {
         match l.unwrap() {
             PodLog::Unavailable(why) => why,
             PodLog::Log(l) => panic!("лог вместо причины: {:?}", l.lines),
+            PodLog::NoSuchContainer(why) => panic!("нет контейнера: {why}"),
         }
     }
 
@@ -558,9 +635,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_container_not_in_the_pod_is_a_wrong_argument_listing_the_containers() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let s2 = seen.clone();
+        let r = reader(move |s| {
+            s2.lock().unwrap().push(s.path().to_string());
+            match s.path() {
+                "/api/v1/namespaces/team-a/pods/crash-1" => {
+                    let mut p = running("crash-1");
+                    p["spec"]["containers"] =
+                        serde_json::json!([{"name": "crash", "image": "c:1"}]);
+                    p["spec"]["initContainers"] =
+                        serde_json::json!([{"name": "migrate", "image": "m:1"}]);
+                    json(p)
+                }
+                _ => log(&["must not be read"]),
+            }
+        });
+        let ask = |c: &str| {
+            pod_log(
+                &r,
+                "team-a",
+                "crash-1",
+                Some(c.into()),
+                false,
+                None,
+                None,
+                None,
+            )
+        };
+        match ask("app").await.unwrap() {
+            PodLog::NoSuchContainer(why) => assert_eq!(
+                why,
+                "Container \"app\" is not in pod \"crash-1\"; containers: crash; init containers: migrate"
+            ),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["/api/v1/namespaces/team-a/pods/crash-1"],
+            "лог не запрашивался"
+        );
+        // Init-контейнер — тоже контейнер пода, его лог читается.
+        assert!(matches!(ask("migrate").await.unwrap(), PodLog::Log(_)));
+    }
+
+    #[tokio::test]
     async fn long_lines_are_kept_up_to_the_read_cap() {
         let long = "x".repeat(READ_LINE_BYTES * 2);
-        let r = reader(move |_| log(&[&long, "short"]));
+        let r = reader(move |s| match s.path() {
+            "/api/v1/namespaces/team-a/pods/web-1" => web_1(),
+            _ => log(&[&long, "short"]),
+        });
         let l = log_of(
             pod_log(
                 &r,

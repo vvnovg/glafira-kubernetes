@@ -859,7 +859,7 @@ request и limit, пометки и нарушения ограничений; �
 | Уровень | Что видит модель |
 |---|---|
 | `off` | ничего (подключение не попадает в `list_connections`) |
-| `metadata` («Только метаданные») | объекты, статусы, условия, события, метрики и рекомендации, квоты и `LimitRange`, права пользователя. env — имена и источник (`literal` / `configMapKeyRef` / `secretKeyRef` / `fieldRef` / `resourceFieldRef`, имя и ключ ссылки), без значений; ConfigMap — имена и ключи; Secret — имена, типы и ключи; `command`/`args` — с маскировкой (§10.3); аннотации — кроме `kubectl.kubernetes.io/last-applied-configuration` и ключей, подходящих под шаблоны секретов; тексты из кластера (сообщения событий и условий, состояния контейнеров, образы, пробы, сообщения Route, HTTPRoute, GRPCRoute, ClusterOperator и ClusterVersion, находки проверки) — после встроенных шаблонов маскировки |
+| `metadata` («Только метаданные») | объекты, статусы, условия, события, метрики и рекомендации, квоты и `LimitRange`, права пользователя. env — имена и источник (`literal` / `configMapKeyRef` / `secretKeyRef` / `fieldRef` / `resourceFieldRef`, имя и ключ ссылки), без значений; ConfigMap — имена и ключи; Secret — имена, типы и ключи; `command`/`args` — с маскировкой (§10.3); аннотации — кроме `kubectl.kubernetes.io/last-applied-configuration` и ключей, подходящих под шаблоны секретов; метки нод и `nodeSelector` — как аннотации; ограничения размещения (`scheduling`: термы affinity, tolerations, `priorityClassName`, `schedulerName`) — после встроенных шаблонов; тексты из кластера (сообщения событий и условий, состояния контейнеров, образы, пробы, сообщения Route, HTTPRoute, GRPCRoute, ClusterOperator и ClusterVersion, находки проверки) — после встроенных шаблонов маскировки |
 | `logs` («Метаданные и логи») | всё из `metadata` + логи подов, литеральные значения env и значения ConfigMap — после маскировки |
 | никогда, на любом уровне | `data`/`stringData` Secret, `spec.tls.key` Route, токены, kubeconfig, адрес и параметры аутентификации профиля, настройки и журнал Glafira |
 
@@ -907,11 +907,11 @@ request и limit, пометки и нарушения ограничений; �
 | `get_cluster_overview` | metadata | `connectionId` | платформа, дистрибутив и версия (§4.3), состояние `/readyz`; для `openshift` — канал, инфраструктура, ноды (готово / всего по ролям), ClusterOperators не в норме, MachineConfigPools не в норме, `capabilities` (что пользователю разрешено читать) |
 | `list_projects` | metadata | `connectionId`, `filter?`, `offset`, `limit` (≤ 500) | `{ total, items [{ name, displayName?, phase }], nextOffset? }` — только из `llmNamespaces` |
 | `list_nodes` | metadata | `connectionId`, `filter?`, `role?` | `{ items [{ name, roles, ready, conditions, unschedulable, allocatable, requested }] }` |
-| `describe_node` | metadata | `connectionId`, `name` | условия, taints, allocatable, сумма requests и limits подов, число подов, версия kubelet |
+| `describe_node` | metadata | `connectionId`, `name` | условия, taints, метки, allocatable, сумма requests и limits подов, число подов, версия kubelet |
 | `list_workloads` | metadata | `connectionId`, `namespace`, `kind?`, `filter?`, `offset`, `limit` | `{ total, items [{ kind, name, desired, ready, available, images, ageSeconds, problems }], nextOffset? }` |
-| `describe_workload` | metadata | `connectionId`, `namespace`, `kind`, `name` | контейнеры (образы, ресурсы, пробы, env по уровню, volume-типы), условия, стратегия, история rollout, HPA, PDB, селектор |
+| `describe_workload` | metadata | `connectionId`, `namespace`, `kind`, `name` | контейнеры (образы, ресурсы, пробы, env по уровню, volume-типы), условия, стратегия, история rollout, HPA, PDB, селектор, `scheduling?` шаблона подов |
 | `list_pods` | metadata | `connectionId`, `namespace`, `workload?`, `problemsOnly = false`, `offset`, `limit` | `{ total, items [{ name, phase, reason?, ready, restarts, node, ageSeconds, owner }], nextOffset? }` |
-| `describe_pod` | metadata | `connectionId`, `namespace`, `name` | контейнеры (state, lastState с причиной и exit code, рестарты, ресурсы, пробы), условия, QoS, нода, владелец, последние события |
+| `describe_pod` | metadata | `connectionId`, `namespace`, `name` | контейнеры (state, lastState с причиной и exit code, рестарты, ресурсы, пробы), условия, QoS, нода, владелец, `scheduling?`, последние события |
 | `list_events` | metadata | `connectionId`, `namespace`, `object? { kind, name }`, `type?` (`Warning`), `sinceSeconds = 3600` (≤ 86400), `limit` | `{ items [{ lastSeen, type, reason, object, message, count }], truncated }` |
 | `get_quotas` | metadata | `connectionId`, `namespace` | ResourceQuota (использовано / лимит), LimitRange |
 | `get_network` | metadata | `connectionId`, `namespace`, `filter?` | Services (тип, порты, готовые endpoints), Routes (хост, путь, сервис, TLS-терминация, `admitted`, срок встроенного сертификата), Ingress (класс, хосты, пути → сервис и порт, TLS-хосты и имя Secret, адрес), HTTPRoute и GRPCRoute (хосты, родители с условиями, бэкенды), Gateway проекта (класс, listeners, `programmed`); виды без группы API в кластере не возвращаются |
@@ -929,6 +929,13 @@ request и limit, пометки и нарушения ограничений; �
 | `withdraw_proposal` | metadata | `connectionId`, `proposalId` | `{ withdrawn: true }` |
 
 Уточнения:
+- `scheduling` у `describe_workload` и `describe_pod` — ограничения размещения, по которым модель объясняет
+  `FailedScheduling` (сверяя их с метками и taints из `describe_node`): `nodeSelector`, `nodeAffinity`,
+  `podAffinity`, `podAntiAffinity` — термы строками (`required: kubernetes.io/arch In [amd64], disktype Exists`,
+  `preferred (weight 50): …`, у pod (anti)affinity — селектор, проекты и `topologyKey`), `tolerations` — как у
+  `kubectl describe` (`key=value:NoSchedule`, `key:NoExecute op=Exists for 300s`), `nodeName` (только у шаблона: у
+  пода нода — в `node`), `priorityClassName`, `schedulerName` (если не `default-scheduler`); пустые поля и пустой
+  объект не возвращаются;
 - `list_connections`: `platform` и `distribution` — пока подключение открыто (в пуле клиентов), иначе `null`;
 - `health_check`: `namespaces` — до 50 проектов внутри `llmNamespaces`; находки вне `llmNamespaces` модель не видит,
   `scope.projects` в ответе — тоже только из них. Область читается заново, когда проверка вернулась (за ожидание
@@ -944,8 +951,9 @@ request и limit, пометки и нарушения ограничений; �
   40 с (запрос логов с `limitBytes` — остаток бюджета; бюджет считает байты, реально прочитанные, включая
   отброшенные хвосты длинных строк) — `stopped: pods | bytes | time`; читаются текущие экземпляры
   обычных контейнеров (прошлый запуск — `get_pod_logs` с `previous`), контейнер, лог которого не прочитался или
-  недоступен, — в `errors` с причиной; `get_pod_logs` без `container` берёт контейнер по умолчанию (аннотация
-  `kubectl.kubernetes.io/default-container`, иначе первый), не помещается в 100 КБ — отбрасываются самые старые
+  недоступен, — в `errors` с причиной; `get_pod_logs` читает под до лога: заданного `container` у пода нет
+  (основные, init и эфемерные контейнеры) — `invalid_argument` со списком его контейнеров, лог не запрашивается;
+  без `container` берёт контейнер по умолчанию (аннотация `kubectl.kubernetes.io/default-container`, иначе первый), не помещается в 100 КБ — отбрасываются самые старые
   строки; лог недоступен, хотя запрос верен, — `log_unavailable` с причиной по-английски (у поиска — та же причина
   в `errors`): ответ 400 API-сервера «container … is waiting to start: <причина>» (контейнер ещё не запускался:
   `ContainerCreating`, `PodInitializing`, образ не скачивается), «previous terminated container … not found»

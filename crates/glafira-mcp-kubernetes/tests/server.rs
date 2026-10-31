@@ -555,6 +555,7 @@ impl Backend for Fake {
                         conditions: vec![],
                         containers: vec![container("web")],
                         volumes: vec![],
+                        scheduling: Scheduling::default(),
                         labels: BTreeMap::new(),
                         annotations: annotations(),
                         hpa: Part::Data(None),
@@ -593,6 +594,7 @@ impl Backend for Fake {
                         restarts: 3,
                     }],
                     volumes: vec![],
+                    scheduling: Scheduling::default(),
                     labels: BTreeMap::new(),
                     annotations: annotations(),
                     events: Part::Data(vec![event("Warning", "BackOff", 10)]),
@@ -1760,6 +1762,9 @@ enum Mode {
     /// Среди env контейнеров лежат огромный литерал с секретом и ключ ConfigMap с секретным
     /// именем, значения приходят при любом уровне доступа.
     BigEnv,
+    /// У пода и шаблона заданы ограничения размещения с секретом в значении `nodeSelector`, у
+    /// ноды — такие же метки.
+    Scheduling,
     /// Проверка отдаёт эту запись (запущенную человеком, например) вместо записи `Fake`.
     Run(Box<HealthRun>),
 }
@@ -1884,6 +1889,26 @@ fn leaky_overview() -> ClusterOverview {
     }
 }
 
+/// Ограничения размещения: метка с секретным ключом, JWT в значении метки и в толерантности.
+fn scheduling() -> Scheduling {
+    Scheduling {
+        node_selector: BTreeMap::from([
+            ("glafira/none".to_string(), "true".to_string()),
+            ("example.com/api-token".into(), "abc".into()),
+            ("team".into(), format!("jwt {JWT}")),
+        ]),
+        node_affinity: vec!["required: kubernetes.io/arch In [amd64]".into()],
+        pod_affinity: vec![],
+        pod_anti_affinity: vec![
+            "preferred (weight 100): app=web; topologyKey kubernetes.io/hostname".into(),
+        ],
+        tolerations: vec![format!("dedicated={JWT}:NoSchedule"), "op=Exists".into()],
+        node_name: None,
+        priority_class_name: Some("high".into()),
+        scheduler_name: None,
+    }
+}
+
 fn leaky_node() -> NodeDetails {
     NodeDetails {
         name: "w1".into(),
@@ -1892,6 +1917,7 @@ fn leaky_node() -> NodeDetails {
         unschedulable: false,
         conditions: vec![leaky_condition("Ready")],
         taints: vec![],
+        labels: BTreeMap::new(),
         capacity: BTreeMap::new(),
         allocatable: BTreeMap::new(),
         usage: Part::error("FORBIDDEN: cannot list pods"),
@@ -1935,6 +1961,12 @@ impl Backend for Odd {
                 (Mode::Leaky, ReadOp::DescribeNode { .. }) => {
                     return Ok(ReadOutput::Node(leaky_node()));
                 }
+                (Mode::Scheduling, ReadOp::DescribeNode { .. }) => {
+                    let mut n = leaky_node();
+                    n.conditions = vec![];
+                    n.labels = scheduling().node_selector;
+                    return Ok(ReadOutput::Node(n));
+                }
                 _ => {}
             }
             let mut out = self.fake.read(op).await?;
@@ -1957,6 +1989,8 @@ impl Backend for Odd {
                         w.images = vec![CRED_IMAGE.into()];
                     }
                 }
+                (Mode::Scheduling, ReadOutput::Workload(w)) => w.scheduling = scheduling(),
+                (Mode::Scheduling, ReadOutput::Pod(p)) => p.scheduling = scheduling(),
                 (Mode::BigEnv, ReadOutput::Workload(w)) => {
                     w.containers.iter_mut().for_each(big_env);
                 }
@@ -2216,6 +2250,67 @@ async fn cluster_text_of_pods_and_events_goes_through_the_builtin_patterns() {
         "проза без секретов не портится"
     );
     assert_masked(&v, 1);
+}
+
+#[tokio::test]
+async fn scheduling_constraints_and_node_labels_are_masked() {
+    let e = env_over(odd(Mode::Scheduling)).await;
+    let c = client(&e.ep).await;
+    let expected = json!({
+        "nodeSelector": {"example.com/api-token": "***", "glafira/none": "true", "team": "jwt ***"},
+        "nodeAffinity": ["required: kubernetes.io/arch In [amd64]"],
+        "podAntiAffinity": ["preferred (weight 100): app=web; topologyKey kubernetes.io/hostname"],
+        "tolerations": ["dedicated=***:NoSchedule", "op=Exists"],
+        "priorityClassName": "high"
+    });
+    let v = ok(call(
+        &c,
+        "describe_pod",
+        json!({"connectionId": "c1", "namespace": "team-a", "name": "web-1"}),
+    )
+    .await);
+    assert_eq!(v["scheduling"], expected);
+    // Три замены из Fake (command, args, аннотация) и три в ограничениях размещения.
+    assert_eq!(v["masked"], 6);
+    assert_masked(&v, 6);
+    let v = ok(call(
+        &c,
+        "describe_workload",
+        json!({"connectionId": "c1", "namespace": "team-a", "kind": "Deployment", "name": "web"}),
+    )
+    .await);
+    assert_eq!(v["scheduling"], expected);
+    assert_eq!(v["masked"], 6);
+    let v = ok(call(
+        &c,
+        "describe_node",
+        json!({"connectionId": "c1", "name": "w1"}),
+    )
+    .await);
+    assert_eq!(v["labels"], expected["nodeSelector"]);
+    assert_masked(&v, 2);
+    // Свой список имён подключения: `team` — секрет, `api-token` — нет.
+    let v = ok(call(
+        &c,
+        "describe_node",
+        json!({"connectionId": "c3", "name": "w1"}),
+    )
+    .await);
+    assert_eq!(v["labels"]["team"], "***");
+    assert_eq!(v["labels"]["example.com/api-token"], "abc");
+}
+
+#[tokio::test]
+async fn empty_scheduling_constraints_are_not_in_the_answer() {
+    let e = env(Fake::new()).await;
+    let c = client(&e.ep).await;
+    let v = ok(call(
+        &c,
+        "describe_pod",
+        json!({"connectionId": "c1", "namespace": "team-a", "name": "web-1"}),
+    )
+    .await);
+    assert!(v.get("scheduling").is_none(), "{v}");
 }
 
 #[tokio::test]

@@ -533,6 +533,9 @@ pub struct NodeDetails {
     pub unschedulable: bool,
     pub conditions: Vec<Condition>,
     pub taints: Vec<String>,
+    /// Метки ноды (их сверяют с `nodeSelector` и node affinity подов); после маскировки, как
+    /// аннотации.
+    pub labels: BTreeMap<String, String>,
     pub capacity: BTreeMap<String, String>,
     pub allocatable: BTreeMap<String, String>,
     /// Поды ноды и сумма их requests и limits; ошибка — поды всех проектов не читаются.
@@ -629,6 +632,41 @@ pub struct Volume {
     pub source: Option<String>,
 }
 
+/// Ограничения размещения пода или шаблона подов (спец. §10.4): по ним модель объясняет
+/// `FailedScheduling`. Пустые поля и пустой объект в ответ не попадают. Термы affinity —
+/// строками: `required: kubernetes.io/arch In [amd64], disktype Exists` (выражения терма —
+/// «и», разные термы `required` — «или»), `preferred (weight 50): …`; у pod (anti)affinity —
+/// селектор и `topologyKey`. Толерантности — как у `kubectl describe`:
+/// `key=value:NoSchedule`, `key:NoExecute op=Exists for 300s`. После маскировки.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Scheduling {
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub node_selector: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub node_affinity: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pod_affinity: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pod_anti_affinity: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tolerations: Vec<String>,
+    /// `nodeName` шаблона подов; у пода нода — в поле `node`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority_class_name: Option<String>,
+    /// Только если не `default-scheduler`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduler_name: Option<String>,
+}
+
+impl Scheduling {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Hpa {
@@ -674,6 +712,9 @@ pub struct WorkloadDetails {
     pub conditions: Vec<Condition>,
     pub containers: Vec<ContainerSpec>,
     pub volumes: Vec<Volume>,
+    /// Ограничения размещения шаблона подов.
+    #[serde(skip_serializing_if = "Scheduling::is_empty")]
+    pub scheduling: Scheduling,
     pub labels: BTreeMap<String, String>,
     /// После маскировки: без копий объекта, секретные значения — `***`.
     pub annotations: BTreeMap<String, String>,
@@ -772,6 +813,9 @@ pub struct PodDetails {
     pub service_account: Option<String>,
     pub containers: Vec<PodContainer>,
     pub volumes: Vec<Volume>,
+    /// Ограничения размещения пода.
+    #[serde(skip_serializing_if = "Scheduling::is_empty")]
+    pub scheduling: Scheduling,
     pub labels: BTreeMap<String, String>,
     /// После маскировки: без копий объекта, секретные значения — `***`.
     pub annotations: BTreeMap<String, String>,

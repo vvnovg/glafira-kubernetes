@@ -60,13 +60,15 @@ The assistant sees only connections with LLM access and only their projects from
 the cluster and the nodes — if you can read them:
 
 - connections: name, environment, folder, platform (while the connection is open);
-- the cluster overview, nodes with conditions, taints and how much pods request;
+- the cluster overview, nodes with conditions, taints, labels and how much pods request;
 - projects, workloads, pods, events, quotas and `LimitRange`, the network: Services, Routes, Ingress, Gateway API
   routes and Gateways;
 - containers: images, resources, probes, state and restart reasons; environment variables — names and sources only
   (a value in the spec, a ConfigMap, a Secret, a field), without values; `command` and `args` with secrets hidden;
+- where pods may run: `nodeSelector`, node and pod affinity, tolerations, the priority class — so the assistant can
+  explain why a pod stays Pending;
 - annotations — without the copy of the whole object (`last-applied-configuration`), with the values of secret keys
-  hidden;
+  hidden; node labels and `nodeSelector` values are masked the same way;
 - cluster check findings, its own notes and proposals;
 - the resource usage of a workload over a window and the recommendation of requests and limits — from the same metrics
   source as the Resources tabs; the assistant does not get the address of your own metrics source.
@@ -92,7 +94,8 @@ cluster through Glafira and will ask you for it.
 On the [[ui:connections.form.llmAccessLogs]] level the assistant also sees:
 
 - pod logs — the `get_pod_logs` tool: the last lines of a container (200 by default, up to 2000), since a given time,
-  of the current or the previous (crashed) instance, with a substring or regular expression filter;
+  of the current or the previous (crashed) instance, with a substring or regular expression filter; a container
+  name that the pod does not have is answered with the list of its containers;
 - a search through the logs of all pods of a workload — `search_workload_logs`: matches with context over the last
   hour (up to a day); one call reads at most 20 pods, 50 MB of logs and 40 seconds;
 - the values of environment variables from the spec and from ConfigMaps (`configMapKeyRef`) in the workload and pod

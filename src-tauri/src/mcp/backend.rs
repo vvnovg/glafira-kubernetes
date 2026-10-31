@@ -991,6 +991,9 @@ impl AppBackend {
                 match log {
                     super::logs::PodLog::Log(log) => Ok(LogsOutput::Pod(log)),
                     super::logs::PodLog::Unavailable(why) => Err(m::log_unavailable(why)),
+                    super::logs::PodLog::NoSuchContainer(why) => {
+                        Err(BackendError::invalid_argument(why))
+                    }
                 }
             }
             LogsOp::Workload {
@@ -1332,13 +1335,14 @@ mod tests {
         }
         assert_eq!(code(b.logs(bad).await), "invalid_argument");
         // Контейнер не запускался: не ошибка аргументов, а `log_unavailable` с причиной.
-        pooled(&b, "logs", |_| {
-            (
+        pooled(&b, "logs", |s| match s.path() {
+            "/api/v1/namespaces/team-a/pods/web-1" => (200, running("web-1")),
+            _ => (
                 400,
                 serde_json::json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
                     "reason": "BadRequest", "code": 400,
                     "message": "container \"web\" in pod \"web-1\" is waiting to start: ContainerCreating"}),
-            )
+            ),
         });
         let e = b.logs(op("logs", "team-a")).await.unwrap_err();
         assert_eq!(e.code, "log_unavailable");
@@ -1346,6 +1350,19 @@ mod tests {
             e.message.contains("waiting to start (ContainerCreating)"),
             "{}",
             e.message
+        );
+        // Контейнера у пода нет: ошибка аргумента со списком контейнеров, а не отказ кластера.
+        let mut wrong = op("logs", "team-a");
+        if let LogsOp::Pod { container, .. } = &mut wrong {
+            *container = Some("app".into());
+        }
+        let e = b.logs(wrong).await.unwrap_err();
+        assert_eq!(
+            (e.code.as_str(), e.message.as_str()),
+            (
+                "invalid_argument",
+                "Container \"app\" is not in pod \"web-1\"; containers: web"
+            )
         );
 
         let mut st = b.state.clone();

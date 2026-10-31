@@ -475,6 +475,9 @@ pub struct PodDetails {
     /// Как в YAML (`redact_annotations`): без копий объекта, `change-cause` с секретом — `***`.
     pub annotations: BTreeMap<String, String>,
     pub volumes: Vec<VolumeView>,
+    /// Ограничения размещения — только для MCP (интерфейс показывает их в YAML).
+    #[serde(skip)]
+    pub scheduling: crate::k8s::scheduling::SchedulingView,
 }
 
 /// Тома спецификации пода (или шаблона подов workload'а).
@@ -553,6 +556,9 @@ pub fn pod_details(p: &Pod) -> PodDetails {
         labels: p.metadata.labels.clone().unwrap_or_default(),
         annotations,
         volumes: spec.map(volumes_of).unwrap_or_default(),
+        scheduling: spec
+            .map(crate::k8s::scheduling::scheduling_of)
+            .unwrap_or_default(),
     }
 }
 

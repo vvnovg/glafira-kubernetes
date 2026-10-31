@@ -19,6 +19,7 @@ pub mod projects;
 pub mod quantity;
 pub mod quotas;
 pub mod read;
+pub mod scheduling;
 pub mod selectors;
 pub mod storage;
 #[cfg(test)]
