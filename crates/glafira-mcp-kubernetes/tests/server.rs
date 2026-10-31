@@ -1378,12 +1378,10 @@ async fn workload_logs_are_searched_with_context_and_limits() {
     assert_eq!(fake.log_ops.lock().unwrap().len(), 2);
 }
 
-#[tokio::test]
-async fn logs_and_observation_share_one_long_operation_per_session() {
-    let fake = Fake::new();
-    *fake.log_delay.lock().unwrap() = Duration::from_millis(500);
-    let e = env(fake).await;
+/// Чтение лога на 500 мс в сессии `c`; второй вызов пачки — наблюдение за 10 «секунд».
+async fn log_then_observe(e: &Running) -> (CallToolResult, CallToolResult, Duration) {
     let c = Arc::new(client(&e.ep).await);
+    let started = std::time::Instant::now();
     let long = {
         let c = c.clone();
         tokio::spawn(async move {
@@ -1396,15 +1394,41 @@ async fn logs_and_observation_share_one_long_operation_per_session() {
         })
     };
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let msg = err(&call(
+    let second = call(
         &c,
         "observe_workload",
         json!({"connectionId": "c5", "namespace": "team-a",
             "workload": {"kind": "Deployment", "name": "web"}, "durationSeconds": 10}),
     )
-    .await);
+    .await;
+    let elapsed = started.elapsed();
+    (long.await.unwrap(), second, elapsed)
+}
+
+#[tokio::test]
+async fn logs_and_observation_queue_for_one_long_operation_per_session() {
+    let fake = Fake::new();
+    *fake.log_delay.lock().unwrap() = Duration::from_millis(500);
+    fake.states.lock().unwrap().push_back(wstate(2, &[]));
+    let e = env(fake).await;
+    let (first, second, elapsed) = log_then_observe(&e).await;
+    ok(first);
+    ok(second);
+    assert!(
+        elapsed >= Duration::from_millis(500),
+        "наблюдение дождалось лога: {elapsed:?}"
+    );
+
+    // Не дождался слота за `long_wait` — `busy`.
+    let fake = Fake::new();
+    *fake.log_delay.lock().unwrap() = Duration::from_millis(500);
+    fake.states.lock().unwrap().push_back(wstate(2, &[]));
+    let e = env_with(fake, |o| o.long_wait = Duration::from_millis(100)).await;
+    let (first, second, _) = log_then_observe(&e).await;
+    ok(first);
+    let msg = err(&second);
     assert!(msg.starts_with("busy:"), "{msg}");
-    ok(long.await.unwrap());
+    assert!(msg.contains("after waiting 100 ms"), "{msg}");
 }
 
 #[tokio::test]
@@ -1614,21 +1638,33 @@ async fn observation_records_restarts_and_readiness() {
 }
 
 #[tokio::test]
-async fn one_observation_per_session() {
-    let fake = Fake::new();
-    fake.states.lock().unwrap().push_back(wstate(2, &[]));
-    let e = env(fake).await;
-    let c = Arc::new(client(&e.ep).await);
-    let args = json!({"connectionId": "c1", "namespace": "team-a",
-        "workload": {"kind": "Deployment", "name": "web"}, "durationSeconds": 50});
-    let long = {
-        let (c, args) = (c.clone(), args.clone());
-        tokio::spawn(async move { call(&c, "observe_workload", args).await })
-    };
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let msg = err(&call(&c, "observe_workload", args).await);
-    assert!(msg.starts_with("busy:"), "{msg}");
-    ok(long.await.unwrap());
+async fn observations_of_a_session_run_one_after_another() {
+    for (wait, queued) in [(None, true), (Some(Duration::from_millis(100)), false)] {
+        let fake = Fake::new();
+        fake.states.lock().unwrap().push_back(wstate(2, &[]));
+        let e = env_with(fake, |o| {
+            if let Some(w) = wait {
+                o.long_wait = w;
+            }
+        })
+        .await;
+        let c = Arc::new(client(&e.ep).await);
+        let args = json!({"connectionId": "c1", "namespace": "team-a",
+            "workload": {"kind": "Deployment", "name": "web"}, "durationSeconds": 50});
+        let long = {
+            let (c, args) = (c.clone(), args.clone());
+            tokio::spawn(async move { call(&c, "observe_workload", args).await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let second = call(&c, "observe_workload", args).await;
+        if queued {
+            ok(second);
+        } else {
+            let msg = err(&second);
+            assert!(msg.starts_with("busy:"), "{msg}");
+        }
+        ok(long.await.unwrap());
+    }
 }
 
 // ---- Бэкенд поверх Fake: то, чего в Fake нет (длинные списки, секреты в тексте кластера) ----

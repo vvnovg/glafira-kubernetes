@@ -13,5 +13,5 @@ pub mod session;
 
 pub use audit::{AuditEvent, AuditLog};
 pub use endpoint::{BoxStream, Endpoint};
-pub use server::{McpServerHandle, Session, SessionSnapshot, Slots, start, to_value};
+pub use server::{Exclusive, McpServerHandle, Session, SessionSnapshot, Slots, start, to_value};
 pub use session::{BackendError, BoxFuture, ClientIdent, Hooks, SessionAccess, SessionView};

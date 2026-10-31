@@ -42,8 +42,6 @@ struct SessionEntry {
     started_ms: u64,
     calls: u64,
     in_flight: u32,
-    /// Идёт длительная операция (наблюдение, логи): одна на сессию.
-    busy: bool,
     limiter: RateLimiter,
     cancel: CancellationToken,
 }
@@ -207,7 +205,6 @@ async fn handle_conn<H, F>(
             started_ms: now_ms(),
             calls: 0,
             in_flight: 0,
-            busy: false,
             limiter: RateLimiter::new(CALLS_PER_MINUTE),
             cancel: ct.clone(),
         },
@@ -220,6 +217,7 @@ async fn handle_conn<H, F>(
         shared: shared.clone(),
         id: id.clone(),
         local: Arc::new(Semaphore::new(SESSION_CONCURRENCY)),
+        long: Arc::new(Semaphore::new(1)),
     });
     match handler.serve_with_ct(stream, ct).await {
         Ok(running) => {
@@ -228,6 +226,10 @@ async fn handle_conn<H, F>(
         Err(e) => tracing::debug!("mcp session {id} failed to start: {e}"),
     }
     let entry = shared.sessions().remove(&id);
+    // Ждущие слота длительной операции уходят вместе с сессией (токены запросов — его дети).
+    if let Some(e) = &entry {
+        e.cancel.cancel();
+    }
     shared.audit.record(AuditEvent::SessionEnded {
         session: id.clone(),
         client: entry
@@ -274,6 +276,8 @@ pub struct Session {
     shared: Arc<Shared>,
     id: String,
     local: Arc<Semaphore>,
+    /// Слот длительной операции (наблюдение, логи): один на сессию; ждущие — по очереди (FIFO).
+    long: Arc<Semaphore>,
 }
 
 /// Слоты параллельности операции с кластером: сессии и всех сессий.
@@ -282,24 +286,31 @@ pub struct Slots {
     _global: OwnedSemaphorePermit,
 }
 
-/// Снимает отметку «идёт вызов» или «идёт длительная операция» при любом выходе.
+/// Снимает отметку «идёт вызов» при любом выходе.
 pub struct Flag {
     session: Session,
-    busy: bool,
 }
 
 impl Drop for Flag {
     fn drop(&mut self) {
         if let Some(e) = self.session.shared.sessions().get_mut(&self.session.id) {
-            if self.busy {
-                e.busy = false;
-            } else {
-                e.in_flight = e.in_flight.saturating_sub(1);
-            }
+            e.in_flight = e.in_flight.saturating_sub(1);
         }
-        if !self.busy {
-            self.session.shared.hooks.sessions_changed();
-        }
+        self.session.shared.hooks.sessions_changed();
+    }
+}
+
+/// Слот длительной операции сессии; освобождается при любом выходе.
+pub struct Exclusive {
+    _permit: OwnedSemaphorePermit,
+}
+
+/// Срок ожидания для текста ошибки: секунды, короче секунды (в тестах) — миллисекунды.
+fn waited(d: Duration) -> String {
+    if d >= Duration::from_secs(1) {
+        format!("{} s", d.as_secs())
+    } else {
+        format!("{} ms", d.as_millis())
     }
 }
 
@@ -393,7 +404,6 @@ impl Session {
         self.shared.hooks.sessions_changed();
         Ok(Flag {
             session: self.clone(),
-            busy: false,
         })
     }
 
@@ -418,23 +428,34 @@ impl Session {
         })
     }
 
-    /// Длительная операция (наблюдение, логи) — одна на сессию; вторая получает `busy`.
-    pub fn exclusive(&self) -> Result<Flag, BackendError> {
-        let mut sessions = self.shared.sessions();
-        let e = sessions
-            .get_mut(&self.id)
-            .ok_or_else(BackendError::unexpected)?;
-        if e.busy {
-            return Err(BackendError::new(
-                "busy",
-                "Another long operation is running in this session; wait for it to finish",
-            ));
+    /// Длительная операция (наблюдение, логи) — одна на сессию. Клиенты шлют вызовы пачкой,
+    /// поэтому следующий не отказывает сразу, а ждёт в очереди (FIFO) до `wait`; не дождался —
+    /// `busy`. Отмена запроса клиентом или конец сессии (токен запроса — потомок токена сессии)
+    /// снимает ожидание; слот занимают и освобождают только дождавшиеся.
+    pub async fn exclusive(
+        &self,
+        ctx: &RequestContext<RoleServer>,
+        wait: Duration,
+    ) -> Result<Exclusive, BackendError> {
+        let acquire = tokio::time::timeout(wait, self.long.clone().acquire_owned());
+        tokio::select! {
+            biased;
+            _ = ctx.ct.cancelled() => Err(BackendError::new(
+                "cancelled",
+                "The request was cancelled while waiting for another long operation",
+            )),
+            r = acquire => match r {
+                Ok(Ok(permit)) => Ok(Exclusive { _permit: permit }),
+                Ok(Err(_)) => Err(BackendError::unexpected()),
+                Err(_) => Err(BackendError::new(
+                    "busy",
+                    format!(
+                        "Another long operation is still running in this session after waiting {}; try again later",
+                        waited(wait)
+                    ),
+                )),
+            },
         }
-        e.busy = true;
-        Ok(Flag {
-            session: self.clone(),
-            busy: true,
-        })
     }
 
     /// Общая обвязка инструмента: право, лимит, предел размера ответа, журнал, ответ или ошибка

@@ -512,7 +512,7 @@ impl KubeServer {
             "durationSeconds",
         )?;
         self.scope(&p.connection_id, Some(&p.namespace))?;
-        let _busy = self.session.exclusive()?;
+        let _busy = self.session.exclusive(ctx, self.options.long_wait).await?;
         let state = || ReadOp::WorkloadState {
             connection_id: p.connection_id.clone(),
             namespace: p.namespace.clone(),

@@ -57,7 +57,16 @@ container has not started yet, has no previous instance or the node has already 
 get_pod_logs answers log_unavailable with the reason and search_workload_logs lists the container \
 in errors: it is the state of the pod, not a wrong argument; check it with describe_pod. Secret \
 values, the application configuration outside the cluster, its external dependencies and logs \
-outside the cluster are never available here: ask the user for them.";
+outside the cluster are never available here: ask the user for them.
+
+get_pod_logs, search_workload_logs and observe_workload are long operations: they run one at a time \
+in a session, and a second one waits in a queue for up to 60 seconds before it answers busy.";
+
+/// Сколько длительная операция (наблюдение, логи) ждёт в очереди сессии, пока идёт другая,
+/// прежде чем ответить `busy`. Клиенты (Claude Code) шлют вызовы пачкой, и второй должен
+/// пережить одну идущую операцию целиком: самая долгая — `observe_workload` (до 50 с окна и 3 с
+/// на последний образец), чтение и поиск логов — до 40 с. Отсюда 60 с.
+pub const LONG_OPERATION_WAIT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 pub struct GatewayOptions {
@@ -68,6 +77,8 @@ pub struct GatewayOptions {
     /// Сколько `health_check` ждёт проверку (свою или уже идущую), прежде чем ответить
     /// `check_in_progress_timeout`: выше дедлайна проверки (45 с), ниже таймаута клиентов (60 с).
     pub check_wait: Duration,
+    /// Ожидание слота длительной операции сессии (`LONG_OPERATION_WAIT`; в тестах — короче).
+    pub long_wait: Duration,
 }
 
 impl GatewayOptions {
@@ -77,6 +88,7 @@ impl GatewayOptions {
             version: version.into(),
             observe_unit: Duration::from_secs(1),
             check_wait: Duration::from_secs(50),
+            long_wait: LONG_OPERATION_WAIT,
         }
     }
 }
@@ -153,7 +165,8 @@ impl KubeServer {
     }
 
     /// Чтение логов: область LLM и уровень `logs`, затем слоты. Длительная операция сессии
-    /// (`exclusive`) — у вызывающего: одна на сессию, общая с `observe_workload`.
+    /// (`exclusive`) — у вызывающего: одна на сессию, общая с `observe_workload`; следующая ждёт
+    /// в очереди до `long_wait`.
     async fn logs(
         &self,
         op: crate::logs::LogsOp,

@@ -1,5 +1,6 @@
 //! Инструменты логов (спец. §10.4, уровень `logs`): `get_pod_logs` и `search_workload_logs`.
-//! Фильтр видит строки до маскировки, модель — после; длительная операция — одна на сессию.
+//! Фильтр видит строки до маскировки, модель — после; длительная операция — одна на сессию,
+//! следующая ждёт её в очереди.
 
 use glafira_mcp_core::{BackendError, to_value};
 use rmcp::handler::server::wrapper::Parameters;
@@ -93,7 +94,11 @@ pub(super) fn since_of(
 }
 
 impl KubeServer {
-    async fn pod_logs(&self, p: &PodLogsParams) -> Result<Value, BackendError> {
+    async fn pod_logs(
+        &self,
+        p: &PodLogsParams,
+        ctx: &RequestContext<RoleServer>,
+    ) -> Result<Value, BackendError> {
         let tail = match p.tail_lines {
             None => DEFAULT_TAIL_LINES,
             Some(n) if (1..=MAX_TAIL_LINES).contains(&n) => n,
@@ -110,7 +115,7 @@ impl KubeServer {
                 "container must not be empty",
             ));
         }
-        let _busy = self.session.exclusive()?;
+        let _busy = self.session.exclusive(ctx, self.options.long_wait).await?;
         let (out, scope) = self
             .logs(LogsOp::Pod {
                 connection_id: p.connection_id.clone(),
@@ -128,7 +133,11 @@ impl KubeServer {
         to_value(&pod_logs(log, &matcher, &scope.masker()))
     }
 
-    async fn search_logs(&self, p: &SearchLogsParams) -> Result<Value, BackendError> {
+    async fn search_logs(
+        &self,
+        p: &SearchLogsParams,
+        ctx: &RequestContext<RoleServer>,
+    ) -> Result<Value, BackendError> {
         let range = |v: Option<u32>, default: u32, min: u32, max: u32, name: &str| match v {
             None => Ok(default),
             Some(x) if (min..=max).contains(&x) => Ok(x),
@@ -152,7 +161,7 @@ impl KubeServer {
         )?;
         let context = range(p.context_lines, 0, 0, MAX_CONTEXT_LINES, "contextLines")?;
         let matcher = Matcher::new(Some(&p.filter))?;
-        let _busy = self.session.exclusive()?;
+        let _busy = self.session.exclusive(ctx, self.options.long_wait).await?;
         let (out, scope) = self
             .logs(LogsOp::Workload {
                 connection_id: p.connection_id.clone(),
@@ -196,7 +205,7 @@ impl KubeServer {
                 "get_pod_logs",
                 args!(p),
                 Some(&p.connection_id),
-                self.pod_logs(&p),
+                self.pod_logs(&p, &ctx),
             )
             .await)
     }
@@ -221,7 +230,7 @@ impl KubeServer {
                 "search_workload_logs",
                 args!(p),
                 Some(&p.connection_id),
-                self.search_logs(&p),
+                self.search_logs(&p, &ctx),
             )
             .await)
     }
