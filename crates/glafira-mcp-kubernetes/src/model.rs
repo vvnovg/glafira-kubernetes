@@ -36,6 +36,13 @@ pub fn logs_not_allowed() -> BackendError {
     )
 }
 
+/// Лог контейнера недоступен, хотя запрос верен: контейнер ещё не запускался, прошлого запуска
+/// нет или среда выполнения узла уже удалила его лог (спец. §10.7). `message` — причина
+/// по-английски и что делать дальше.
+pub fn log_unavailable(message: impl Into<String>) -> BackendError {
+    BackendError::new("log_unavailable", message)
+}
+
 /// Доступ к логам и значениям конфигурации (уровень `logs`, спец. §10.2).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LogsAccess {

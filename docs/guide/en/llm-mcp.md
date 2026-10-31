@@ -2,8 +2,9 @@
 
 Glafira can act as a gateway for an LLM assistant: Claude Desktop, Claude Code, Cursor or another client that
 supports MCP (Model Context Protocol). The assistant reads the metadata of the connections and projects you open for
-it, runs the cluster check and helps you find the causes of problems: restart loops, unavailable workloads, network,
-quotas, resources. It cannot change anything in a cluster through Glafira: it proposes changes, and you apply them.
+it (on the [[ui:connections.form.llmAccessLogs]] level also pod logs and configuration values, masked), runs the
+cluster check and helps you find the causes of problems: restart loops, unavailable workloads, network, quotas,
+resources. It cannot change anything in a cluster through Glafira: it proposes changes, and you apply them.
 
 ## How it works {#how-it-works}
 
@@ -161,6 +162,11 @@ The client shows a message from Glafira:
 - `logs_not_allowed` — the connection has the [[ui:connections.form.llmAccessMetadata]] level: choose
   [[ui:connections.form.llmAccessLogs]] if the assistant may read logs;
 - `logs_disabled` — logs for LLM assistants are forbidden by your organization's policy;
-- `busy` — the assistant is already reading logs or watching a workload in this session: one such operation at a time;
+- `log_unavailable` — the container has not started yet (for example, its image cannot be pulled), has no previous
+  instance, or the node has already removed its previous log: look at the pod state; `search_workload_logs` lists such
+  containers in `errors` with the same reason;
+- `busy` — the assistant is reading logs or watching a workload in this session, and another such request did not get
+  its turn within 60 seconds: these operations run one at a time, and the next one waits in a queue (a client with
+  a 60-second request timeout may give up before the queued request answers);
 - `metrics_unavailable` — there is no metrics source: check the [[ui:connections.form.step.metrics]] step of the
   connection test (see [Connections](connections.md#metrics)).

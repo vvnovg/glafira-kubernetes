@@ -1,6 +1,7 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { MCP_STATUS_KEY } from "../../lib/useMcpStatus";
 import { mcpStatus } from "../../test/mcp";
 import { renderWithClient } from "../../test/render";
 
@@ -82,7 +83,7 @@ describe("McpSection", () => {
 
   it("сессии, отзыв клиента и журнал", async () => {
     const status = mcpStatus({
-      sessions: [{ id: "s1", clientName: "claude-ai", clientVersion: "1.2", startedMs: 0, calls: 7, active: false, approved: true }],
+      sessions: [{ id: "s1", clientName: "claude-ai", clientVersion: "1.2", startedMs: 0, calls: 7, active: false, logged: 0, approved: true }],
       approvedClients: [{ name: "claude-ai", version: "1.2", firstSeenMs: 0, lastSeenMs: 0 }],
     });
     vi.mocked(api.getMcpStatus).mockResolvedValue(status);
@@ -106,6 +107,24 @@ describe("McpSection", () => {
     await user.click(screen.getByRole("button", { name: "Отозвать" }));
     expect(api.revokeMcpClient).toHaveBeenCalledWith("claude-ai");
     // отзыв и отключение обновляют журнал: первая загрузка + отключение + отзыв
+    await waitFor(() => expect(api.getMcpAudit).toHaveBeenCalledTimes(3));
+  });
+
+  it("журнал обновляется сам, когда статус сообщает о новых вызовах", async () => {
+    const session = { id: "s1", clientName: "claude-ai", clientVersion: "1.2", startedMs: 0, calls: 0, active: false, logged: 0, approved: true };
+    vi.mocked(api.getMcpStatus).mockResolvedValue(mcpStatus({ sessions: [session] }));
+    const { client } = renderWithClient(<McpSection />);
+    expect(await screen.findByText("Журнал пуст.")).toBeInTheDocument();
+    expect(api.getMcpAudit).toHaveBeenCalledTimes(1);
+    vi.mocked(api.getMcpAudit).mockResolvedValue([
+      { ts: 0, event: "call", client: "claude-ai 1.2", tool: "get_pod_logs", outcome: "ok", ms: 9 },
+    ]);
+    // Событие статуса из Rust: вызов записан в журнал, а другой ещё идёт (`active`, `calls` те же).
+    act(() => client.setQueryData(MCP_STATUS_KEY, mcpStatus({ sessions: [{ ...session, calls: 2, active: true }] })));
+    act(() => client.setQueryData(MCP_STATUS_KEY, mcpStatus({ sessions: [{ ...session, calls: 2, active: true, logged: 1 }] })));
+    expect(await screen.findByText("get_pod_logs")).toBeInTheDocument();
+    // Отказ до вызова (rate_limited): меняется только `logged`.
+    act(() => client.setQueryData(MCP_STATUS_KEY, mcpStatus({ sessions: [{ ...session, calls: 2, active: true, logged: 2 }] })));
     await waitFor(() => expect(api.getMcpAudit).toHaveBeenCalledTimes(3));
   });
 });

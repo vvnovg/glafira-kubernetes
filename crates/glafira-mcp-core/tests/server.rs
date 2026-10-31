@@ -13,10 +13,10 @@ use glafira_mcp_core::{
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig, Implementation,
-    InitializeRequestParams, InitializeResult, ServerCapabilities,
+    CallToolRequest, CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig,
+    ClientRequest, Implementation, InitializeRequestParams, InitializeResult, ServerCapabilities,
 };
-use rmcp::service::{RequestContext, RunningService};
+use rmcp::service::{PeerRequestOptions, RequestContext, RunningService};
 use rmcp::{
     ErrorData, RoleClient, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router,
 };
@@ -35,6 +35,8 @@ struct Fake {
     /// Операций с кластером сейчас и наибольшее число одновременных.
     active: AtomicUsize,
     peak: AtomicUsize,
+    /// Сколько раз сервер сообщил об изменении сессий (событие статуса для интерфейса).
+    changed: AtomicUsize,
 }
 
 impl Fake {
@@ -46,6 +48,7 @@ impl Fake {
             names: BTreeMap::from([("c1", "dev")]),
             active: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
+            changed: AtomicUsize::new(0),
         })
     }
 }
@@ -64,7 +67,9 @@ impl Hooks for Fake {
         self.closed.lock().unwrap().push(session_id.to_string());
     }
 
-    fn sessions_changed(&self) {}
+    fn sessions_changed(&self) {
+        self.changed.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -79,6 +84,9 @@ struct EchoParams {
 struct WaitParams {
     /// Pause in milliseconds.
     ms: u64,
+    /// How long to wait for the long operation slot, in milliseconds. Default: 5000.
+    #[serde(default)]
+    wait_ms: Option<u64>,
 }
 
 /// Игрушечный обработчик: каждый инструмент проверяет одну сторону обвязки.
@@ -135,8 +143,12 @@ impl Toy {
         Ok(self
             .session
             .call(&ctx, "long", Value::Null, None, async {
-                let _busy = self.session.exclusive()?;
+                let wait = Duration::from_millis(p.wait_ms.unwrap_or(5000));
+                let _busy = self.session.exclusive(&ctx, wait).await?;
+                let now = self.fake.active.fetch_add(1, Ordering::SeqCst) + 1;
+                self.fake.peak.fetch_max(now, Ordering::SeqCst);
                 tokio::time::sleep(Duration::from_millis(p.ms)).await;
+                self.fake.active.fetch_sub(1, Ordering::SeqCst);
                 to_value(&json!({}))
             })
             .await)
@@ -441,7 +453,32 @@ async fn response_that_cannot_be_cut_is_refused() {
 }
 
 #[tokio::test]
-async fn one_long_operation_per_session() {
+async fn long_operations_of_a_session_queue_one_after_another() {
+    let fake = Fake::new(SessionAccess::Approved);
+    let e = env(fake.clone()).await;
+    let c = Arc::new(client(&e.ep).await);
+    let started = std::time::Instant::now();
+    let long = {
+        let c = c.clone();
+        tokio::spawn(async move { call(&c, "long", json!({"ms": 500})).await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Второй вызов пачки ждёт первый, а не получает `busy`.
+    ok(call(&c, "long", json!({"ms": 10})).await);
+    assert!(
+        started.elapsed() >= Duration::from_millis(500),
+        "второй дождался первого: {:?}",
+        started.elapsed()
+    );
+    ok(long.await.unwrap());
+    assert_eq!(fake.peak.load(Ordering::SeqCst), 1, "по одной за раз");
+    // У другой сессии свой слот.
+    let other = client(&e.ep).await;
+    ok(call(&other, "long", json!({"ms": 10})).await);
+}
+
+#[tokio::test]
+async fn long_operation_answers_busy_after_the_wait() {
     let e = env(Fake::new(SessionAccess::Approved)).await;
     let c = Arc::new(client(&e.ep).await);
     let long = {
@@ -449,12 +486,73 @@ async fn one_long_operation_per_session() {
         tokio::spawn(async move { call(&c, "long", json!({"ms": 500})).await })
     };
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let msg = err(&call(&c, "long", json!({"ms": 10})).await);
+    let msg = err(&call(&c, "long", json!({"ms": 10, "waitMs": 50})).await);
     assert!(msg.starts_with("busy:"), "{msg}");
-    let other = client(&e.ep).await;
-    ok(call(&other, "long", json!({"ms": 10})).await);
+    assert!(msg.contains("after waiting 50 ms"), "{msg}");
     ok(long.await.unwrap());
-    ok(call(&c, "long", json!({"ms": 10})).await);
+    ok(call(&c, "long", json!({"ms": 10, "waitMs": 50})).await);
+}
+
+#[tokio::test]
+async fn cancelled_waiter_leaves_the_queue_without_freeing_the_slot() {
+    let e = env(Fake::new(SessionAccess::Approved)).await;
+    let c = Arc::new(client(&e.ep).await);
+    let long = {
+        let c = c.clone();
+        tokio::spawn(async move { call(&c, "long", json!({"ms": 700})).await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut p = CallToolRequestParams::new("long");
+    p = p.with_arguments(json!({"ms": 10}).as_object().unwrap().clone());
+    let waiter = c
+        .send_cancellable_request(
+            ClientRequest::CallToolRequest(CallToolRequest::new(p)),
+            PeerRequestOptions::no_options(),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    waiter.cancel(Some("test".into())).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Ждущий ушёл сразу, а не по истечении 5 с: вызов уже в журнале.
+    let last = &e.audit.recent(1)[0];
+    assert_eq!(
+        (last["tool"].as_str(), last["code"].as_str()),
+        (Some("long"), Some("cancelled"))
+    );
+    // Слот по-прежнему у первой операции.
+    let msg = err(&call(&c, "long", json!({"ms": 10, "waitMs": 50})).await);
+    assert!(msg.starts_with("busy:"), "{msg}");
+    ok(long.await.unwrap());
+    ok(call(&c, "long", json!({"ms": 10, "waitMs": 50})).await);
+}
+
+#[tokio::test]
+async fn every_audited_call_moves_the_log_counter_and_reports_it() {
+    let fake = Fake::new(SessionAccess::Pending);
+    let e = env(fake.clone()).await;
+    let c = Arc::new(client(&e.ep).await);
+    // Отказ до вызова: счётчик вызовов не растёт, а запись в журнале и событие статуса есть.
+    let before = fake.changed.load(Ordering::SeqCst);
+    let msg = err(&call(&c, "echo", json!({"connectionId": "c1"})).await);
+    assert!(msg.starts_with("client_not_approved:"), "{msg}");
+    let s = &e.handle.sessions()[0];
+    assert_eq!((s.calls, s.logged), (0, 1));
+    assert!(fake.changed.load(Ordering::SeqCst) > before);
+    // Вызов закончился, пока другой ещё идёт: `active` и `calls` не меняются, `logged` растёт.
+    *fake.access.lock().unwrap() = SessionAccess::Approved;
+    let slow = {
+        let c = c.clone();
+        tokio::spawn(async move { call(&c, "slow", json!({"ms": 500})).await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let s = e.handle.sessions()[0].clone();
+    ok(call(&c, "echo", json!({"connectionId": "c1"})).await);
+    let after = e.handle.sessions()[0].clone();
+    assert!(after.active);
+    assert_eq!(after.logged, s.logged + 1);
+    ok(slow.await.unwrap());
+    assert_eq!(e.handle.sessions()[0].logged, 3);
 }
 
 #[tokio::test]

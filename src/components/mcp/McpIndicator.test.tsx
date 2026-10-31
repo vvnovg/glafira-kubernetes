@@ -28,7 +28,7 @@ function WithEvents() {
   return <McpIndicator />;
 }
 
-const session = { id: "s1", clientName: "claude-ai", clientVersion: "1", startedMs: 0, calls: 0, active: false, approved: true };
+const session = { id: "s1", clientName: "claude-ai", clientVersion: "1", startedMs: 0, calls: 0, active: false, logged: 0, approved: true };
 
 beforeEach(() => {
   vi.clearAllMocks();

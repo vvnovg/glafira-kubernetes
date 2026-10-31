@@ -943,10 +943,21 @@ request и limit, пометки и нарушения ограничений; �
 - логи: строка длиннее 4 КБ обрезается; `search_workload_logs` просматривает не больше 20 подов (по имени), 50 МБ и
   40 с (запрос логов с `limitBytes` — остаток бюджета; бюджет считает байты, реально прочитанные, включая
   отброшенные хвосты длинных строк) — `stopped: pods | bytes | time`; читаются текущие экземпляры
-  обычных контейнеров (прошлый запуск — `get_pod_logs` с `previous`), контейнер, лог которого не прочитался, — в
-  `errors`; `get_pod_logs` без `container` берёт контейнер по умолчанию (аннотация
+  обычных контейнеров (прошлый запуск — `get_pod_logs` с `previous`), контейнер, лог которого не прочитался или
+  недоступен, — в `errors` с причиной; `get_pod_logs` без `container` берёт контейнер по умолчанию (аннотация
   `kubectl.kubernetes.io/default-container`, иначе первый), не помещается в 100 КБ — отбрасываются самые старые
-  строки; `get_pod_logs` и `search_workload_logs` — одна длительная операция на сессию, общая с `observe_workload`;
+  строки; лог недоступен, хотя запрос верен, — `log_unavailable` с причиной по-английски (у поиска — та же причина
+  в `errors`): ответ 400 API-сервера «container … is waiting to start: <причина>» (контейнер ещё не запускался:
+  `ContainerCreating`, `PodInitializing`, образ не скачивается), «previous terminated container … not found»
+  (прошлого запуска нет), «container … is terminated» (контейнер завершился, узел его не помнит) и ответ 200, весь
+  из одной строки kubelet'а без времени «unable to retrieve container logs for …» или «failed to try resolving
+  symlinks in path …» (среда выполнения узла уже удалила лог или его файл); текст ответа сравнивается без пробелов
+  по краям; строка без времени в другом месте лога — строка приложения;
+  `get_pod_logs` и `search_workload_logs` — одна длительная операция на сессию, общая с `observe_workload`:
+  область LLM и уровень `logs` проверяются до очереди (отказ не ждёт) и ещё раз после неё; следующая операция ждёт
+  в очереди (FIFO) до 60 с — дольше самой долгой, `observe_workload` (до 50 с и 3 с на последний образец), — и
+  только потом получает `busy` (клиент с таймаутом запроса около 60 с может не дождаться ответа); отмена запроса
+  клиентом или конец сессии снимает ожидание, а отмена идущего чтения лога прерывает его и освобождает слот;
 - `get_resource_usage` и `recommend_resources` без источника истории отвечают по `metrics.k8s.io` с
   `confidence: "low"`, а при недоступности всех источников — ошибкой `metrics_unavailable` с причинами;
 - замечания и предложения: `target` сверяется с кластером (объект существует), лимиты 200 открытых замечаний и 50
@@ -997,7 +1008,9 @@ request и limit, пометки и нарушения ограничений; �
   исходом, кодом, размером и длительностью; у логов — число просмотренных, отданных и замаскированных строк; тексты
   замечаний, обоснования предложений, содержимое ответов и логов не пишутся.
 - коды ошибок инструментов: `not_allowed`, `client_not_approved`, `client_rejected`, `mcp_disabled`, `logs_disabled`,
-  `logs_not_allowed`, `rate_limited`, `invalid_argument`, `not_found`, `busy`, `response_too_large`, `metrics_unavailable`,
+  `logs_not_allowed`, `log_unavailable`, `rate_limited`, `invalid_argument`, `not_found`, `busy` (длительная операция
+  сессии не освободилась за 60 с ожидания в очереди), `cancelled` (запрос отменён клиентом, пока ждал в очереди
+  или читал лог; ответ не отправляется, код видит только журнал), `response_too_large`, `metrics_unavailable`,
   `limit_reached`, `check_in_progress_timeout`, `internal` и коды приложения из `ErrorCode` (`SESSION_EXPIRED`,
   `FORBIDDEN`, `TIMEOUT`, `CONNECTION_FAILED`, …) с английским текстом, как в Kafka G1.
 - тексты с данными профиля модель не получает: у `errors.exec.*`, `errors.oauth.*`, `errors.connections.*` и

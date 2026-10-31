@@ -19,10 +19,12 @@ use glafira_mcp_kubernetes::proposals::*;
 use glafira_mcp_kubernetes::resources::*;
 use glafira_mcp_kubernetes::{GatewayOptions, INSTRUCTIONS};
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig, Implementation,
-    ProtocolVersion,
+    CallToolRequest, CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig,
+    ClientRequest, Implementation, ProtocolVersion,
 };
-use rmcp::service::{ClientLifecycleMode, RunningService, serve_client_with_lifecycle};
+use rmcp::service::{
+    ClientLifecycleMode, PeerRequestOptions, RunningService, serve_client_with_lifecycle,
+};
 use rmcp::{RoleClient, ServiceExt};
 use serde_json::{Value, json};
 
@@ -1378,10 +1380,63 @@ async fn workload_logs_are_searched_with_context_and_limits() {
     assert_eq!(fake.log_ops.lock().unwrap().len(), 2);
 }
 
+/// Чтение лога на 500 мс в сессии `c`; второй вызов пачки — наблюдение за 10 «секунд».
+async fn log_then_observe(e: &Running) -> (CallToolResult, CallToolResult, Duration) {
+    let c = Arc::new(client(&e.ep).await);
+    let started = std::time::Instant::now();
+    let long = {
+        let c = c.clone();
+        tokio::spawn(async move {
+            call(
+                &c,
+                "get_pod_logs",
+                json!({"connectionId": "c5", "namespace": "team-a", "pod": "web-1"}),
+            )
+            .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let second = call(
+        &c,
+        "observe_workload",
+        json!({"connectionId": "c5", "namespace": "team-a",
+            "workload": {"kind": "Deployment", "name": "web"}, "durationSeconds": 10}),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    (long.await.unwrap(), second, elapsed)
+}
+
 #[tokio::test]
-async fn logs_and_observation_share_one_long_operation_per_session() {
+async fn logs_and_observation_queue_for_one_long_operation_per_session() {
     let fake = Fake::new();
     *fake.log_delay.lock().unwrap() = Duration::from_millis(500);
+    fake.states.lock().unwrap().push_back(wstate(2, &[]));
+    let e = env(fake).await;
+    let (first, second, elapsed) = log_then_observe(&e).await;
+    ok(first);
+    ok(second);
+    assert!(
+        elapsed >= Duration::from_millis(500),
+        "наблюдение дождалось лога: {elapsed:?}"
+    );
+
+    // Не дождался слота за `long_wait` — `busy`.
+    let fake = Fake::new();
+    *fake.log_delay.lock().unwrap() = Duration::from_millis(500);
+    fake.states.lock().unwrap().push_back(wstate(2, &[]));
+    let e = env_with(fake, |o| o.long_wait = Duration::from_millis(100)).await;
+    let (first, second, _) = log_then_observe(&e).await;
+    ok(first);
+    let msg = err(&second);
+    assert!(msg.starts_with("busy:"), "{msg}");
+    assert!(msg.contains("after waiting 100 ms"), "{msg}");
+}
+
+#[tokio::test]
+async fn logs_refusals_do_not_wait_in_the_queue() {
+    let fake = Fake::new();
+    *fake.log_delay.lock().unwrap() = Duration::from_secs(2);
     let e = env(fake).await;
     let c = Arc::new(client(&e.ep).await);
     let long = {
@@ -1396,15 +1451,59 @@ async fn logs_and_observation_share_one_long_operation_per_session() {
         })
     };
     tokio::time::sleep(Duration::from_millis(100)).await;
+    // Подключение только с метаданными: отказ сразу, а не после чужого чтения.
+    let started = std::time::Instant::now();
     let msg = err(&call(
         &c,
-        "observe_workload",
-        json!({"connectionId": "c5", "namespace": "team-a",
-            "workload": {"kind": "Deployment", "name": "web"}, "durationSeconds": 10}),
+        "get_pod_logs",
+        json!({"connectionId": "c1", "namespace": "team-a", "pod": "web-1"}),
     )
     .await);
-    assert!(msg.starts_with("busy:"), "{msg}");
+    assert!(msg.starts_with("logs_not_allowed:"), "{msg}");
+    let msg = err(&call(
+        &c,
+        "search_workload_logs",
+        json!({"connectionId": "c1", "namespace": "team-a",
+            "workload": {"kind": "Deployment", "name": "web"}, "filter": {"contains": "x"}}),
+    )
+    .await);
+    assert!(msg.starts_with("logs_not_allowed:"), "{msg}");
+    assert!(
+        started.elapsed() < Duration::from_millis(1000),
+        "отказы не ждали очереди: {:?}",
+        started.elapsed()
+    );
     ok(long.await.unwrap());
+}
+
+#[tokio::test]
+async fn cancelled_log_read_frees_the_long_operation_slot() {
+    let fake = Fake::new();
+    *fake.log_delay.lock().unwrap() = Duration::from_secs(2);
+    let e = env_with(fake, |o| o.long_wait = Duration::from_millis(500)).await;
+    let c = client(&e.ep).await;
+    let p = CallToolRequestParams::new("get_pod_logs").with_arguments(
+        json!({"connectionId": "c5", "namespace": "team-a", "pod": "web-1"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    let read = c
+        .send_cancellable_request(
+            ClientRequest::CallToolRequest(CallToolRequest::new(p)),
+            PeerRequestOptions::no_options(),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    read.cancel(Some("test".into())).await.unwrap();
+    // Слот освободился сразу: следующее чтение не ждёт 2 с отменённого и не получает `busy`.
+    ok(call(
+        &c,
+        "get_pod_logs",
+        json!({"connectionId": "c5", "namespace": "team-a", "pod": "web-1"}),
+    )
+    .await);
 }
 
 #[tokio::test]
@@ -1614,21 +1713,33 @@ async fn observation_records_restarts_and_readiness() {
 }
 
 #[tokio::test]
-async fn one_observation_per_session() {
-    let fake = Fake::new();
-    fake.states.lock().unwrap().push_back(wstate(2, &[]));
-    let e = env(fake).await;
-    let c = Arc::new(client(&e.ep).await);
-    let args = json!({"connectionId": "c1", "namespace": "team-a",
-        "workload": {"kind": "Deployment", "name": "web"}, "durationSeconds": 50});
-    let long = {
-        let (c, args) = (c.clone(), args.clone());
-        tokio::spawn(async move { call(&c, "observe_workload", args).await })
-    };
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let msg = err(&call(&c, "observe_workload", args).await);
-    assert!(msg.starts_with("busy:"), "{msg}");
-    ok(long.await.unwrap());
+async fn observations_of_a_session_run_one_after_another() {
+    for (wait, queued) in [(None, true), (Some(Duration::from_millis(100)), false)] {
+        let fake = Fake::new();
+        fake.states.lock().unwrap().push_back(wstate(2, &[]));
+        let e = env_with(fake, |o| {
+            if let Some(w) = wait {
+                o.long_wait = w;
+            }
+        })
+        .await;
+        let c = Arc::new(client(&e.ep).await);
+        let args = json!({"connectionId": "c1", "namespace": "team-a",
+            "workload": {"kind": "Deployment", "name": "web"}, "durationSeconds": 50});
+        let long = {
+            let (c, args) = (c.clone(), args.clone());
+            tokio::spawn(async move { call(&c, "observe_workload", args).await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let second = call(&c, "observe_workload", args).await;
+        if queued {
+            ok(second);
+        } else {
+            let msg = err(&second);
+            assert!(msg.starts_with("busy:"), "{msg}");
+        }
+        ok(long.await.unwrap());
+    }
 }
 
 // ---- Бэкенд поверх Fake: то, чего в Fake нет (длинные списки, секреты в тексте кластера) ----

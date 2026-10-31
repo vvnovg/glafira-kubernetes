@@ -988,7 +988,10 @@ impl AppBackend {
                 }))
                 .await
                 .map_err(to_backend)?;
-                Ok(LogsOutput::Pod(log))
+                match log {
+                    super::logs::PodLog::Log(log) => Ok(LogsOutput::Pod(log)),
+                    super::logs::PodLog::Unavailable(why) => Err(m::log_unavailable(why)),
+                }
             }
             LogsOp::Workload {
                 connection_id,
@@ -1328,6 +1331,22 @@ mod tests {
             *since = Some(glafira_mcp_kubernetes::logs::Since::Time("noon".into()));
         }
         assert_eq!(code(b.logs(bad).await), "invalid_argument");
+        // Контейнер не запускался: не ошибка аргументов, а `log_unavailable` с причиной.
+        pooled(&b, "logs", |_| {
+            (
+                400,
+                serde_json::json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
+                    "reason": "BadRequest", "code": 400,
+                    "message": "container \"web\" in pod \"web-1\" is waiting to start: ContainerCreating"}),
+            )
+        });
+        let e = b.logs(op("logs", "team-a")).await.unwrap_err();
+        assert_eq!(e.code, "log_unavailable");
+        assert!(
+            e.message.contains("waiting to start (ContainerCreating)"),
+            "{}",
+            e.message
+        );
 
         let mut st = b.state.clone();
         let mut policy = (*st.policy).clone();
