@@ -408,6 +408,25 @@ async fn the_gateway_reads_logs_on_the_logs_level() {
             .starts_with("line ")
     );
 
+    // Контейнер pull не запускался (образа нет): не ошибка аргументов, а `log_unavailable`.
+    let pods = ok(call(
+        &c,
+        "list_pods",
+        json!({"connectionId": id, "namespace": NS, "workload": {"kind": "Deployment", "name": "pull"}}),
+    )
+    .await);
+    let pod = pods["items"][0]["name"].as_str().unwrap().to_string();
+    let msg = err(&call(
+        &c,
+        "get_pod_logs",
+        json!({"connectionId": id, "namespace": NS, "pod": pod}),
+    )
+    .await);
+    assert!(
+        msg.starts_with("log_unavailable:") && msg.contains("waiting to start"),
+        "{msg}"
+    );
+
     let calls: Vec<Value> = ctl.audit_recent(20);
     let read = calls
         .iter()
