@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
 import type { McpAuditEntry, McpServerState, McpStatus } from "../../api/types";
@@ -68,6 +68,13 @@ function auditWhat(e: McpAuditEntry, t: (k: string, o?: Record<string, string>) 
   return key ? t(key) : e.event;
 }
 
+/** Что меняется вместе с журналом: состояние сервера, сессии, их вызовы и клиенты. */
+function activity(s: McpStatus): string {
+  const sessions = s.sessions.map((x) => `${x.id}:${x.calls}:${x.active}`).join(",");
+  const clients = s.approvedClients.map((c) => c.name).join(",");
+  return `${s.state}|${s.enabled}|${sessions}|${clients}|${s.pending.length}`;
+}
+
 export function McpSection() {
   const { t } = useTranslation();
   const qc = useQueryClient();
@@ -92,6 +99,15 @@ export function McpSection() {
     },
   });
   const reveal = useMutation({ mutationFn: () => api.revealMcpAudit() });
+  // Журнал перечитывается сам, пока раздел открыт: статус приходит событиями из Rust, и его
+  // изменение (новый или завершённый вызов, сессия, клиент) значит новые записи журнала.
+  const seen = useRef<string | undefined>(undefined);
+  const now = status.data ? activity(status.data) : undefined;
+  useEffect(() => {
+    if (now === undefined) return;
+    if (seen.current !== undefined && seen.current !== now) void qc.invalidateQueries({ queryKey: ["mcp-audit"] });
+    seen.current = now;
+  }, [now, qc]);
 
   if (status.error) return <ErrorBanner error={status.error} onRetry={() => status.refetch()} />;
   const s = status.data;

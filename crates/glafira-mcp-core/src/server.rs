@@ -473,9 +473,11 @@ impl Session {
     {
         let started = tokio::time::Instant::now();
         let view = self.identify(ctx.client_info());
-        let result = match self.admit(&view) {
-            Ok(_flag) => body.await,
-            Err(e) => Err(e),
+        // Отметка «идёт вызов» снимается после записи в журнал: интерфейс перечитывает журнал по
+        // событию статуса и должен застать в нём этот вызов.
+        let (flag, result) = match self.admit(&view) {
+            Ok(flag) => (Some(flag), body.await),
+            Err(e) => (None, Err(e)),
         };
         let result = result.and_then(|v| {
             if serde_json::to_vec(&v).map_or(0, |b| b.len()) > HARD_LIMIT_BYTES {
@@ -517,6 +519,7 @@ impl Session {
             returned: counts.map(|c| c.1),
             masked: counts.map(|c| c.2),
         });
+        drop(flag);
         out
     }
 }

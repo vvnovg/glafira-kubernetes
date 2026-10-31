@@ -1,6 +1,7 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { MCP_STATUS_KEY } from "../../lib/useMcpStatus";
 import { mcpStatus } from "../../test/mcp";
 import { renderWithClient } from "../../test/render";
 
@@ -107,5 +108,20 @@ describe("McpSection", () => {
     expect(api.revokeMcpClient).toHaveBeenCalledWith("claude-ai");
     // отзыв и отключение обновляют журнал: первая загрузка + отключение + отзыв
     await waitFor(() => expect(api.getMcpAudit).toHaveBeenCalledTimes(3));
+  });
+
+  it("журнал обновляется сам, когда статус сообщает о новых вызовах", async () => {
+    const session = { id: "s1", clientName: "claude-ai", clientVersion: "1.2", startedMs: 0, calls: 0, active: false, approved: true };
+    vi.mocked(api.getMcpStatus).mockResolvedValue(mcpStatus({ sessions: [session] }));
+    const { client } = renderWithClient(<McpSection />);
+    expect(await screen.findByText("Журнал пуст.")).toBeInTheDocument();
+    expect(api.getMcpAudit).toHaveBeenCalledTimes(1);
+    vi.mocked(api.getMcpAudit).mockResolvedValue([
+      { ts: 0, event: "call", client: "claude-ai 1.2", tool: "get_pod_logs", outcome: "ok", ms: 9 },
+    ]);
+    // Событие статуса из Rust: вызов завершился.
+    act(() => client.setQueryData(MCP_STATUS_KEY, mcpStatus({ sessions: [{ ...session, calls: 1 }] })));
+    expect(await screen.findByText("get_pod_logs")).toBeInTheDocument();
+    expect(api.getMcpAudit).toHaveBeenCalledTimes(2);
   });
 });
