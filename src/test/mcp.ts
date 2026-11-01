@@ -10,6 +10,7 @@ export function mcpStatus(patch: Partial<McpStatus> = {}): McpStatus {
     sessions: [],
     pending: [],
     approvedClients: [],
+    responseLimitKb: 100,
     allowedConnections: 2,
     ...patch,
   };

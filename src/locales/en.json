@@ -307,7 +307,9 @@
       "filter": "The filter runs in Glafira before the lines reach the window: a substring or a regular expression (regex). Lines that do not match are counted but not shown."
     },
     "settings": {
-      "mcpEnable": "Starts a local MCP server for LLM assistants. Access is opened per connection and is off by default; each new client is confirmed in a dialog."
+      "mcpEnable": "Starts a local MCP server for LLM assistants. Access is opened per connection and is off by default; each new client is confirmed in a dialog.",
+      "mcpResponseLimit": "Largest answer one tool call returns to the LLM. Choose a smaller limit for a local model with a small context (64k tokens or less).",
+      "mcpCompact": "Hides the tools for notes and change proposals from this client: their descriptions take about 2,300 tokens of a local model's context. The client sees the new list after it reconnects."
     },
     "health": {
       "check": "Runs the built-in Glafira rules over the cluster, its nodes and up to 50 projects. Severity depends on the connection environment. The check only reads the cluster.",
@@ -617,7 +619,11 @@
         "serverStarted": "Server started",
         "serverStopped": "Server stopped",
         "lines": "{{returned}} of {{scanned}} lines, masked: {{masked}}"
-      }
+      },
+      "responseLimit": "Response size limit",
+      "responseLimitKb": "{{kb}} KB",
+      "colCompact": "Compact tools",
+      "compactFor": "Compact tool set for {{name}}"
     }
   },
   "help": {
