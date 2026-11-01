@@ -1,8 +1,9 @@
 //! Выбор источника метрик подключения (спец. §7.1). `auto` берёт первый работающий источник
-//! истории: у `openshift` — Thanos Querier, у остальных — Prometheus через прокси API-сервера;
-//! без него — `metrics.k8s.io` (только текущее значение). Свой URL из профиля другим не
-//! заменяется. Выбор, отвергнутые источники и причины видны в интерфейсе и модели; выбор
-//! живёт в подключении (`Connected::metrics`) 5 минут, «Обновить» выбирает заново.
+//! истории: у `openshift` — Thanos Querier, у остальных — Prometheus через прокси API-сервера
+//! (у `dropapp` первым — vmselect VictoriaMetrics); без него — `metrics.k8s.io` (только текущее
+//! значение). Свой URL из профиля другим не заменяется. Выбор, отвергнутые источники и причины
+//! видны в интерфейсе и модели; выбор живёт в подключении (`Connected::metrics`) 5 минут,
+//! «Обновить» выбирает заново.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -166,7 +167,7 @@ async fn auto(i: &Inputs, now_s: i64, tried: &mut Vec<Rejected>) -> Option<Arc<d
         return None;
     }
     let distribution = i.platform.distribution.map(|d| d.id());
-    for svc in candidates(distribution) {
+    for svc in candidates(i.platform.kind, distribution) {
         let src = ProxySource::new(i.reader.clone(), svc);
         match probe(&src, now_s).await {
             Ok(()) => return Some(Arc::new(src)),
@@ -448,6 +449,58 @@ mod tests {
             "messages.metrics.thanosForbidden"
         );
         assert!(s.status.pod_metrics);
+    }
+
+    #[tokio::test]
+    async fn dropapp_takes_vmselect_through_the_proxy() {
+        let i = inputs(PlatformKind::Dropapp, |s| {
+            if s.path().contains(
+                "dapp-monitoring/services/http:vmselect-victoria-metrics-k8s-stack:8481/proxy/select/0/prometheus/",
+            ) {
+                ok_vector()
+            } else {
+                status(404, "NotFound", "no")
+            }
+        });
+        let s = select(&i, 100).await;
+        assert_eq!(s.status.mode, Mode::Auto);
+        let sel = s.status.selected.unwrap();
+        assert_eq!(
+            sel.location,
+            "dapp-monitoring/vmselect-victoria-metrics-k8s-stack:8481"
+        );
+        assert_eq!(sel.kind, SourceKind::Prometheus);
+        assert!(s.status.rejected.is_empty());
+        assert!(s.history.is_some());
+    }
+
+    #[tokio::test]
+    async fn dropapp_without_rights_to_vmselect_goes_on() {
+        // У пользователя namespace нет `get services/proxy` в `dapp-monitoring`.
+        let i = inputs(PlatformKind::Dropapp, |s| {
+            if s.path()
+                .contains("services/http:vmselect-victoria-metrics-k8s-stack:8481")
+            {
+                status(403, "Forbidden", "services \"vmselect\" is forbidden")
+            } else if s.path().contains("services/http:prometheus-k8s:9090") {
+                ok_vector()
+            } else {
+                status(404, "NotFound", "no")
+            }
+        });
+        let s = select(&i, 100).await;
+        assert_eq!(
+            s.status.selected.unwrap().location,
+            "monitoring/prometheus-k8s:9090"
+        );
+        assert_eq!(s.status.rejected.len(), 1);
+        let r = &s.status.rejected[0];
+        assert_eq!(
+            r.source.location,
+            "dapp-monitoring/vmselect-victoria-metrics-k8s-stack:8481"
+        );
+        assert_eq!(r.reason, Reason::Forbidden);
+        assert_eq!(r.message.key, "messages.metrics.proxyForbidden");
     }
 
     #[tokio::test]

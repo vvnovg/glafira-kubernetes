@@ -189,6 +189,9 @@ pub struct ServiceProxy {
     pub namespace: String,
     pub name: String,
     pub port: u16,
+    /// Префикс пути API Prometheus в сервисе: пустой у Prometheus, `/select/0/prometheus` у
+    /// vmselect VictoriaMetrics.
+    pub path_prefix: String,
 }
 
 impl ServiceProxy {
@@ -376,9 +379,11 @@ impl ReadClient {
     }
 
     /// GET к Prometheus через прокси сервиса API-сервера
-    /// (`/api/v1/namespaces/<ns>/services/http:<сервис>:<порт>/proxy/api/v1/query…`, спец. §7.1).
-    /// Только два пути API Prometheus (`PromApi`): других запросов к сервисам кластера
-    /// `ReadClient` не делает. Нужно право `get services/proxy` в проекте сервиса.
+    /// (`/api/v1/namespaces/<ns>/services/http:<сервис>:<порт>/proxy<префикс>/api/v1/query…`,
+    /// спец. §7.1). Только два пути API Prometheus (`PromApi`) за префиксом сервиса: других
+    /// запросов к сервисам кластера `ReadClient` не делает, а префикс проверяется, как путь
+    /// `get_text`, и без `?` — чтобы не увёл запрос мимо них. Нужно право `get services/proxy`
+    /// в проекте сервиса.
     pub async fn prometheus(
         &self,
         svc: &ServiceProxy,
@@ -387,15 +392,20 @@ impl ReadClient {
     ) -> AppResult<String> {
         check_namespace(&svc.namespace)?;
         check_name(&svc.name)?;
+        let api_path = format!("{}{}", svc.path_prefix, api.path());
+        if api_path.contains('?') {
+            return Err(AppError::internal_with(format!(
+                "refused API path {}",
+                api_path.escape_debug()
+            )));
+        }
+        check_path(&api_path)?;
         let query = url::form_urlencoded::Serializer::new(String::new())
             .extend_pairs(params)
             .finish();
         let path = format!(
-            "/api/v1/namespaces/{}/services/http:{}:{}/proxy{}?{query}",
-            svc.namespace,
-            svc.name,
-            svc.port,
-            api.path()
+            "/api/v1/namespaces/{}/services/http:{}:{}/proxy{api_path}?{query}",
+            svc.namespace, svc.name, svc.port
         );
         let request = http::Request::get(path)
             .body(Vec::new())
@@ -819,6 +829,42 @@ mod tests {
             );
         }
         assert_eq!(check_name("a\nb").unwrap_err().params["name"], "a\\nb");
+    }
+
+    /// Префикс пути Prometheus не уводит запрос мимо двух путей API: такой запрос не уходит.
+    #[tokio::test]
+    async fn prometheus_prefix_cannot_leave_the_query_paths() {
+        let (client, server) = mock_client(|_| (200, serde_json::json!({"status": "success"})));
+        let r = reader(client);
+        let svc = |prefix: &str| ServiceProxy {
+            namespace: "dapp-monitoring".into(),
+            name: "vmselect".into(),
+            port: 8481,
+            path_prefix: prefix.into(),
+        };
+        let api = crate::metrics::prometheus::PromApi::Query;
+        for bad in [
+            "/select/0/prometheus/../../../../api/v1/namespaces/kube-system/secrets",
+            "/select/0/prometheus/",
+            "/select/0/prometheus?x=",
+            "/select/0/prometheus#",
+            "select/0/prometheus",
+            "/select/%2e%2e/prometheus",
+            "/select 0",
+        ] {
+            let e = r.prometheus(&svc(bad), api, &[]).await.unwrap_err();
+            assert_eq!(e.code, ErrorCode::Internal, "{bad:?}");
+        }
+        r.prometheus(&svc("/select/0/prometheus"), api, &[])
+            .await
+            .unwrap();
+        drop(r);
+        let seen = server.await.unwrap();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(
+            seen[0].path(),
+            "/api/v1/namespaces/dapp-monitoring/services/http:vmselect:8481/proxy/select/0/prometheus/api/v1/query"
+        );
     }
 
     /// Имя или namespace, которые не прошли проверку, в запрос не уходят ни одним методом;
