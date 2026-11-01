@@ -943,10 +943,26 @@ async fn exposes_exactly_the_tools() {
         );
         let schema = serde_json::to_string(&t.input_schema).unwrap();
         assert!(!cyrillic(&schema), "{}: {schema}", t.name);
+        // Подсхемы подставлены: парсеры вызовов локальных моделей не раскрывают `$ref`.
+        assert!(
+            !schema.contains("$ref") && !schema.contains("$defs"),
+            "{}: {schema}",
+            t.name
+        );
         // Заметки для сопровождающих («spec §8.1», «goes into the JSON Schema») модели ни к чему.
         for note in ["spec §", "doc comment", "JSON Schema"] {
             assert!(!schema.contains(note), "{}: {note}: {schema}", t.name);
         }
+    }
+    let search = tools
+        .iter()
+        .find(|t| t.name == "search_workload_logs")
+        .unwrap();
+    for arg in ["workload", "filter"] {
+        assert_eq!(
+            search.input_schema["properties"][arg]["type"], "object",
+            "{arg}"
+        );
     }
 }
 

@@ -243,7 +243,16 @@ impl ServerHandler for KubeServer {
             .is_some_and(|v| v >= ProtocolVersion::V_2026_07_28);
         Ok(ListToolsResult {
             result_type: Some(ResultType::COMPLETE),
-            tools: self.tool_router.list_all(),
+            tools: self
+                .tool_router
+                .list_all()
+                .into_iter()
+                .map(|mut t| {
+                    // Без `$ref`: локальные серверы моделей иначе отдают вложенные объекты строкой.
+                    t.input_schema = Arc::new(glafira_mcp_core::inline_refs(&t.input_schema));
+                    t
+                })
+                .collect(),
             meta: None,
             next_cursor: None,
             ttl_ms: hints.then_some(0),

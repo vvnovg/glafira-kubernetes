@@ -8,10 +8,12 @@ pub mod endpoint;
 pub mod fit;
 pub mod handshake;
 pub mod limits;
+pub mod schema;
 pub mod server;
 pub mod session;
 
 pub use audit::{AuditEvent, AuditLog};
 pub use endpoint::{BoxStream, Endpoint};
+pub use schema::inline_refs;
 pub use server::{Exclusive, McpServerHandle, Session, SessionSnapshot, Slots, start, to_value};
 pub use session::{BackendError, BoxFuture, ClientIdent, Hooks, SessionAccess, SessionView};
