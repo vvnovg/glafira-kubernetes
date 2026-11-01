@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use glafira_mcp_core::{
-    AuditLog, BackendError, Hooks, McpServerHandle, Session, SessionAccess, SessionView, endpoint,
-    handshake, to_value,
+    AuditLog, BackendError, ClientOptions, Hooks, McpServerHandle, Session, SessionAccess,
+    SessionView, endpoint, fit, handshake, to_value,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -37,6 +37,8 @@ struct Fake {
     peak: AtomicUsize,
     /// Сколько раз сервер сообщил об изменении сессий (событие статуса для интерфейса).
     changed: AtomicUsize,
+    /// Предел размера ответа клиента.
+    limit: AtomicUsize,
 }
 
 impl Fake {
@@ -49,6 +51,7 @@ impl Fake {
             active: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
             changed: AtomicUsize::new(0),
+            limit: AtomicUsize::new(fit::MAX_RESPONSE_BYTES),
         })
     }
 }
@@ -57,6 +60,13 @@ impl Hooks for Fake {
     fn access(&self, session: &SessionView) -> SessionAccess {
         self.seen.lock().unwrap().push(session.clone());
         *self.access.lock().unwrap()
+    }
+
+    fn client_options(&self, _session: &SessionView) -> ClientOptions {
+        ClientOptions {
+            response_limit_bytes: self.limit.load(Ordering::SeqCst),
+            ..ClientOptions::default()
+        }
     }
 
     fn connection_name(&self, id: &str) -> Option<String> {
@@ -172,6 +182,16 @@ impl Toy {
             .session
             .call(&ctx, "big", Value::Null, None, async {
                 to_value(&json!({ "blob": "x".repeat(200 * 1024) }))
+            })
+            .await)
+    }
+
+    #[tool(description = "Return 40 KB and the response limit of the call")]
+    async fn medium(&self, ctx: RequestContext<RoleServer>) -> Result<CallToolResult, ErrorData> {
+        Ok(self
+            .session
+            .call(&ctx, "medium", Value::Null, None, async {
+                to_value(&json!({ "limit": fit::response_limit(), "blob": "x".repeat(40 * 1024) }))
             })
             .await)
     }
@@ -450,6 +470,23 @@ async fn response_that_cannot_be_cut_is_refused() {
     let msg = err(&call(&c, "big", json!({})).await);
     assert!(msg.starts_with("response_too_large:"), "{msg}");
     assert_eq!(e.audit.recent(1)[0]["code"], "response_too_large");
+}
+
+#[tokio::test]
+async fn response_limit_of_the_client_applies_to_the_call() {
+    let fake = Fake::new(SessionAccess::Approved);
+    let e = env(fake.clone()).await;
+    let c = client(&e.ep).await;
+    let ok = call(&c, "medium", json!({})).await;
+    assert_ne!(ok.is_error, Some(true));
+    assert_eq!(ok.structured_content.unwrap()["limit"], 100 * 1024);
+    fake.limit.store(24 * 1024, Ordering::SeqCst);
+    let msg = err(&call(&c, "medium", json!({})).await);
+    assert!(msg.starts_with("response_too_large:"), "{msg}");
+    assert!(msg.contains("larger than the size limit"), "{msg}");
+    fake.limit.store(48 * 1024, Ordering::SeqCst);
+    let ok = call(&c, "medium", json!({})).await;
+    assert_eq!(ok.structured_content.unwrap()["limit"], 48 * 1024);
 }
 
 #[tokio::test]

@@ -57,6 +57,23 @@ impl BackendError {
     }
 }
 
+/// Настройки клиента сессии: предел размера ответа и компактный набор инструментов (без
+/// инструментов записи) — для клиентов с локальной моделью и малым контекстом.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientOptions {
+    pub response_limit_bytes: usize,
+    pub compact_tools: bool,
+}
+
+impl Default for ClientOptions {
+    fn default() -> Self {
+        Self {
+            response_limit_bytes: crate::fit::MAX_RESPONSE_BYTES,
+            compact_tools: false,
+        }
+    }
+}
+
 /// Связь сервера с приложением: право сессии, имя подключения для журнала, события сессий.
 pub trait Hooks: Send + Sync + 'static {
     /// Право сессии на вызовы. Вызывается на каждый запрос — должно быть быстрым.
@@ -67,4 +84,8 @@ pub trait Hooks: Send + Sync + 'static {
     fn session_closed(&self, session_id: &str);
     /// Сессии изменились: открыта, закрыта, опознан клиент, начат или закончен вызов.
     fn sessions_changed(&self);
+    /// Настройки клиента сессии. Вызывается на каждый вызов — должно быть быстрым.
+    fn client_options(&self, _session: &SessionView) -> ClientOptions {
+        ClientOptions::default()
+    }
 }

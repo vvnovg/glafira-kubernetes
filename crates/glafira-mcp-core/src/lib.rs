@@ -16,4 +16,6 @@ pub use audit::{AuditEvent, AuditLog};
 pub use endpoint::{BoxStream, Endpoint};
 pub use schema::{inline_refs, normalize_args, shape};
 pub use server::{Exclusive, McpServerHandle, Session, SessionSnapshot, Slots, start, to_value};
-pub use session::{BackendError, BoxFuture, ClientIdent, Hooks, SessionAccess, SessionView};
+pub use session::{
+    BackendError, BoxFuture, ClientIdent, ClientOptions, Hooks, SessionAccess, SessionView,
+};

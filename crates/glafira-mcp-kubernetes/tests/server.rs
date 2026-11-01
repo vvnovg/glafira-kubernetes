@@ -1599,7 +1599,7 @@ async fn long_workload_lists_are_truncated_to_the_size_limit() {
     let n = v["items"].as_array().unwrap().len();
     assert!(n < 300 && n > 50, "{n}");
     assert_eq!(v["truncated"], true);
-    assert!(v["hint"].as_str().unwrap().contains("100 KB"));
+    assert!(v["hint"].as_str().unwrap().contains("size limit"));
     assert_eq!(v["items"][0]["name"], "w000", "по имени");
     assert_eq!(v["errors"][0]["kind"], "CronJob");
     // Страница обрезана: следующая начинается сразу за последним показанным workload'ом, а не
@@ -2180,7 +2180,7 @@ async fn a_project_list_capped_by_the_backend_is_marked_truncated() {
     for id in ["c1", "c2"] {
         let v = ok(call(&c, "list_projects", json!({"connectionId": id})).await);
         assert_eq!(v["truncated"], true, "{id}");
-        assert!(v["hint"].as_str().unwrap().contains("100 KB"), "{id}");
+        assert!(v["hint"].as_str().unwrap().contains("size limit"), "{id}");
     }
 }
 
