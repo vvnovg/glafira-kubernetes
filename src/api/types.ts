@@ -185,10 +185,10 @@ export interface Capabilities {
   readClusterVersion: boolean;
 }
 
-export type PlatformKind = "openshift" | "kubernetes";
+export type PlatformKind = "openshift" | "dropapp" | "kubernetes";
 export type Distribution = "eks" | "gke" | "aks" | "rancher" | "deckhouse" | "k3s" | "rke2";
 
-/** Платформа кластера (спец. §4.3); `label` — «OpenShift 4.18», «Kubernetes 1.31 (EKS)». */
+/** Платформа кластера (спец. §4.3); `label` — «OpenShift 4.18», «DropApp 5.1.2», «Kubernetes 1.31 (EKS)». */
 export interface PlatformInfo {
   kind: PlatformKind;
   distribution: Distribution | null;

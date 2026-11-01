@@ -192,6 +192,7 @@ pub fn platform(p: &PlatformInfo) -> m::Platform {
     m::Platform {
         kind: match p.kind {
             PlatformKind::Openshift => m::PlatformKind::Openshift,
+            PlatformKind::Dropapp => m::PlatformKind::Dropapp,
             PlatformKind::Kubernetes => m::PlatformKind::Kubernetes,
         },
         label: p.label.clone(),
@@ -824,6 +825,20 @@ pub fn workload_state(row: &WorkloadRow, pods: &[Pod], events: Vec<EventRow>) ->
 mod tests {
     use super::*;
     use crate::k8s::pods::{OwnerRef, PodProblem};
+
+    #[test]
+    fn dropapp_platform_reaches_mcp_as_dropapp() {
+        let p = platform(&PlatformInfo {
+            kind: PlatformKind::Dropapp,
+            distribution: None,
+            version: Some("5.1.2".into()),
+            label: "DropApp 5.1.2".into(),
+        });
+        assert_eq!(
+            serde_json::to_value(&p).unwrap(),
+            serde_json::json!({"kind": "dropapp", "label": "DropApp 5.1.2", "version": "5.1.2"})
+        );
+    }
 
     #[test]
     fn quantities_read_as_kubernetes_writes_them() {

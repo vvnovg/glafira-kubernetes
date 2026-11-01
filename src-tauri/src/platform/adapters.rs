@@ -32,7 +32,8 @@ pub trait Platform: Send + Sync {
 pub fn adapter(kind: PlatformKind) -> &'static dyn Platform {
     match kind {
         PlatformKind::Openshift => &OpenShift,
-        PlatformKind::Kubernetes => &Kubernetes,
+        // Свой адаптер DropApp — задачи O5 далее.
+        PlatformKind::Dropapp | PlatformKind::Kubernetes => &Kubernetes,
     }
 }
 

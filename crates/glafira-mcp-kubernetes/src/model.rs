@@ -298,6 +298,7 @@ impl<T> Part<T> {
 #[serde(rename_all = "lowercase")]
 pub enum PlatformKind {
     Openshift,
+    Dropapp,
     Kubernetes,
 }
 
@@ -305,7 +306,7 @@ pub enum PlatformKind {
 #[serde(rename_all = "camelCase")]
 pub struct Platform {
     pub kind: PlatformKind,
-    /// «OpenShift 4.18», «Kubernetes 1.31 (EKS)».
+    /// «OpenShift 4.18», «DropApp 5.1.2», «Kubernetes 1.31 (EKS)».
     pub label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,

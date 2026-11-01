@@ -13,6 +13,7 @@ use kube::api::{Api, ApiResource, DynamicObject, GroupVersionKind, ListParams, P
 use serde::Serialize;
 
 use crate::error::AppResult;
+use crate::k8s::dropapp;
 use crate::k8s::errors::{from_kube, timeout};
 use crate::platform::{ApiGroups, Discovery, PlatformInfo, PlatformKind, detect};
 
@@ -92,6 +93,18 @@ async fn cluster_version(client: &kube::Client, limit: Duration) -> Option<Strin
     }
 }
 
+/// Версия DropApp из первого ClusterMetadata; нет прав, объекта или поля — `None`.
+async fn dropapp_version(client: &kube::Client, limit: Duration) -> Option<String> {
+    let api: Api<DynamicObject> = Api::all_with(client.clone(), &dropapp::cluster_metadatas());
+    match timed(limit, api.list(&ListParams::default().limit(1))).await {
+        Ok(list) => list.items.first().and_then(dropapp::dapp_version),
+        Err(e) => {
+            tracing::debug!("cluster metadata is not readable: {}", e.message);
+            None
+        }
+    }
+}
+
 /// Имена меток первой ноды (по ним узнаётся AKS); нет прав — пусто.
 async fn first_node_labels(client: &kube::Client, limit: Duration) -> Vec<String> {
     let api: Api<Node> = Api::all(client.clone());
@@ -108,7 +121,8 @@ async fn first_node_labels(client: &kube::Client, limit: Duration) -> Vec<String
 }
 
 /// Версия API-сервера, группы API и платформа (спец. §4.3). ClusterVersion читается только
-/// у OpenShift, ноды — только если дистрибутив не узнан по версии и группам.
+/// у OpenShift, ClusterMetadata — только у DropApp, ноды — только если дистрибутив Kubernetes
+/// не узнан по версии и группам.
 pub async fn discover(client: &kube::Client, limit: Duration) -> AppResult<Discovered> {
     let version = timed(limit, client.apiserver_version()).await?;
     let groups = timed(limit, client.list_api_groups()).await?;
@@ -123,6 +137,8 @@ pub async fn discover(client: &kube::Client, limit: Duration) -> AppResult<Disco
     };
     if d.has_group("config.openshift.io") {
         d.cluster_version = cluster_version(client, limit).await;
+    } else if d.has_group("config.dropapp.ru") {
+        d.dropapp_version = dropapp_version(client, limit).await;
     }
     let mut platform = detect(&d);
     if platform.kind == PlatformKind::Kubernetes && platform.distribution.is_none() {
@@ -426,6 +442,87 @@ mod tests {
         let d = discover(&client, LIMIT).await.unwrap();
         assert_eq!(d.platform.label, "OpenShift 4.18");
         assert_eq!(d.server_version, "v1.32.5");
+    }
+
+    /// Версия DropApp — `spec.dappVersion` первого ClusterMetadata; нет прав, объекта или поля —
+    /// подпись по версии Kubernetes, подключение не падает.
+    #[tokio::test]
+    async fn dropapp_version_comes_from_cluster_metadata() {
+        let metadata = |items: serde_json::Value| {
+            (
+                200,
+                serde_json::json!({"apiVersion": "config.dropapp.ru/v1alpha1",
+                    "kind": "ClusterMetadataList", "metadata": {}, "items": items}),
+            )
+        };
+        let cases = [
+            (
+                metadata(
+                    serde_json::json!([{"apiVersion": "config.dropapp.ru/v1alpha1",
+                    "kind": "ClusterMetadata", "metadata": {"name": "cluster-metadata"},
+                    "spec": {"clusterName": "prod", "dappVersion": "5.1.2"}}]),
+                ),
+                "DropApp 5.1.2",
+                Some("5.1.2"),
+            ),
+            (
+                metadata(serde_json::json!([])),
+                "DropApp (Kubernetes 1.32)",
+                Some("1.32"),
+            ),
+            (
+                metadata(
+                    serde_json::json!([{"apiVersion": "config.dropapp.ru/v1alpha1",
+                    "kind": "ClusterMetadata", "metadata": {"name": "cluster-metadata"},
+                    "spec": {"clusterName": "prod"}}]),
+                ),
+                "DropApp (Kubernetes 1.32)",
+                Some("1.32"),
+            ),
+            (
+                status(
+                    403,
+                    "Forbidden",
+                    r#"clustermetadatas.config.dropapp.ru is forbidden: User "dev1" cannot list resource "clustermetadatas" in API group "config.dropapp.ru" at the cluster scope"#,
+                ),
+                "DropApp (Kubernetes 1.32)",
+                Some("1.32"),
+            ),
+        ];
+        for (reply, label, version) in cases {
+            let (client, server) = mock_client(move |s| match s.path() {
+                "/apis" => (
+                    200,
+                    serde_json::json!({"kind": "APIGroupList", "apiVersion": "v1", "groups": [
+                        {"name": "apps", "versions": [{"groupVersion": "apps/v1", "version": "v1"}]},
+                        {"name": "config.dropapp.ru", "versions": [{"groupVersion": "config.dropapp.ru/v1alpha1", "version": "v1alpha1"}]},
+                        {"name": "nodes.dropapp.ru", "versions": [{"groupVersion": "nodes.dropapp.ru/v1alpha1", "version": "v1alpha1"}]}
+                    ]}),
+                ),
+                "/apis/config.dropapp.ru/v1alpha1/clustermetadatas" => reply.clone(),
+                _ => fixtures::openshift(s),
+            });
+            let d = discover(&client, LIMIT).await.unwrap();
+            assert_eq!(d.platform.kind, PlatformKind::Dropapp, "{label}");
+            assert_eq!(d.platform.label, label);
+            assert_eq!(d.platform.version.as_deref(), version, "{label}");
+            assert_eq!(d.platform.distribution, None, "{label}");
+            drop(client);
+            let seen = server.await.unwrap();
+            assert!(
+                seen.iter()
+                    .any(|s| s.path() == "/apis/config.dropapp.ru/v1alpha1/clustermetadatas"),
+                "{label}"
+            );
+            assert!(
+                !seen.iter().any(|s| s.path() == "/api/v1/nodes"),
+                "у DropApp ноды для определения дистрибутива не читаются"
+            );
+            assert!(
+                !seen.iter().any(|s| s.path().contains("clusterversions")),
+                "{label}"
+            );
+        }
     }
 
     #[tokio::test]
