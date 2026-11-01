@@ -71,8 +71,8 @@ fn proposals_of(b: &mut ProposalsBody) -> &mut Vec<ProposalView> {
     &mut b.items
 }
 
-/// Сначала недавно обновлённые, при равенстве — созданные позже, затем по id: обрезка до 100 КБ
-/// оставляет голову.
+/// Сначала недавно обновлённые, при равенстве — созданные позже, затем по id: обрезка до предела
+/// размера ответа оставляет голову.
 fn newest_first(items: &mut [ProposalView]) {
     items.sort_by(|a, b| {
         b.updated_at_ms

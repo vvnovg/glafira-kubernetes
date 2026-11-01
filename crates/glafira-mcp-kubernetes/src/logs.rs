@@ -271,7 +271,7 @@ fn size(v: &impl Serialize) -> usize {
 }
 
 /// Лог контейнера для модели: фильтр по немаскированным строкам, маскировка, обрезка строк;
-/// не помещается в 100 КБ — отбрасываются самые старые строки.
+/// не помещается в предел размера ответа — отбрасываются самые старые строки.
 pub fn pod_logs(log: ContainerLog, matcher: &Matcher, m: &Masker) -> PodLogs {
     let scanned = log.lines.len() as u64;
     let mut lines: Vec<(Line, usize)> = log
@@ -339,7 +339,7 @@ pub struct Search {
     pub scanned: u64,
     pub returned: u64,
     pub masked: u64,
-    /// Совпадений больше `maxMatches` или ответ обрезан до 100 КБ.
+    /// Совпадений больше `maxMatches` или ответ обрезан до предела размера ответа.
     pub truncated: bool,
     /// Просмотр остановлен пределом: подов (20), байт (50 МБ) или времени (40 с).
     #[serde(skip_serializing_if = "Option::is_none")]

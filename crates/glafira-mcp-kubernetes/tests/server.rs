@@ -1885,6 +1885,50 @@ fn wstate(ready: i32, pods: &[(&str, bool, i32)]) -> WorkloadState {
     }
 }
 
+/// Предел состояния `observe_workload` следует пределу клиента: при 24 КБ состояние в ~15 КБ
+/// (меньше постоянных 45 КБ) отклоняется сразу после первого образца, а не обвязкой после окна.
+#[tokio::test]
+async fn observation_refuses_a_state_too_large_for_the_client_limit_at_once() {
+    let names: Vec<String> = (0..120).map(|i| format!("web-{i:03}")).collect();
+    let pods: Vec<(&str, bool, i32)> = names.iter().map(|n| (n.as_str(), true, 0)).collect();
+    let big = wstate(2, &pods);
+    let size = serde_json::to_vec(&big.pods).unwrap().len();
+    assert!((13 * 1024..20 * 1024).contains(&size), "{size}");
+    let args = json!({"connectionId": "c1", "namespace": "team-a",
+        "workload": {"kind": "Deployment", "name": "web"}, "durationSeconds": 10});
+
+    let fake = Fake::new();
+    fake.limit.store(24 * 1024, Ordering::SeqCst);
+    fake.states.lock().unwrap().push_back(big.clone());
+    // Секунда на единицу: окно наблюдения — 10 с, отказ до него виден по времени.
+    let e = env_with(fake, |o| o.observe_unit = Duration::from_secs(1)).await;
+    let c = client(&e.ep).await;
+    let started = std::time::Instant::now();
+    let msg = err(&call(&c, "observe_workload", args.clone()).await);
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(msg.starts_with("response_too_large:"), "{msg}");
+    assert!(
+        msg.contains("does not fit into the response size limit"),
+        "{msg}"
+    );
+
+    // При 100 КБ то же состояние наблюдается.
+    let fake = Fake::new();
+    fake.states.lock().unwrap().push_back(big);
+    let e = env(fake).await;
+    let c = client(&e.ep).await;
+    let v = ok(call(&c, "observe_workload", args).await);
+    assert_eq!(
+        v["final"]["pods"].as_array().map(Vec::len),
+        Some(120),
+        "{v}"
+    );
+}
+
 #[tokio::test]
 async fn observation_records_restarts_and_readiness() {
     let fake = Fake::new();

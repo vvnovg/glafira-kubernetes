@@ -133,7 +133,7 @@ fn notes_of(b: &mut NotesBody) -> &mut Vec<AnnotationView> {
 }
 
 /// Порядок списка без страниц: сначала недавно обновлённые, при равенстве — созданные позже,
-/// затем по id. Обрезка до 100 КБ оставляет голову.
+/// затем по id. Обрезка до предела размера ответа оставляет голову.
 fn newest_first(items: &mut [AnnotationView]) {
     items.sort_by(|a, b| {
         b.updated_at_ms
