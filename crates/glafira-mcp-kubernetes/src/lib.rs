@@ -15,4 +15,4 @@ pub mod resources;
 pub mod server;
 
 pub use model::{Backend, ReadOp, ReadOutput, Scope};
-pub use server::{GatewayOptions, INSTRUCTIONS, start};
+pub use server::{COMPACT_HIDDEN_TOOLS, GatewayOptions, INSTRUCTIONS, instructions, start};

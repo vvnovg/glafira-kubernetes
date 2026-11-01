@@ -7,9 +7,11 @@ use std::time::Duration;
 
 use glafira_mcp_core::{AuditLog, BackendError, Endpoint, Hooks, McpServerHandle, Session};
 use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::model::{
-    CacheScope, DiscoverResult, Implementation, InitializeRequestParams, InitializeResult,
-    ListToolsResult, PaginatedRequestParams, ProtocolVersion, ResultType, ServerCapabilities,
+    CacheScope, CallToolRequestParams, CallToolResponse, ContentBlock, DiscoverResult,
+    Implementation, InitializeRequestParams, InitializeResult, ListToolsResult,
+    PaginatedRequestParams, ProtocolVersion, ResultType, ServerCapabilities,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, tool_handler};
@@ -63,6 +65,41 @@ outside the cluster are never available here: ask the user for them.
 
 get_pod_logs, search_workload_logs and observe_workload are long operations: they run one at a time \
 in a session, and a second one waits in a queue for up to 60 seconds before it answers busy.";
+
+/// Инструменты записи (файл Glafira), которых нет у клиента с компактным набором (§10.4): их схемы
+/// — около четверти схем всех инструментов, а клиенту с локальной моделью они часто не нужны.
+pub const COMPACT_HIDDEN_TOOLS: [&str; 4] = [
+    "annotate",
+    "remove_annotation",
+    "propose_change",
+    "withdraw_proposal",
+];
+
+/// Фрагменты [`INSTRUCTIONS`] об инструментах записи и замена для компактного набора.
+const WRITE_TOOLS_TEXT: &str = "Nothing in the clusters can be changed through it: propose a \
+change with propose_change — the user sees it next to the object in Glafira, opens it as a \
+pre-filled form and applies or rejects it themselves. Do not wait for the result in the same call; \
+check the user's decision later with list_proposals. If a proposal comes back with readOnly: true, \
+ask the user to lift read-only for the connection in Glafira instead of looking for a workaround. \
+Deleting objects and changes other than the four kinds of propose_change can only be described in \
+the chat.";
+const COMPACT_WRITE_TEXT: &str = "Nothing in the clusters can be changed through it, and this \
+client has no tools for notes or change proposals: describe a needed change in the chat, and the \
+user applies it in Glafira.";
+const NOTES_TEXT: &str = " You can leave notes with annotate: the user sees them next to the \
+objects in Glafira (the clusters are not changed). Do not repeat findings as notes; add your \
+conclusions and link them with relatedRuleId.";
+
+/// Инструкции сервера клиенту: у компактного набора — без инструментов записи.
+pub fn instructions(compact: bool) -> String {
+    if compact {
+        INSTRUCTIONS
+            .replace(WRITE_TOOLS_TEXT, COMPACT_WRITE_TEXT)
+            .replace(NOTES_TEXT, "")
+    } else {
+        INSTRUCTIONS.to_string()
+    }
+}
 
 /// Сколько длительная операция (наблюдение, логи) ждёт в очереди сессии, пока идёт другая,
 /// прежде чем ответить `busy`. Клиенты (Claude Code) шлют вызовы пачкой, и второй должен
@@ -214,7 +251,12 @@ impl ServerHandler for KubeServer {
         context.peer.set_peer_info(request.clone());
         // Подтверждение запрашивается сразу, а не при первом вызове инструмента.
         self.session.initialized(request.client_info.clone());
-        self.negotiate_initialize(&request)
+        let mut result = self.negotiate_initialize(&request)?;
+        let view = self.session.identify(Some(request.client_info.clone()));
+        result.instructions = Some(instructions(
+            self.session.client_options(&view).compact_tools,
+        ));
+        Ok(result)
     }
 
     // MCP 2026-07-28 без `initialize` (так подключается Claude Code): клиент называет себя в
@@ -225,10 +267,46 @@ impl ServerHandler for KubeServer {
         context: RequestContext<RoleServer>,
     ) -> Result<DiscoverResult, ErrorData> {
         self.introduce(&context);
+        let mut info = self.get_info();
+        info.instructions = Some(instructions(self.compact(&context)));
         Ok(DiscoverResult::from_server_info(
             self.supported_protocol_versions().into_owned(),
-            self.get_info(),
+            info,
         ))
+    }
+
+    /// Как в `tool_handler` rmcp, но скрытые компактным набором инструменты не вызываются, аргументы
+    /// сначала приводятся к схеме, а ошибка их разбора подсказывает форму: слабая модель иначе
+    /// повторяет тот же вызов.
+    async fn call_tool(
+        &self,
+        mut request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        if self.compact(&context) && COMPACT_HIDDEN_TOOLS.contains(&request.name.as_ref()) {
+            return Err(ErrorData::invalid_params("tool not found", None));
+        }
+        let schema = self
+            .tool_router
+            .get(&request.name)
+            .map(|t| glafira_mcp_core::inline_refs(&t.input_schema));
+        if let (Some(schema), Some(args)) = (&schema, request.arguments.as_mut()) {
+            glafira_mcp_core::normalize_args(args, schema);
+        }
+        let tcc = ToolCallContext::new(self, request, context);
+        let mut response = self.tool_router.call(tcc).await?;
+        if let (Some(schema), CallToolResponse::Complete(result)) = (&schema, &mut response)
+            && result.is_error == Some(true)
+            && let Some(ContentBlock::Text(text)) = result.content.first_mut()
+            && text.text.starts_with("failed to deserialize parameters")
+        {
+            text.text = format!(
+                "{} Expected arguments (\"?\" marks optional, pass objects as JSON objects, not strings): {}",
+                text.text,
+                glafira_mcp_core::shape(schema)
+            );
+        }
+        Ok(response)
     }
 
     async fn list_tools(
@@ -237,6 +315,7 @@ impl ServerHandler for KubeServer {
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
         self.introduce(&context);
+        let compact = self.compact(&context);
         // Дальше — как в `tool_handler` rmcp.
         let hints = context
             .protocol_version()
@@ -247,6 +326,7 @@ impl ServerHandler for KubeServer {
                 .tool_router
                 .list_all()
                 .into_iter()
+                .filter(|t| !compact || !COMPACT_HIDDEN_TOOLS.contains(&t.name.as_ref()))
                 .map(|mut t| {
                     // Без `$ref`: локальные серверы моделей иначе отдают вложенные объекты строкой.
                     t.input_schema = Arc::new(glafira_mcp_core::inline_refs(&t.input_schema));
@@ -256,12 +336,19 @@ impl ServerHandler for KubeServer {
             meta: None,
             next_cursor: None,
             ttl_ms: hints.then_some(0),
-            cache_scope: hints.then_some(CacheScope::Public),
+            // Набор инструментов зависит от клиента (компактный набор).
+            cache_scope: hints.then_some(CacheScope::Private),
         })
     }
 }
 
 impl KubeServer {
+    /// Компактный ли набор инструментов у клиента запроса.
+    fn compact(&self, context: &RequestContext<RoleServer>) -> bool {
+        let view = self.session.identify(context.client_info());
+        self.session.client_options(&view).compact_tools
+    }
+
     /// Клиент из `_meta` запроса (или из `initialize`): известен — подтверждение запрашивается.
     fn introduce(&self, context: &RequestContext<RoleServer>) {
         if let Some(client) = context.client_info() {

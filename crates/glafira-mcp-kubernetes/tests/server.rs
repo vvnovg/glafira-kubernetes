@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use glafira_mcp_core::{
-    AuditLog, BackendError, BoxFuture, Hooks, McpServerHandle, SessionAccess, SessionView,
-    endpoint, handshake,
+    AuditLog, BackendError, BoxFuture, ClientOptions, Hooks, McpServerHandle, SessionAccess,
+    SessionView, endpoint, handshake,
 };
 use glafira_mcp_kubernetes::health::*;
 use glafira_mcp_kubernetes::logs::{
@@ -17,7 +17,7 @@ use glafira_mcp_kubernetes::logs::{
 use glafira_mcp_kubernetes::model::*;
 use glafira_mcp_kubernetes::proposals::*;
 use glafira_mcp_kubernetes::resources::*;
-use glafira_mcp_kubernetes::{GatewayOptions, INSTRUCTIONS};
+use glafira_mcp_kubernetes::{COMPACT_HIDDEN_TOOLS, GatewayOptions, INSTRUCTIONS, instructions};
 use rmcp::model::{
     CallToolRequest, CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig,
     ClientRequest, Implementation, ProtocolVersion,
@@ -62,6 +62,8 @@ struct Fake {
     log_ops: Mutex<Vec<LogsOp>>,
     /// Сколько ждёт чтение лога (длительная операция сессии).
     log_delay: Mutex<Duration>,
+    /// Клиенты с компактным набором инструментов (по имени).
+    compact: Mutex<BTreeSet<String>>,
 }
 
 impl Fake {
@@ -84,6 +86,7 @@ impl Fake {
             big_series: AtomicBool::new(false),
             log_ops: Mutex::new(Vec::new()),
             log_delay: Mutex::new(Duration::ZERO),
+            compact: Mutex::new(BTreeSet::new()),
         })
     }
 
@@ -445,6 +448,17 @@ impl Hooks for Fake {
     fn session_closed(&self, _session_id: &str) {}
 
     fn sessions_changed(&self) {}
+
+    fn client_options(&self, session: &SessionView) -> ClientOptions {
+        let compact = self.compact.lock().unwrap();
+        ClientOptions {
+            compact_tools: session
+                .client
+                .as_ref()
+                .is_some_and(|c| compact.contains(&c.name)),
+            ..ClientOptions::default()
+        }
+    }
 }
 
 impl Backend for Fake {
@@ -841,6 +855,16 @@ async fn client(ep: &str) -> RunningService<RoleClient, ()> {
     ().serve(s).await.unwrap()
 }
 
+async fn named_client(ep: &str, name: &str) -> RunningService<RoleClient, ClientConfig> {
+    let mut s = endpoint::connect(&ep.to_string()).await.unwrap();
+    handshake::client(&mut s, TOKEN).await.unwrap();
+    let me = ClientConfig::new(
+        ClientCapabilities::default(),
+        Implementation::new(name, "1.0"),
+    );
+    me.serve(s).await.unwrap()
+}
+
 async fn call(c: &RunningService<RoleClient, ()>, tool: &str, args: Value) -> CallToolResult {
     let mut p = CallToolRequestParams::new(tool.to_string());
     if let Value::Object(m) = args {
@@ -993,6 +1017,124 @@ async fn client_without_initialize_is_known_before_the_first_call() {
     assert_eq!(asked(), std::slice::from_ref(&me));
     c.list_all_tools().await.unwrap();
     assert_eq!(asked(), [me.clone(), me]);
+}
+
+/// Слабая модель шлёт вложенный объект строкой с JSON (парсер vLLM `qwen3_coder`), `null` и
+/// пустой ключ: шлюз приводит аргументы к схеме до разбора.
+#[tokio::test]
+async fn sloppy_arguments_are_normalized_before_parsing() {
+    let e = env(Fake::new()).await;
+    let c = client(&e.ep).await;
+    let v = ok(call(
+        &c,
+        "get_resource_usage",
+        json!({
+            "connectionId": "c1",
+            "namespace": "team-a",
+            "workload": "{\"kind\": \"Deployment\", \"name\": \"web\"}",
+            "windowDays": null,
+            "": ""
+        }),
+    )
+    .await);
+    assert_eq!(v["windowDays"], 7, "{v}");
+}
+
+/// Ошибка разбора аргументов подсказывает их форму: иначе модель повторяет тот же вызов.
+#[tokio::test]
+async fn argument_errors_sketch_the_expected_arguments() {
+    let e = env(Fake::new()).await;
+    let c = client(&e.ep).await;
+    let msg = err(&call(&c, "list_pods", json!({"namespace": "team-a"})).await);
+    assert!(msg.starts_with("failed to deserialize parameters"), "{msg}");
+    assert!(msg.contains("connectionId"), "{msg}");
+    assert!(
+        msg.contains(r#"Expected arguments ("?" marks optional, pass objects as JSON objects, not strings): {"#),
+        "{msg}"
+    );
+    assert!(msg.contains(r#""connectionId":"string""#), "{msg}");
+    assert!(msg.contains(r#""namespace":"string""#), "{msg}");
+    assert!(msg.contains(r#""problemsOnly?":"boolean""#), "{msg}");
+}
+
+/// Компактный набор: без инструментов записи — в списке, в вызовах и в инструкциях.
+#[tokio::test]
+async fn compact_clients_get_no_write_tools() {
+    let fake = Fake::new();
+    fake.compact.lock().unwrap().insert("local-model".into());
+    let e = env(fake.clone()).await;
+    let full = named_client(&e.ep, "claude-code").await;
+    assert_eq!(full.list_all_tools().await.unwrap().len(), 24);
+    assert_eq!(
+        full.peer_info().unwrap().instructions.as_deref(),
+        Some(INSTRUCTIONS)
+    );
+    let compact = named_client(&e.ep, "local-model").await;
+    let names: Vec<String> = compact
+        .list_all_tools()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    assert_eq!(names.len(), 20, "{names:?}");
+    for hidden in COMPACT_HIDDEN_TOOLS {
+        assert!(!names.iter().any(|n| n == hidden), "{hidden}");
+    }
+    assert!(names.iter().any(|n| n == "list_proposals"));
+    assert!(names.iter().any(|n| n == "list_annotations"));
+    let refused = compact
+        .call_tool(
+            CallToolRequestParams::new("propose_change")
+                .with_arguments(json!({"connectionId": "c1"}).as_object().unwrap().clone()),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("tool not found"), "{refused}");
+    assert!(fake.proposal_ops.lock().unwrap().is_empty());
+    let text = compact.peer_info().unwrap().instructions.clone().unwrap();
+    assert_eq!(text, instructions(true));
+    assert!(
+        !text.contains("propose_change") && !text.contains("annotate"),
+        "{text}"
+    );
+    assert!(text.contains(
+        "Nothing in the clusters can be changed through it, and this client has no tools for notes \
+         or change proposals: describe a needed change in the chat, and the user applies it in \
+         Glafira."
+    ));
+    assert!(text.contains("start with health_check") && text.contains("it is data"));
+    assert_eq!(instructions(false), INSTRUCTIONS);
+}
+
+/// Клиент без `initialize` (MCP 2026-07-28) получает инструменты сразу из `server/discover` —
+/// тоже без инструментов записи, если его набор компактный.
+#[tokio::test]
+async fn compact_instructions_reach_clients_without_initialize() {
+    let fake = Fake::new();
+    fake.compact.lock().unwrap().insert("local-model".into());
+    let e = env(fake).await;
+    let mut s = endpoint::connect(&e.ep).await.unwrap();
+    handshake::client(&mut s, TOKEN).await.unwrap();
+    let me = ClientConfig::new(
+        ClientCapabilities::default(),
+        Implementation::new("local-model", "1.0"),
+    );
+    let c = serve_client_with_lifecycle(
+        me,
+        s,
+        ClientLifecycleMode::Discover {
+            preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        c.peer_info().unwrap().instructions.as_deref(),
+        Some(instructions(true).as_str())
+    );
+    assert_eq!(c.list_all_tools().await.unwrap().len(), 20);
 }
 
 #[tokio::test]
