@@ -3405,6 +3405,46 @@ async fn proposals_are_checked_scoped_and_listed() {
     assert!(msg.starts_with("not_allowed"), "{msg}");
 }
 
+/// `null` в `setResources` значит «убрать значение»: нормализация аргументов его не теряет, а
+/// отсутствующее поле остаётся «оставить текущее».
+#[tokio::test]
+async fn set_resources_null_removes_the_value() {
+    let fake = Fake::new();
+    let e = env(fake.clone()).await;
+    let c = client(&e.ep).await;
+    let change = json!({"kind": "setResources", "namespace": "team-a",
+        "workload": {"kind": "Deployment", "name": "web"},
+        "containers": [{"name": "app", "limits": {"memory": null}, "requests": {"cpu": "250m"}}]});
+    ok(call(
+        &c,
+        "propose_change",
+        json!({"connectionId": "c1", "severity": "warning", "title": "Drop the memory limit",
+            "rationale": "r", "change": change}),
+    )
+    .await);
+    let ops = fake.proposal_ops.lock().unwrap();
+    let Some(ProposalOp::Propose { proposal, .. }) = ops.first() else {
+        panic!("{ops:?}");
+    };
+    let ChangeSpec::SetResources { containers, .. } = &proposal.change else {
+        panic!("{:?}", proposal.change);
+    };
+    assert_eq!(
+        containers[0].limits,
+        ResourceValuesSpec {
+            cpu: None,
+            memory: Some(None)
+        }
+    );
+    assert_eq!(
+        containers[0].requests,
+        ResourceValuesSpec {
+            cpu: Some(Some("250m".into())),
+            memory: None
+        }
+    );
+}
+
 #[tokio::test]
 async fn a_huge_env_value_is_masked_then_cut_and_the_describe_still_succeeds() {
     let e = env_over(odd(Mode::BigEnv)).await;

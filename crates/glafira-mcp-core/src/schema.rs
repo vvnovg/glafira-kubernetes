@@ -64,15 +64,21 @@ fn inline<'a>(
 
 /// Приводит аргументы к схеме без `$ref`, не меняя смысла: строка с JSON-объектом или массивом там,
 /// где схема строку не допускает, становится значением (парсер `qwen3_coder` присылает так вложенные
-/// объекты); `null` и пустой ключ убираются (поле с `null` — то же, что отсутствующее, у обязательного
-/// поля ошибка разбора остаётся). Остальные лишние ключи не трогаются: их пропускает serde.
+/// объекты); пустой ключ убирается всегда, `null` — там, где схема поля его не допускает или схемы
+/// у ключа нет (такое поле — то же, что отсутствующее, у обязательного поля ошибка разбора остаётся).
+/// `null`, который схема допускает, остаётся: у `setResources` он значит «убрать значение», а не
+/// «оставить текущее». Остальные лишние ключи не трогаются: их пропускает serde.
 pub fn normalize_args(args: &mut Map<String, Value>, schema: &Map<String, Value>) {
-    for (key, value) in args.iter_mut() {
-        if let Some(prop) = property(schema, key) {
+    args.retain(|key, value| {
+        if key.is_empty() {
+            return false;
+        }
+        let prop = property(schema, key);
+        if let Some(prop) = prop {
             normalize(value, prop);
         }
-    }
-    args.retain(|k, v| !k.is_empty() && !v.is_null());
+        !value.is_null() || prop.is_some_and(allows_null)
+    });
 }
 
 fn normalize(value: &mut Value, schema: &Map<String, Value>) {
@@ -123,6 +129,23 @@ fn allows_string(schema: &Map<String, Value>) -> bool {
             any.peek().is_none() || any.any(allows_string)
         }
     }
+}
+
+/// `null` допускает тип `"null"` (строкой или в массиве типов) или одна из ветвей `anyOf`/`oneOf`.
+/// Схема без типа `null` не допускает: убрать такой `null` безопаснее, чем передать его serde.
+fn allows_null(schema: &Map<String, Value>) -> bool {
+    let typed = match schema.get("type") {
+        Some(Value::String(t)) => t == "null",
+        Some(Value::Array(ts)) => ts.iter().any(|t| t == "null"),
+        _ => false,
+    };
+    typed
+        || ["anyOf", "oneOf"]
+            .into_iter()
+            .filter_map(|k| schema.get(k).and_then(Value::as_array))
+            .flatten()
+            .filter_map(Value::as_object)
+            .any(allows_null)
 }
 
 /// Набросок аргументов по схеме без `$ref` для подсказки при ошибке разбора:
@@ -328,19 +351,122 @@ mod tests {
             "connectionId": "c1",
             "": "",
             "limit": null,
+            "note": null,
+            "missing": null,
             "workload": "{not json",
             "filter": {"contains": null, "caseSensitive": true},
             "unknown": 1
         }));
         normalize_args(&mut args, &search_schema());
+        // `limit` и `filter.contains` допускают `null` — он остаётся; `note` (строка) и ключ без
+        // схемы его не допускают — убираются.
         assert_eq!(
             Value::Object(args),
             json!({
                 "connectionId": "c1",
+                "limit": null,
                 "workload": "{not json",
-                "filter": {"caseSensitive": true},
+                "filter": {"contains": null, "caseSensitive": true},
                 "unknown": 1
             })
+        );
+    }
+
+    fn resources_schema() -> Map<String, Value> {
+        let values = json!({
+            "type": "object",
+            "properties": {
+                "cpu": {"type": ["string", "null"]},
+                "memory": {"anyOf": [{"type": "string"}, {"oneOf": [{"type": "null"}]}]}
+            }
+        });
+        obj(json!({
+            "type": "object",
+            "properties": {
+                "containers": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "limits": values,
+                            "requests": {"allOf": [values]}
+                        }
+                    }
+                },
+                "replicas": {"type": "integer"},
+                "untyped": {"description": "Any value."}
+            }
+        }))
+    }
+
+    #[test]
+    fn nested_null_that_the_schema_allows_survives() {
+        let mut args = obj(json!({
+            "containers": [{"name": "app", "limits": {"memory": null, "cpu": null}}]
+        }));
+        normalize_args(&mut args, &resources_schema());
+        assert_eq!(
+            Value::Object(args),
+            json!({"containers": [{"name": "app", "limits": {"memory": null, "cpu": null}}]})
+        );
+    }
+
+    #[test]
+    fn null_that_the_schema_does_not_allow_is_removed() {
+        let mut args = obj(json!({
+            "replicas": null,
+            "untyped": null,
+            "containers": [{"name": null, "limits": {"memory": "1Gi"}}]
+        }));
+        normalize_args(&mut args, &resources_schema());
+        assert_eq!(
+            Value::Object(args),
+            json!({"containers": [{"limits": {"memory": "1Gi"}}]})
+        );
+    }
+
+    #[test]
+    fn json_string_stays_a_string_where_the_schema_allows_string_or_null() {
+        let mut args = obj(json!({
+            "containers": [{"name": "app", "limits": {"cpu": "{\"a\": 1}"}}],
+            "filter": {"contains": "[1, 2]"}
+        }));
+        normalize_args(&mut args, &resources_schema());
+        normalize_args(&mut args, &search_schema());
+        assert_eq!(
+            Value::Object(args),
+            json!({
+                "containers": [{"name": "app", "limits": {"cpu": "{\"a\": 1}"}}],
+                "filter": {"contains": "[1, 2]"}
+            })
+        );
+    }
+
+    #[test]
+    fn json_array_string_is_parsed_where_an_object_is_expected() {
+        // Правило не сверяет вид значения со схемой: массив там, где ждут объект, отклонит serde
+        // с понятной ошибкой разбора, а не с «ожидалась строка».
+        let mut args = obj(json!({"connectionId": "c1", "workload": "[1, 2]"}));
+        normalize_args(&mut args, &search_schema());
+        assert_eq!(
+            Value::Object(args),
+            json!({"connectionId": "c1", "workload": [1, 2]})
+        );
+    }
+
+    #[test]
+    fn properties_under_all_of_are_normalized() {
+        let mut args = obj(json!({
+            "containers": [{
+                "name": "app",
+                "requests": "{\"memory\": null, \"cpu\": \"250m\", \"gpu\": null}"
+            }]
+        }));
+        normalize_args(&mut args, &resources_schema());
+        assert_eq!(
+            Value::Object(args),
+            json!({"containers": [{"name": "app", "requests": {"memory": null, "cpu": "250m"}}]})
         );
     }
 
