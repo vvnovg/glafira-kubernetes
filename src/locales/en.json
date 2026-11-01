@@ -1158,7 +1158,7 @@
       "cluster.componentFailed": {
         "title": "DropApp components have failed",
         "details": "Components and Tools in failed or error state: {{names}} (total {{count}}).",
-        "fix": "The cause is in the events of the object: kubectl describe tool NAME (or component)."
+        "fix": "The cause is in the events of the object: kubectl describe tool NAME (or component NAME)."
       },
       "cluster.dropappNodeNotReady": {
         "title": "DropApp nodes are not ready",

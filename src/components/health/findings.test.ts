@@ -100,7 +100,7 @@ describe("findingTexts", () => {
       count: 1,
     });
     expect(findingTexts(components, t).details).toBe("Component и Tool в статусе failed или error: Tool grafana (всего 1).");
-    expect(findingTexts(components, t).fix).toBe("Причина — в событиях объекта: kubectl describe tool ИМЯ (или component).");
+    expect(findingTexts(components, t).fix).toBe("Причина — в событиях объекта: kubectl describe tool ИМЯ (или component ИМЯ).");
   });
 
   it("every rule and every variant has texts in both languages", () => {

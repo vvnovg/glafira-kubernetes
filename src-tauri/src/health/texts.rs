@@ -136,7 +136,7 @@ pub fn english(f: &Finding) -> (String, String) {
         "cluster.componentFailed" => (
             "DropApp components have failed".into(),
             format!(
-                "{} DropApp Component(s) or Tool(s) are in failed or error state: {}. The latest Warning event of each is in params; the cause is in the events of the object (kubectl describe tool NAME or component).",
+                "{} DropApp Component(s) or Tool(s) are in failed or error state: {}. The latest Warning event of each is in params; the cause is in the events of the object: kubectl describe tool NAME (or component NAME).",
                 param(f, "count"),
                 list(f, "names")
             ),
@@ -574,6 +574,12 @@ mod tests {
         assert!(
             details.starts_with(
                 "2 DropApp Component(s) or Tool(s) are in failed or error state: Component cert-manager, Tool grafana."
+            ),
+            "{details}"
+        );
+        assert!(
+            details.ends_with(
+                "the cause is in the events of the object: kubectl describe tool NAME (or component NAME)."
             ),
             "{details}"
         );

@@ -1178,7 +1178,7 @@
       "cluster.componentFailed": {
         "title": "Компоненты DropApp в сбое",
         "details": "Component и Tool в статусе failed или error: {{names}} (всего {{count}}).",
-        "fix": "Причина — в событиях объекта: kubectl describe tool ИМЯ (или component)."
+        "fix": "Причина — в событиях объекта: kubectl describe tool ИМЯ (или component ИМЯ)."
       },
       "cluster.dropappNodeNotReady": {
         "title": "Узлы DropApp не готовы",

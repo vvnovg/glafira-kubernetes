@@ -117,6 +117,20 @@ pub fn check(s: &ClusterSnapshot, out: &mut Findings) {
     }
 }
 
+/// Предел текста события в params: сообщение события пишет кто угодно, оно уходит в находку,
+/// MCP и отчёт.
+const MAX_EVENT_CHARS: usize = 1024;
+
+/// Текст события не длиннее `MAX_EVENT_CHARS` символов: длиннее — обрезается по символу, с «…».
+fn cap_event(event: &str) -> String {
+    if event.chars().count() <= MAX_EVENT_CHARS {
+        return event.to_string();
+    }
+    let mut cut: String = event.chars().take(MAX_EVENT_CHARS - 1).collect();
+    cut.push('…');
+    cut
+}
+
 /// Правила DropApp (спека O5 §7.2): списки — до `MAX_LISTED`, `count` — всех.
 fn dropapp(d: &DropAppSnap, out: &mut Findings) {
     let failed: Vec<_> = d
@@ -130,7 +144,7 @@ fn dropapp(d: &DropAppSnap, out: &mut Findings) {
             .iter()
             .map(|c| {
                 json!({ "kind": c.kind.as_str(), "name": c.name, "namespace": c.namespace,
-                    "status": c.status, "event": c.event })
+                    "status": c.status, "event": c.event.as_deref().map(cap_event) })
             })
             .collect();
         let names: Vec<_> = failed
@@ -357,6 +371,32 @@ mod tests {
             name: name.into(),
             status: status.map(String::from),
         }
+    }
+
+    /// Текст события в params — не длиннее 1024 символов: обрезается по символу, с «…».
+    #[test]
+    fn long_component_event_is_capped() {
+        let mut s = ClusterSnapshot::empty(NOW, PlatformKind::Dropapp);
+        let mut failed = component(ComponentKind::Tool, "grafana", Some("failed"));
+        failed.event = Some("ж".repeat(2000));
+        let mut short = component(ComponentKind::Tool, "loki", Some("failed"));
+        short.event = Some("я".repeat(1024));
+        s.dropapp = Some(DropAppSnap {
+            components: Some(vec![failed, short]),
+            nodes: Some(vec![]),
+            ingress_tls: Some(vec![]),
+        });
+        let v = run(&s, Environment::Prod);
+        let event = |i: usize| {
+            v[0].params["components"][i]["event"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let long = event(0);
+        assert_eq!(long.chars().count(), 1024);
+        assert!(long.ends_with("ж…"), "{long}");
+        assert_eq!(event(1), "я".repeat(1024), "ровно 1024 — без обрезки");
     }
 
     #[test]
