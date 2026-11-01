@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "glafira-kubernetes": {
+      "type": "stdio",
+      "command": "/Applications/Glafira for Kubernetes.app/Contents/MacOS/glafira-kubernetes",
+      "args": ["mcp"]
+    }
+  }
+}

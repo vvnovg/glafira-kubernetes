@@ -32,3 +32,5 @@ dev/kind/out/
 
 # Сборка крейтов MCP-шлюза
 /crates/*/target/
+dev/llm-eval/runs/
+__pycache__/

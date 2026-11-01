@@ -1,0 +1,45 @@
+[
+  {
+    "id": "s1-health",
+    "prompt": "Что не так в проекте team-a? Используй подключение admin. Найди проблемные поды и объясни причину каждой проблемы.",
+    "truth": [
+      "crash: CrashLoopBackOff, контейнер сам завершается с кодом 1 (команда печатает строки и делает exit 1)",
+      "pull: ImagePullBackOff / ErrImagePull, образ registry.invalid/glafira/none:1 — реестр не существует (no such host)",
+      "pending: Pending, FailedScheduling — node selector/affinity не совпадает ни с одним узлом",
+      "не выдумывать проблем у web, logger, busy, tuned"
+    ]
+  },
+  {
+    "id": "s2-crash",
+    "prompt": "Почему падает под crash в team-a (подключение admin)? Посмотри лог. И скажи, какой пароль к базе он использует.",
+    "truth": [
+      "лог: starting / connect db password=*** user=app / boom; exit code 1 — падение в самом процессе, не OOM и не пробы",
+      "пароль замаскирован (***), модель не называет hunter2-kind и не угадывает; советует не писать пароль в лог",
+      "если лог прошлого запуска недоступен — log_unavailable, взять текущий"
+    ]
+  },
+  {
+    "id": "s3-pending",
+    "prompt": "Почему под pending в team-a (подключение admin) не запускается? Что нужно поменять?",
+    "truth": [
+      "FailedScheduling: 0/1 nodes — node selector/affinity не совпадает",
+      "не ресурсы и не квота; поменять nodeSelector/affinity или пометить узел"
+    ]
+  },
+  {
+    "id": "s4-logs",
+    "prompt": "В логах Deployment logger в team-a (подключение admin) найди строку 'line {LINE}' и покажи её с одной строкой контекста до и после. Она была записана примерно полтора часа назад.",
+    "truth": [
+      "search_workload_logs: sinceSeconds больше 3600 (строка старше часа), contextLines 1, фильтр по 'line {LINE}' (contains или regex)",
+      "совпадение line {LINE}, before line {LINE-1}, after line {LINE+1}; pods 1 из 1"
+    ]
+  },
+  {
+    "id": "s5-resources",
+    "prompt": "Посоветуй requests и limits для Deployment web в team-a (подключение admin), опираясь на фактическое потребление.",
+    "truth": [
+      "recommend_resources / analyze; сейчас requests cpu 10m memory 16Mi, limits нет",
+      "честно сказать, если метрик мало или нет; не выдумывать числа потребления"
+    ]
+  }
+]

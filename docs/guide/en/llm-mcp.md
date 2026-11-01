@@ -16,6 +16,9 @@ connects by itself; if that needs a new sign-in, the assistant gets an error —
 
 If Glafira is not running, the client starts it and waits up to 30 seconds.
 
+If your organization forbids external LLM services, the assistant can work with a model on an organization server or
+on your computer — see [Local model](local-llm.md#where).
+
 ## Turn it on {#enable}
 
 1. Open [[ui:sidebar.settings]], section [[ui:settings.mcp.section]].
