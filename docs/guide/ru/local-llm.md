@@ -166,10 +166,16 @@ Glafira видит Qwen Code как клиента `qwen-cli-mcp-client-glafira-
 
 ## Claude Code {#claude-code}
 
-Claude Code работает с локальной моделью через Anthropic-совместимый адрес Ollama (или vLLM). Отдельной установки
-модели для него не нужно, достаточно переменных окружения:
+Claude Code работает с локальной моделью через Anthropic-совместимый адрес Ollama (или vLLM); для этого ему задают
+переменные окружения. Не записывайте их в профиль оболочки или в `env` файла `settings.json`: тогда на локальную
+модель переключатся все запуски Claude Code, в том числе работа с моделями Anthropic. Удобнее отдельная команда,
+например `~/bin/claude-local` (сделайте файл исполняемым), — обычный `claude` она не затрагивает:
 
 ```bash
+#!/bin/sh
+# Claude Code на локальной модели; обычный claude не затронут.
+# Своя конфигурация и история, чтобы выбор модели не попадал в основную.
+export CLAUDE_CONFIG_DIR="$HOME/.claude-local"
 export ANTHROPIC_BASE_URL=http://127.0.0.1:11434
 export ANTHROPIC_API_KEY=ollama
 export ANTHROPIC_AUTH_TOKEN=ollama
@@ -184,6 +190,7 @@ export ENABLE_TOOL_SEARCH=false
 export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 export DISABLE_TELEMETRY=1
 export DISABLE_ERROR_REPORTING=1
+exec claude "$@"
 ```
 
 - Адрес — без `/v1`. Все уровни моделей и субагенты указывают на локальную модель, иначе Claude Code обратится к
@@ -193,10 +200,11 @@ export DISABLE_ERROR_REPORTING=1
 - `ENABLE_TOOL_SEARCH=false` загружает инструменты Glafira сразу, как `alwaysLoadTools` у Qwen Code.
 - `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` отключает обновления, телеметрию, отчёты об ошибках и прочие обращения
   наружу. С ключом в `ANTHROPIC_API_KEY` вход в аккаунт не нужен.
-- Сервер Glafira подключается как обычно (см. [Подключение клиента](llm-mcp.md#connect-client)). Встроенные
-  инструменты стоит сузить до чтения файлов: `claude --tools "Read,Grep"`; инструменты Glafira можно разрешить без
+- Сервер Glafira подключается как обычно (см. [Подключение клиента](llm-mcp.md#connect-client)), только командой
+  `claude-local mcp add …`: у отдельной конфигурации свой список MCP-серверов. Встроенные
+  инструменты стоит сузить до чтения файлов: `claude-local --tools "Read,Grep"`; инструменты Glafira можно разрешить без
   вопросов: `--allowedTools "mcp__glafira-kubernetes"`.
-- В неинтерактивном режиме (`claude -p`) направьте ввод из `/dev/null`, иначе Claude Code ждёт ввода.
+- В неинтерактивном режиме (`claude-local -p`) направьте ввод из `/dev/null`, иначе Claude Code ждёт ввода.
 
 Claude Code подключается к Glafira как клиент `claude-code`.
 
@@ -239,7 +247,7 @@ Claude Code подключается к Glafira как клиент `claude-code
 ```bash
 sandbox-exec -f offline.sb curl -sS -m 5 https://ollama.com          # должно не соединиться
 sandbox-exec -f offline.sb qwen "Что не так в проекте team-a? Найди проблемные поды"
-sandbox-exec -f offline.sb claude -p "Что не так в проекте team-a? Найди проблемные поды" < /dev/null
+sandbox-exec -f offline.sb claude-local -p "Что не так в проекте team-a? Найди проблемные поды" < /dev/null
 ```
 
 Если клиент отвечает так же, как с сетью, ему для работы ничего, кроме локальной модели и Glafira, не нужно. Разработчики

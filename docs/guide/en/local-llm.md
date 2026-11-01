@@ -168,10 +168,16 @@ approval.
 
 ## Claude Code {#claude-code}
 
-Claude Code works with a local model through the Anthropic-compatible address of Ollama (or vLLM). It needs no separate
-model setup, only environment variables:
+Claude Code works with a local model through the Anthropic-compatible address of Ollama (or vLLM); it is pointed there
+with environment variables. Do not put them in your shell profile or in the `env` of `settings.json`: then every Claude
+Code launch switches to the local model, including your work with Anthropic models. A separate command is handier, for
+example `~/bin/claude-local` (make the file executable); it leaves the regular `claude` untouched:
 
 ```bash
+#!/bin/sh
+# Claude Code on a local model; the regular claude is untouched.
+# Its own configuration and history, so the model choice does not leak into the main one.
+export CLAUDE_CONFIG_DIR="$HOME/.claude-local"
 export ANTHROPIC_BASE_URL=http://127.0.0.1:11434
 export ANTHROPIC_API_KEY=ollama
 export ANTHROPIC_AUTH_TOKEN=ollama
@@ -186,6 +192,7 @@ export ENABLE_TOOL_SEARCH=false
 export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 export DISABLE_TELEMETRY=1
 export DISABLE_ERROR_REPORTING=1
+exec claude "$@"
 ```
 
 - The address has no `/v1`. All model tiers and subagents point to the local model; otherwise Claude Code calls models
@@ -195,10 +202,11 @@ export DISABLE_ERROR_REPORTING=1
 - `ENABLE_TOOL_SEARCH=false` loads the Glafira tools at once, like `alwaysLoadTools` in Qwen Code.
 - `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` turns off updates, telemetry, error reports and other outbound calls. With a
   key in `ANTHROPIC_API_KEY` no account sign-in is needed.
-- The Glafira server is added as usual (see [Connect a client](llm-mcp.md#connect-client)). Narrow the built-in tools
-  down to file reading: `claude --tools "Read,Grep"`; the Glafira tools can be allowed without prompts:
+- The Glafira server is added as usual (see [Connect a client](llm-mcp.md#connect-client)), only with
+  `claude-local mcp add …`: the separate configuration has its own list of MCP servers. Narrow the built-in tools
+  down to file reading: `claude-local --tools "Read,Grep"`; the Glafira tools can be allowed without prompts:
   `--allowedTools "mcp__glafira-kubernetes"`.
-- In non-interactive mode (`claude -p`), redirect input from `/dev/null`, otherwise Claude Code waits for input.
+- In non-interactive mode (`claude-local -p`), redirect input from `/dev/null`, otherwise Claude Code waits for input.
 
 Claude Code connects to Glafira as the client `claude-code`.
 
@@ -241,7 +249,7 @@ computer itself (localhost) and local sockets, which Ollama and Glafira use. A p
 ```bash
 sandbox-exec -f offline.sb curl -sS -m 5 https://ollama.com          # must fail to connect
 sandbox-exec -f offline.sb qwen "What is wrong in project team-a? Find the problem pods"
-sandbox-exec -f offline.sb claude -p "What is wrong in project team-a? Find the problem pods" < /dev/null
+sandbox-exec -f offline.sb claude-local -p "What is wrong in project team-a? Find the problem pods" < /dev/null
 ```
 
 If the client answers the same way as with a network, it needs nothing but the local model and Glafira. Glafira's
