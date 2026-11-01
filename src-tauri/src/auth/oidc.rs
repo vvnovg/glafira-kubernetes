@@ -18,7 +18,7 @@ use crate::k8s::errors::chain_text;
 use crate::secrets::{
     OIDC_CLIENT_SECRET, OIDC_ID_TOKEN, OIDC_REFRESH_TOKEN, SecretStore, secret_key,
 };
-use crate::storage::profile::{AuthConfig, ConnectionProfile, OidcAuth};
+use crate::storage::profile::{AuthConfig, ConnectionProfile, OidcAuth, pem_certificates};
 
 /// Порты возврата по порядку — те же, что у kubelogin: они есть у клиента `dapp` DropApp.
 pub const OIDC_PORTS: [u16; 2] = [8000, 18000];
@@ -57,10 +57,35 @@ impl std::fmt::Debug for OidcTokens {
 }
 
 /// HTTP-клиент к издателю — как к OAuth-серверу OpenShift (CA профиля добавляется к системным
-/// корням, прокси и TLS профиля); переадресации не выполняются: форма с кодом и секретом
-/// клиента уходит только на `token_endpoint`.
+/// корням, прокси и TLS профиля); к ним добавляется и CA издателя (`issuer_ca_pem`): сертификат
+/// Dex за ingress DropApp выпущен не CA API-сервера. Переадресации не выполняются: форма с кодом
+/// и секретом клиента уходит только на `token_endpoint`.
 pub fn http_client(p: &ConnectionProfile) -> AppResult<reqwest::Client> {
-    http_client_with(p, |b| b.redirect(reqwest::redirect::Policy::none()))
+    let issuer_ca = match &p.auth {
+        AuthConfig::Oidc(OidcAuth {
+            issuer_ca_pem: Some(pem),
+            ..
+        }) => {
+            let bad_pem = || {
+                app_err!(
+                    ErrorCode::InvalidInput,
+                    "errors.oidc.issuerCaInvalid",
+                    "The OIDC issuer CA certificate must be in PEM format (-----BEGIN CERTIFICATE-----)"
+                )
+            };
+            pem_certificates(pem)
+                .map_err(|_| bad_pem())?
+                .iter()
+                .map(|der| reqwest::Certificate::from_der(der))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| bad_pem())?
+        }
+        _ => Vec::new(),
+    };
+    http_client_with(p, |b| {
+        b.redirect(reqwest::redirect::Policy::none())
+            .tls_certs_merge(issuer_ca)
+    })
 }
 
 fn no_metadata(url: &str) -> AppError {
@@ -436,7 +461,7 @@ mod tests {
     use super::*;
     use crate::auth::oauth::tests::{fake_server, plain_client, test_profile};
     use crate::secrets::MemoryStore;
-    use crate::storage::profile::sample_oidc;
+    use crate::storage::profile::{CaConfig, sample_oidc};
 
     /// `id_token` без подписи: заголовок, данные (`claims`) и подпись-заглушка.
     fn jwt(claims: serde_json::Value) -> String {
@@ -570,6 +595,166 @@ mod tests {
                 .unwrap_err()
                 .key,
             "errors.oidc.noMetadata"
+        );
+    }
+
+    /// CA издателя в тестах: им подписан сертификат `testdata/issuer-cert.pem` для 127.0.0.1.
+    const ISSUER_CA_PEM: &str = include_str!("testdata/issuer-ca.pem");
+
+    /// Элемент DER: тег, длина (до 65535 байт) и содержимое.
+    fn der(tag: u8, content: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag];
+        match content.len() {
+            n @ 0..=127 => out.push(n as u8),
+            n @ 128..=255 => out.extend([0x81, n as u8]),
+            n => out.extend([0x82, (n >> 8) as u8, n as u8]),
+        }
+        out.extend_from_slice(content);
+        out
+    }
+
+    /// Сертификат издателя, действующий сейчас. macOS не принимает сертификат TLS-сервера сроком
+    /// больше 825 дней, а фикстура с коротким сроком однажды истечёт: срок `issuer-cert.pem`
+    /// заменяется на «вчера — через 30 дней», и сертификат заново подписывается ключом CA.
+    fn issuer_cert_der() -> Vec<u8> {
+        use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+
+        let cert =
+            crate::storage::profile::pem_certificates(include_str!("testdata/issuer-cert.pem"))
+                .unwrap()
+                .remove(0);
+        // Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signature }; у обоих
+        // SEQUENCE двухбайтная длина (30 82 hi lo).
+        let tbs_end = 8 + usize::from(u16::from_be_bytes([cert[6], cert[7]]));
+        let mut tbs = cert[4..tbs_end].to_vec();
+        let algorithm = cert[tbs_end..tbs_end + 2 + usize::from(cert[tbs_end + 1])].to_vec();
+        // Validity ::= SEQUENCE { notBefore UTCTime, notAfter UTCTime }: 30 1e 17 0d … 17 0d ….
+        let at = tbs
+            .windows(4)
+            .position(|w| w == [0x30, 0x1e, 0x17, 0x0d])
+            .unwrap();
+        let now = time::OffsetDateTime::now_utc();
+        for (offset, t) in [
+            (4, now - Duration::from_secs(86_400)),
+            (19, now + Duration::from_secs(30 * 86_400)),
+        ] {
+            let utc = format!(
+                "{:02}{:02}{:02}{:02}{:02}{:02}Z",
+                t.year() % 100,
+                u8::from(t.month()),
+                t.day(),
+                t.hour(),
+                t.minute(),
+                t.second()
+            );
+            tbs[at + offset..at + offset + 13].copy_from_slice(utc.as_bytes());
+        }
+        let key = pem::parse(include_str!("testdata/issuer-ca-key.pem")).unwrap();
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.into_contents()));
+        let signer = rustls::crypto::ring::sign::any_ecdsa_type(&key)
+            .unwrap()
+            .choose_scheme(&[rustls::SignatureScheme::ECDSA_NISTP256_SHA256])
+            .unwrap();
+        let mut signature = vec![0];
+        signature.extend(signer.sign(&tbs).unwrap());
+        let mut body = tbs;
+        body.extend(algorithm);
+        body.extend(der(0x03, &signature));
+        der(0x30, &body)
+    }
+
+    /// Издатель на TLS с сертификатом от `ISSUER_CA_PEM`, как Dex за ingress DropApp: на каждый
+    /// запрос отвечает метаданными. Соединения обслуживаются по одному; клиент, не доверяющий
+    /// сертификату, рвёт рукопожатие — сервер переходит к следующему. Возвращает адрес издателя.
+    fn tls_issuer() -> String {
+        use std::io::{Read, Write};
+
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+
+        crate::tls::ensure_crypto_provider();
+        let chain = vec![CertificateDer::from(issuer_cert_der())];
+        let key = pem::parse(include_str!("testdata/issuer-key.pem")).unwrap();
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.into_contents()));
+        let config = Arc::new(
+            rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(chain, key)
+                .unwrap(),
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let issuer = format!("https://{}/dex", listener.local_addr().unwrap());
+        let body = serde_json::json!({
+            "issuer": issuer,
+            "authorization_endpoint": format!("{issuer}/auth"),
+            "token_endpoint": format!("{issuer}/token"),
+        })
+        .to_string();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else {
+                    return;
+                };
+                let conn = rustls::ServerConnection::new(config.clone()).unwrap();
+                let mut tls = rustls::StreamOwned::new(conn, stream);
+                let (mut request, mut chunk) = (Vec::new(), [0u8; 4096]);
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match tls.read(&mut chunk) {
+                        Ok(n) if n > 0 => request.extend_from_slice(&chunk[..n]),
+                        _ => break,
+                    }
+                }
+                if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = tls.write_all(resp.as_bytes());
+                    tls.conn.send_close_notify();
+                    let _ = tls.flush();
+                }
+            }
+        });
+        issuer
+    }
+
+    #[tokio::test]
+    async fn issuer_ca_is_trusted_besides_the_connection_ca() {
+        let issuer_url = tls_issuer();
+        let with = |issuer_ca_pem: Option<&str>, ca: CaConfig| {
+            let mut p = test_profile();
+            p.ca = ca;
+            p.auth = AuthConfig::Oidc(OidcAuth {
+                issuer_ca_pem: issuer_ca_pem.map(String::from),
+                ..auth(&issuer_url)
+            });
+            p
+        };
+        // Сертификат издателя выпущен не CA подключения: без CA издателя — ошибка TLS с адресом.
+        let http = http_client(&with(None, CaConfig::System)).unwrap();
+        let e = fetch_metadata(&http, &issuer_url).await.unwrap_err();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (ErrorCode::TlsError, "errors.k8s.caUntrusted")
+        );
+        assert!(e.details.unwrap().contains(&issuer_url), "адрес издателя");
+        // CA издателя добавляется к CA подключения, а не заменяет его.
+        let connection_ca = CaConfig::Pem {
+            pem: crate::storage::profile::TEST_CERT_PEM.into(),
+        };
+        for p in [
+            with(Some(ISSUER_CA_PEM), CaConfig::System),
+            with(Some(ISSUER_CA_PEM), connection_ca),
+        ] {
+            let http = http_client(&p).unwrap();
+            let m = fetch_metadata(&http, &issuer_url).await.unwrap();
+            assert_eq!(m.token_endpoint, format!("{issuer_url}/token"));
+        }
+        // Профиль, записанный в обход проверки: CA издателя не PEM — ошибка ввода.
+        assert_eq!(
+            http_client(&with(Some("nope"), CaConfig::System))
+                .unwrap_err()
+                .key,
+            "errors.oidc.issuerCaInvalid"
         );
     }
 

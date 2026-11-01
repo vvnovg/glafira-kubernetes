@@ -38,12 +38,32 @@ pub enum ImportAuth {
 
 /// Вход через OIDC из аргументов exec-плагина. Секрета клиента здесь нет — только признак:
 /// предпросмотр уходит в webview, а применение берёт секрет из файла заново.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OidcImport {
     #[serde(flatten)]
     pub auth: OidcAuth,
     pub has_client_secret: bool,
+    /// CA издателя из `--certificate-authority` не прочитан: вход через OIDC остаётся, но без CA.
+    pub issuer_ca_warning: Option<LocalizedText>,
+}
+
+/// Вход через OIDC из аргументов kubelogin: издатель, клиент и scopes, секрет клиента и источник
+/// CA издателя (файл читает предпросмотр). Секрет не печатается: `Debug` нет.
+#[derive(Clone)]
+pub struct OidcLogin {
+    pub auth: OidcAuth,
+    pub client_secret: Option<String>,
+    pub issuer_ca: Option<IssuerCa>,
+}
+
+/// CA издателя в аргументах kubelogin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssuerCa {
+    /// `--certificate-authority-data=<base64>`.
+    Data(String),
+    /// `--certificate-authority=<путь>`; относительный — от каталога kubeconfig.
+    File(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -200,9 +220,10 @@ fn exec_auth(
 /// Вход через OIDC из exec-плагина int128/kubelogin (`kubelogin get-token …` или
 /// `kubectl oidc-login get-token …`) с `--oidc-issuer-url` (спека O5 §5.4): издатель, client id
 /// (нет — `dapp`), scopes (`openid` и `--oidc-extra-scope`; нет ни одного — scopes DropApp) и
-/// секрет клиента. Ключ и значение — `--k=v` или `--k v`, у повторённого ключа — последнее значение.
-/// Azure kubelogin (`--login`, `--server-id`) — не вход через OIDC.
-pub fn oidc_login(command: &str, args: &[String]) -> Option<(OidcAuth, Option<String>)> {
+/// секрет клиента, CA издателя (`--certificate-authority-data` важнее `--certificate-authority`,
+/// как `*-data` в kubeconfig). Ключ и значение — `--k=v` или `--k v`, у повторённого ключа —
+/// последнее значение. Azure kubelogin (`--login`, `--server-id`) — не вход через OIDC.
+pub fn oidc_login(command: &str, args: &[String]) -> Option<OidcLogin> {
     let start = match crate::auth::exec::command_name(command).as_str() {
         "kubelogin" => args.iter().position(|a| a == "get-token")? + 1,
         "kubectl" if args.len() >= 2 && args[0] == "oidc-login" && args[1] == "get-token" => 2,
@@ -223,7 +244,12 @@ pub fn oidc_login(command: &str, args: &[String]) -> Option<(OidcAuth, Option<St
         }
         if !matches!(
             key,
-            "oidc-issuer-url" | "oidc-client-id" | "oidc-client-secret" | "oidc-extra-scope"
+            "oidc-issuer-url"
+                | "oidc-client-id"
+                | "oidc-client-secret"
+                | "oidc-extra-scope"
+                | "certificate-authority"
+                | "certificate-authority-data"
         ) {
             continue;
         }
@@ -257,12 +283,56 @@ pub fn oidc_login(command: &str, args: &[String]) -> Option<(OidcAuth, Option<St
         issuer_url,
         client_id: last("oidc-client-id").unwrap_or_else(|| DEFAULT_OIDC_CLIENT_ID.to_string()),
         scopes,
+        issuer_ca_pem: None,
     };
-    Some((auth, last("oidc-client-secret")))
+    let issuer_ca = last("certificate-authority-data")
+        .map(IssuerCa::Data)
+        .or_else(|| last("certificate-authority").map(IssuerCa::File));
+    Some(OidcLogin {
+        auth,
+        client_secret: last("oidc-client-secret"),
+        issuer_ca,
+    })
+}
+
+/// PEM CA издателя: данные декодируются, файл читается (относительный путь — от каталога
+/// kubeconfig `base`). Ошибка — предупреждение с путём (у данных — именем аргумента).
+fn issuer_ca_pem(ca: &IssuerCa, base: Option<&Path>) -> Result<String, LocalizedText> {
+    let (path, text) = match ca {
+        IssuerCa::Data(data) => (
+            "--certificate-authority-data".to_string(),
+            STANDARD
+                .decode(data.trim())
+                .ok()
+                .and_then(|b| String::from_utf8(b).ok())
+                .ok_or_else(|| "not valid base64".to_string()),
+        ),
+        IssuerCa::File(file) => {
+            let path = match base {
+                Some(dir) if Path::new(file).is_relative() => dir.join(file),
+                _ => PathBuf::from(file),
+            };
+            let text = std::fs::read_to_string(&path).map_err(|e| e.to_string());
+            (path.display().to_string(), text)
+        }
+    };
+    text.and_then(|pem| {
+        pem_certificates(&pem)
+            .map(|_| pem)
+            .map_err(|_| "not a PEM certificate".to_string())
+    })
+    .map_err(|error| {
+        ltext!(
+            "errors.kubeconfig.issuerCaUnreadable",
+            "Cannot read the OIDC issuer CA {{path}}: {{error}} — the connection is imported without it; add it in the connection form",
+            path = path,
+            error = error
+        )
+    })
 }
 
 /// Вход через OIDC пользователя kubeconfig (его exec-плагин), если он есть.
-fn oidc_of(u: Option<&AuthInfo>) -> Option<(OidcAuth, Option<String>)> {
+fn oidc_of(u: Option<&AuthInfo>) -> Option<OidcLogin> {
     let exec = u?.exec.as_ref()?;
     oidc_login(
         exec.command.as_deref().unwrap_or_default(),
@@ -329,9 +399,19 @@ pub fn preview(
             let insecure = cl.and_then(|c| c.insecure_skip_tls_verify).unwrap_or(false);
             let u = user(kc, &user_name);
             let (mut auth, mut exec, mut unsupported) = classify(u, path.parent(), resolve);
-            let oidc = oidc_of(u).map(|(auth, secret)| OidcImport {
-                auth,
-                has_client_secret: secret.is_some(),
+            let oidc = oidc_of(u).map(|login| {
+                let mut auth = login.auth;
+                let mut issuer_ca_warning = None;
+                match login.issuer_ca.map(|ca| issuer_ca_pem(&ca, path.parent())) {
+                    Some(Ok(pem)) => auth.issuer_ca_pem = Some(pem),
+                    Some(Err(warning)) => issuer_ca_warning = Some(warning),
+                    None => {}
+                }
+                OidcImport {
+                    auth,
+                    has_client_secret: login.client_secret.is_some(),
+                    issuer_ca_warning,
+                }
             });
             // Exec-плагин входа через OIDC — второй вариант: его отказ (команды нет на машине,
             // неизвестный `apiVersion`, запрет политикой) входу через OIDC не мешает.
@@ -529,10 +609,17 @@ pub fn import_context(
                 .ok_or_else(|| mismatch(name, "exec without a launch line"))?,
         ),
         ImportAuth::Oidc => {
-            let (auth, secret) =
+            let login =
                 oidc_of(u).ok_or_else(|| mismatch(name, "OIDC without kubelogin arguments"))?;
-            oidc_client_secret = secret;
-            AuthConfig::Oidc(auth)
+            oidc_client_secret = login.client_secret;
+            // CA издателя прочитан предпросмотром: у `import_context` нет пути к kubeconfig.
+            AuthConfig::Oidc(OidcAuth {
+                issuer_ca_pem: preview
+                    .oidc
+                    .as_ref()
+                    .and_then(|o| o.auth.issuer_ca_pem.clone()),
+                ..login.auth
+            })
         }
     };
     let mut profile = ConnectionProfile {
@@ -914,6 +1001,7 @@ contexts:
                 issuer_url: "https://sso.corp/realms/k8s".into(),
                 client_id: "k8s".into(),
                 scopes: DEFAULT_OIDC_SCOPES.map(String::from).to_vec(),
+                issuer_ca_pem: None,
             })
         );
         assert!(oidc.token.is_none() && oidc.client_key.is_none());
@@ -1055,8 +1143,12 @@ contexts:
 
     #[test]
     fn oidc_login_reads_kubelogin_arguments() {
-        // `--k=v` и `--k v`, scope повторяемый и через запятую, секрет клиента.
-        let (auth, secret) = oidc_login(
+        // `--k=v` и `--k v`, scope повторяемый и через запятую, секрет клиента, CA издателя.
+        let OidcLogin {
+            auth,
+            client_secret: secret,
+            issuer_ca,
+        } = oidc_login(
             "/usr/local/bin/kubectl",
             &args(&[
                 "oidc-login",
@@ -1081,16 +1173,32 @@ contexts:
             ["openid", "email", "groups", "profile", "offline_access"]
         );
         assert_eq!(secret.as_deref(), Some("s3cr3t"));
+        assert_eq!(issuer_ca, Some(IssuerCa::File("/x/ca.pem".into())));
+        assert_eq!(auth.issuer_ca_pem, None, "файл читает предпросмотр");
 
-        // Без client id и scope — значения DropApp; секрета нет.
-        let (auth, secret) = oidc_login(
+        // Без client id и scope — значения DropApp; секрета и CA нет.
+        let login = oidc_login(
             "kubelogin",
             &args(&["-v", "4", "get-token", "--oidc-issuer-url=https://sso.corp"]),
         )
         .unwrap();
-        assert_eq!(auth.client_id, DEFAULT_OIDC_CLIENT_ID);
-        assert_eq!(auth.scopes, DEFAULT_OIDC_SCOPES);
-        assert_eq!(secret, None);
+        assert_eq!(login.auth.client_id, DEFAULT_OIDC_CLIENT_ID);
+        assert_eq!(login.auth.scopes, DEFAULT_OIDC_SCOPES);
+        assert_eq!((login.client_secret, login.issuer_ca), (None, None));
+
+        // CA данными важнее CA файлом, как `certificate-authority-data` в kubeconfig.
+        let login = oidc_login(
+            "kubelogin",
+            &args(&[
+                "get-token",
+                "--oidc-issuer-url=https://sso.corp",
+                "--certificate-authority",
+                "ca.pem",
+                "--certificate-authority-data=QUJD",
+            ]),
+        )
+        .unwrap();
+        assert_eq!(login.issuer_ca, Some(IssuerCa::Data("QUJD".into())));
 
         // Не OIDC: без издателя, Azure kubelogin, другая команда или подкоманда.
         for (command, list) in [
@@ -1187,6 +1295,7 @@ contexts:
                 issuer_url: "https://auth.c1.example.com".into(),
                 client_id: "dapp".into(),
                 scopes: vec!["openid".into(), "groups".into()],
+                issuer_ca_pem: None,
             })
         );
         assert_eq!(
@@ -1201,6 +1310,101 @@ contexts:
         // Azure kubelogin варианта OIDC не даёт.
         let aks = &p.contexts[1];
         assert_eq!((aks.auth, aks.oidc.clone()), (ImportAuth::Exec, None));
+    }
+
+    /// Kubeconfig с `--certificate-authority` у `oidc-login`: относительный путь — от каталога
+    /// kubeconfig, данные — base64; нечитаемый CA вход через OIDC не отменяет — предупреждение с
+    /// путём, а подключение импортируется без CA издателя.
+    #[test]
+    fn issuer_ca_comes_from_the_oidc_login_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("dex-ca.crt"), TEST_CERT_PEM).unwrap();
+        let user = |name: &str, ca: &str| {
+            format!(
+                r#"
+- name: {name}
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1
+      command: kubectl
+      args: [oidc-login, get-token, --oidc-issuer-url=https://dex.c1.example.com, "{ca}"]"#
+            )
+        };
+        let k = kc(&format!(
+            r#"
+clusters:
+- name: c1
+  cluster: {{server: "https://api.c1.example.com:6443"}}
+users:{}{}{}{}
+contexts:
+- name: file
+  context: {{cluster: c1, user: file}}
+- name: data
+  context: {{cluster: c1, user: data}}
+- name: missing
+  context: {{cluster: c1, user: missing}}
+- name: not-pem
+  context: {{cluster: c1, user: not-pem}}
+"#,
+            user("file", "--certificate-authority=dex-ca.crt"),
+            user(
+                "data",
+                &format!("--certificate-authority-data={}", b64(TEST_CERT_PEM))
+            ),
+            user("missing", "--certificate-authority=missing.crt"),
+            user(
+                "not-pem",
+                &format!("--certificate-authority-data={}", b64("nope"))
+            ),
+        ));
+        let path = dir.path().join("config");
+        let p = preview(&k, &path, &[], &open(), &installed);
+        let ctx = |n: &str| p.contexts.iter().find(|c| c.name == n).unwrap();
+        for name in ["file", "data"] {
+            let c = ctx(name);
+            let oidc = c.oidc.as_ref().unwrap();
+            assert_eq!(
+                oidc.auth.issuer_ca_pem.as_deref(),
+                Some(TEST_CERT_PEM),
+                "{name}"
+            );
+            assert_eq!(oidc.issuer_ca_warning, None, "{name}");
+            let imported = import_context(&k, name, c).unwrap();
+            let AuthConfig::Oidc(auth) = &imported.profile.auth else {
+                panic!("oidc")
+            };
+            assert_eq!(auth.issuer_ca_pem.as_deref(), Some(TEST_CERT_PEM), "{name}");
+        }
+        let missing = dir.path().join("missing.crt").display().to_string();
+        for (name, shown) in [
+            ("missing", missing.as_str()),
+            ("not-pem", "--certificate-authority-data"),
+        ] {
+            let c = ctx(name);
+            assert_eq!(
+                (c.auth, c.unsupported.clone()),
+                (ImportAuth::Oidc, None),
+                "{name}"
+            );
+            let oidc = c.oidc.as_ref().unwrap();
+            assert_eq!(oidc.auth.issuer_ca_pem, None, "{name}");
+            let warning = oidc.issuer_ca_warning.as_ref().unwrap();
+            assert_eq!(
+                warning.key, "errors.kubeconfig.issuerCaUnreadable",
+                "{name}"
+            );
+            assert_eq!(warning.params["path"], shown, "{name}");
+            let imported = import_context(&k, name, c).unwrap();
+            let AuthConfig::Oidc(auth) = &imported.profile.auth else {
+                panic!("oidc")
+            };
+            assert_eq!(auth.issuer_ca_pem, None, "{name}");
+        }
+        let json = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            json["contexts"][2]["oidc"]["issuerCaWarning"]["key"],
+            "errors.kubeconfig.issuerCaUnreadable"
+        );
     }
 
     #[test]

@@ -57,6 +57,8 @@ export interface OidcAuth {
   issuerUrl: string;
   clientId: string;
   scopes: string[];
+  /** CA сертификата издателя (PEM), если его выпустил не CA API-сервера (у DropApp — CA ingress). */
+  issuerCaPem?: string | null;
 }
 
 export type AuthConfig =
@@ -250,7 +252,7 @@ export interface KubeContext {
    */
   launchFingerprint?: string;
   /** Вход через OIDC из аргументов exec-плагина (`auth: "oidc"`); секрета клиента нет — только признак. */
-  oidc: (OidcAuth & { hasClientSecret: boolean }) | null;
+  oidc: (OidcAuth & { hasClientSecret: boolean; issuerCaWarning: LocalizedText | null }) | null;
   /** Почему у контекста с входом через OIDC нельзя выбрать exec-плагин; null — можно. */
   execUnsupported: LocalizedText | null;
   /** Почему контекст нельзя импортировать; null — можно. */

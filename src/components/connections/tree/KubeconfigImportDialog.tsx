@@ -203,6 +203,7 @@ export function KubeconfigImportDialog({ initialTargetId, onClose, onImported }:
                       />
                       {t("kubeconfig.useExec")}
                     </label>
+                    {c.oidc.issuerCaWarning && <p className="warn">{tr(c.oidc.issuerCaWarning)}</p>}
                     {c.execUnsupported && <p className="muted">{tr(c.execUnsupported)}</p>}
                   </div>
                 )}

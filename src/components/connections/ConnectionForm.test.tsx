@@ -373,6 +373,32 @@ describe("ConnectionForm", () => {
     );
   });
 
+  it("вход через OIDC: CA издателя — необязательный PEM с подсказкой, пустой не отправляется", async () => {
+    const d1: ConnectionProfile = {
+      ...newProfile(),
+      id: "d1",
+      name: "dropapp",
+      auth: { method: "oidc", issuerUrl: "https://dex.c1.example.com", clientId: "dapp", scopes: ["openid"], issuerCaPem: "OLD-PEM" },
+    };
+    vi.mocked(api.saveConnection).mockResolvedValue(d1);
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionForm initial={d1} tabId="connection-form:d1" />);
+    const ca = screen.getByLabelText("CA издателя (PEM)");
+    expect(ca).toHaveValue("OLD-PEM");
+    expect(ca).toHaveAttribute("placeholder", "-----BEGIN CERTIFICATE-----");
+    expect(screen.getByText("Нужен, если сертификат Dex выпущен другим CA, чем API-сервер (часто — CA ingress)")).toBeInTheDocument();
+    await user.clear(ca);
+    await user.type(ca, "NEW-PEM");
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(api.saveConnection).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(api.saveConnection).mock.calls[0][0].auth).toEqual({ ...d1.auth, issuerCaPem: "NEW-PEM" });
+    await user.clear(ca);
+    await user.type(ca, "  ");
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(api.saveConnection).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(api.saveConnection).mock.calls[1][0].auth).not.toHaveProperty("issuerCaPem");
+  });
+
   it("вход через OIDC: сохранённое подключение — пустой секрет не меняется, способ сохраняет поля при переключении", async () => {
     const d1: ConnectionProfile = {
       ...newProfile(),

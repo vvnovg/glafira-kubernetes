@@ -48,6 +48,11 @@ pub struct OidcAuth {
     pub issuer_url: String,
     pub client_id: String,
     pub scopes: Vec<String>,
+    /// CA сертификата издателя (PEM), если его выпустил не CA API-сервера (у DropApp — CA
+    /// ingress): добавляется к системным корням и CA подключения. Не секрет, как сертификат
+    /// клиента.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer_ca_pem: Option<String>,
 }
 
 /// Exec-плагин: что и как запускать. Секретные значения (переменные окружения вроде
@@ -346,6 +351,7 @@ pub fn normalize_profile(p: &mut ConnectionProfile) {
             *s = s.trim().to_string();
             !s.is_empty() && seen.insert(s.clone())
         });
+        o.issuer_ca_pem = o.issuer_ca_pem.take().filter(|pem| !pem.trim().is_empty());
     }
     p.tls_server_name = p
         .tls_server_name
@@ -686,7 +692,8 @@ fn validate_metrics(e: &MetricsEndpoint) -> AppResult<()> {
 }
 
 /// Вход через OIDC: адрес издателя https (http — только для 127.0.0.1 и localhost: тесты и
-/// имитация) без имени и пароля и без запроса, client id и scope `openid`.
+/// имитация) без имени и пароля и без запроса, client id, scope `openid` и CA издателя в PEM без
+/// приватного ключа.
 fn validate_oidc(o: &OidcAuth) -> AppResult<()> {
     let bad = || {
         invalid(ltext!(
@@ -718,6 +725,20 @@ fn validate_oidc(o: &OidcAuth) -> AppResult<()> {
             "errors.oidc.openidScopeMissing",
             "The OIDC scopes must include openid"
         )));
+    }
+    if let Some(pem) = &o.issuer_ca_pem {
+        if pem_has_private_key(pem) {
+            return Err(invalid(ltext!(
+                "errors.connections.pemContainsKey",
+                "A certificate field contains a private key — put the key into the key field"
+            )));
+        }
+        if pem_certificates(pem).is_err() {
+            return Err(invalid(ltext!(
+                "errors.oidc.issuerCaInvalid",
+                "The OIDC issuer CA certificate must be in PEM format (-----BEGIN CERTIFICATE-----)"
+            )));
+        }
     }
     Ok(())
 }
@@ -789,6 +810,7 @@ pub fn sample_oidc() -> OidcAuth {
         issuer_url: "https://auth.c1.example.com".into(),
         client_id: DEFAULT_OIDC_CLIENT_ID.into(),
         scopes: DEFAULT_OIDC_SCOPES.map(String::from).to_vec(),
+        issuer_ca_pem: None,
     }
 }
 
@@ -1202,6 +1224,49 @@ mod tests {
         assert_eq!(o.issuer_url, "https://auth.c1/dex");
         assert_eq!(o.client_id, "dapp");
         assert_eq!(o.scopes, ["openid", "groups"]);
+    }
+
+    /// CA издателя — PEM в профиле, как CA подключения: без него поле в JSON не пишется, пустое
+    /// убирается при нормализации, не PEM и приватный ключ — ошибки ввода.
+    #[test]
+    fn oidc_issuer_ca_is_a_pem_in_the_profile() {
+        let with = |pem: &str| {
+            let mut p = sample_profile("a");
+            p.auth = AuthConfig::Oidc(OidcAuth {
+                issuer_ca_pem: Some(pem.into()),
+                ..sample_oidc()
+            });
+            p
+        };
+        let p = with(TEST_CERT_PEM);
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["auth"]["issuerCaPem"], TEST_CERT_PEM);
+        let back: ConnectionProfile = serde_json::from_value(v).unwrap();
+        assert_eq!(back, p);
+        assert!(validate_profile(&p).is_ok());
+        for (pem, key) in [
+            ("nope", "errors.oidc.issuerCaInvalid"),
+            (
+                "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n",
+                "errors.connections.pemContainsKey",
+            ),
+        ] {
+            let e = validate_profile(&with(pem)).unwrap_err();
+            assert_eq!((e.code, e.key.as_str()), (ErrorCode::InvalidInput, key));
+        }
+        let with_key = format!("{TEST_CERT_PEM}{}", include_str!("testdata/test-key.pem"));
+        assert_eq!(
+            validate_profile(&with(&with_key)).unwrap_err().key,
+            "errors.connections.pemContainsKey"
+        );
+        let mut p = with(" \n ");
+        normalize_profile(&mut p);
+        assert_eq!(
+            p.auth,
+            AuthConfig::Oidc(sample_oidc()),
+            "пустой CA — нет CA"
+        );
+        assert!(validate_profile(&p).is_ok());
     }
 
     /// `{:?}` не печатает секретные значения: ни в переменных окружения, ни в аргументах; на диск

@@ -96,7 +96,11 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
   const update = (patch: Partial<ConnectionProfile>) => setProfile((p) => ({ ...p, ...patch }));
   const currentAuth = (): AuthConfig => {
     if (profile.auth.method === "exec") return { ...profile.auth, args: parseArgs(execArgs), env: parseEnv(execEnv) };
-    if (profile.auth.method === "oidc") return { ...profile.auth, scopes: oidcScopes.split(/\s+/).filter(Boolean) };
+    if (profile.auth.method === "oidc") {
+      // Пустой CA издателя не отправляется: его нет.
+      const { issuerCaPem, ...oidc } = profile.auth;
+      return { ...oidc, scopes: oidcScopes.split(/\s+/).filter(Boolean), ...(issuerCaPem?.trim() && { issuerCaPem }) };
+    }
     return profile.auth;
   };
   const current = (): ConnectionProfile => ({
@@ -311,6 +315,15 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
             </span>
             <label htmlFor="cf-oidc-scopes">{t("connections.form.oidc.scopes")}</label>
             <input id="cf-oidc-scopes" value={oidcScopes} onChange={(e) => setOidcScopes(e.target.value)} />
+            <label htmlFor="cf-oidc-ca">{t("connections.form.oidc.issuerCaPem")}</label>
+            <textarea
+              id="cf-oidc-ca"
+              rows={4}
+              placeholder="-----BEGIN CERTIFICATE-----"
+              value={auth.issuerCaPem ?? ""}
+              onChange={(e) => update({ auth: { ...auth, issuerCaPem: e.target.value } })}
+            />
+            <p className="muted full">{t("connections.form.oidc.issuerCaHint")}</p>
             <p className="muted full">{t("connections.form.oidc.hint")}</p>
             <p className="muted full">{t("connections.form.oidcNote")}</p>
           </>

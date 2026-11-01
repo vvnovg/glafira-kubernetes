@@ -148,7 +148,8 @@
       "providerError": "The OIDC provider rejected the sign-in: {{reason}}",
       "badTokenResponse": "The OIDC provider returned an unexpected response",
       "noIdToken": "The OIDC provider returned no ID token — check that the scopes include openid",
-      "nonceMismatch": "The ID token from the OIDC provider does not belong to this sign-in — sign in again"
+      "nonceMismatch": "The ID token from the OIDC provider does not belong to this sign-in — sign in again",
+      "issuerCaInvalid": "The OIDC issuer CA certificate must be in PEM format (-----BEGIN CERTIFICATE-----)"
     },
     "exec": {
       "commandMissing": "Specify the exec plugin command",
@@ -177,7 +178,8 @@
       "fileUnreadable": "Cannot read {{path}} referenced by kubeconfig: {{error}}",
       "badBase64": "Certificate or key data in kubeconfig is not valid base64",
       "noContext": "Context “{{name}}” not found in kubeconfig",
-      "noDefault": "Cannot find the default kubeconfig — choose a file"
+      "noDefault": "Cannot find the default kubeconfig — choose a file",
+      "issuerCaUnreadable": "Cannot read the OIDC issuer CA {{path}}: {{error}} — the connection is imported without it; add it in the connection form"
     },
     "watch": {
       "cronJobPods": "Pods of a CronJob are read by the list, not by watch"
@@ -361,7 +363,9 @@
         "clientSecret": "Client secret",
         "scopes": "Scopes",
         "showSecret": "Show",
-        "hint": "The values are in the kubeconfig that DropApp Loginapp issues"
+        "hint": "The values are in the kubeconfig that DropApp Loginapp issues",
+        "issuerCaPem": "Issuer CA (PEM)",
+        "issuerCaHint": "Needed if the Dex certificate is issued by another CA than the API server (often the ingress CA)"
       },
       "token": "Token",
       "certificate": "Certificate (PEM)",

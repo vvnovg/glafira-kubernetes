@@ -83,6 +83,7 @@ const oidcCtx = (name: string, extra: Partial<KubeContext> = {}): KubeContext =>
       clientId: "dapp",
       scopes: ["openid", "groups"],
       hasClientSecret: true,
+      issuerCaWarning: null,
     },
     exec: {
       command: "/usr/local/bin/kubectl",
@@ -255,6 +256,32 @@ describe("KubeconfigImportDialog", () => {
     await user.click(screen.getByRole("checkbox", { name: ALLOW }));
     await user.click(importButton);
     expect(api.applyKubeconfigImport).toHaveBeenLastCalledWith("/home/u/.kube/config", ["dropapp"], null, ["fp-dropapp"], ["dropapp"]);
+  });
+
+  it("OIDC: нечитаемый CA издателя — предупреждение с путём, контекст импортируется", async () => {
+    const base = oidcCtx("dropapp", { current: true });
+    vi.mocked(api.previewKubeconfigImport).mockResolvedValue({
+      path: "/home/u/.kube/config",
+      contexts: [
+        {
+          ...base,
+          oidc: {
+            ...base.oidc!,
+            issuerCaWarning: {
+              key: "errors.kubeconfig.issuerCaUnreadable",
+              params: { path: "/home/u/dex-ca.crt", error: "No such file or directory (os error 2)" },
+              text: "x",
+            },
+          },
+        },
+      ],
+    });
+    vi.mocked(api.applyKubeconfigImport).mockResolvedValue([]);
+    const user = userEvent.setup();
+    renderWithClient(<KubeconfigImportDialog initialTargetId={null} onClose={() => {}} onImported={() => {}} />);
+    expect(await screen.findByText(/Не удалось прочитать CA издателя OIDC \/home\/u\/dex-ca\.crt/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Импортировать 1 контекст" }));
+    expect(api.applyKubeconfigImport).toHaveBeenLastCalledWith("/home/u/.kube/config", ["dropapp"], null, [], []);
   });
 
   it("выбор другого файла перечитывает контексты", async () => {
