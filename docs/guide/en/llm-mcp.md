@@ -82,6 +82,9 @@ the cluster and the nodes — if you can read them:
 
 - connections: name, environment, folder, platform (while the connection is open);
 - the cluster overview, nodes with conditions, taints, labels and how much pods request;
+- platform objects as cluster-level information, regardless of the project list: OpenShift operators and versions,
+  DropApp components, nodes, certificates and the latest warnings of components (even from `dapp-*` projects); texts
+  from the cluster in them are masked like other texts, and what you cannot read is not shown;
 - projects, workloads, pods, events, quotas and `LimitRange`, the network: Services, Routes, Ingress, Gateway API
   routes and Gateways;
 - containers: images, resources, probes, state and restart reasons; environment variables — names and sources only

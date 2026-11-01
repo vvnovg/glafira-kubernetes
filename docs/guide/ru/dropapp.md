@@ -14,7 +14,8 @@ namespace. У DropApp 1.x–2.x такой группы нет, и он рабо
 [[ui:cluster.connection.platform]] показывает версию DropApp из `ClusterMetadata` (`spec.dappVersion`), например
 «DropApp 5.1.2». Если `ClusterMetadata` прочитать нельзя (у пользователя namespace прав на него обычно нет), в подписи —
 версия Kubernetes: «DropApp (Kubernetes 1.29)». LLM-ассистент видит ту же платформу и подпись в `list_connections` и
-`get_cluster_overview`.
+`get_cluster_overview`. Объекты платформы DropApp (компоненты, узлы, сертификаты) показываются там как сведения уровня
+кластера, даже если список проектов для LLM не включает `dapp-*`.
 
 ## Вход {#sign-in}
 

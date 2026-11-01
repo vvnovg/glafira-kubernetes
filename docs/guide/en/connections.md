@@ -56,7 +56,8 @@ secret store. The provider must advertise `https://` sign-in and token addresses
 
 The tokens belong to the issuer and the client: if you change [[ui:connections.form.oidc.issuerUrl]],
 [[ui:connections.form.oidc.clientId]] or [[ui:connections.form.oidc.issuerCaPem]], saving deletes them, and you sign in
-again. Import of a settings file with such a change warns about it and also deletes the client secret: enter it again.
+again. Import of a settings file with such a change warns about it and also deletes the client secret: enter it again. Import that switches a connection away from OIDC (or to OIDC) also warns and
+deletes the saved OIDC tokens and client secret.
 
 The connection tab shows [[ui:cluster.connection.tokenExpires]] from the `exp` of the ID token and warns an hour
 before it expires. When the token has less than a minute left, Glafira reconnects at the next request to the cluster

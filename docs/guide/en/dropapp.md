@@ -14,7 +14,8 @@ DropApp 1.x–2.x has no such group and works as Kubernetes.
 [[ui:cluster.connection.platform]] shows the DropApp version from `ClusterMetadata` (`spec.dappVersion`), for example
 “DropApp 5.1.2”. If `ClusterMetadata` cannot be read (a namespace user usually has no right to it), the label carries
 the Kubernetes version instead: “DropApp (Kubernetes 1.29)”. An LLM assistant sees the same platform and label in
-`list_connections` and `get_cluster_overview`.
+`list_connections` and `get_cluster_overview`. DropApp platform objects (components, nodes, certificates) are shown
+there as cluster-level information, even when the project list for the LLM does not include `dapp-*`.
 
 ## Sign-in {#sign-in}
 
