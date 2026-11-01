@@ -130,7 +130,7 @@ case-insensitive. Your own list replaces the standard one: clear [[ui:connection
 names one per line (at most 200 names of 64 characters). An empty own list turns off name-based masking: only the
 built-in value patterns (JWT and the like) remain. The log filter searches the original text, so the assistant can find
 a line by a value from an error, but it gets the line already masked. A line longer than 4 KB is cut. If the
-`get_pod_logs` answer does not fit 100 KB, the oldest lines are dropped. `search_workload_logs` reports `stopped` (which
+`get_pod_logs` answer does not fit the response size limit (100 KB by default, see [Response limit and compact tool set](llm-mcp.md#response-limit)), the oldest lines are dropped. `search_workload_logs` reports `stopped` (which
 limit stopped the scan: pods, bytes or time) and `errors` (containers whose logs could not be read).
 
 Masking does not catch everything: a secret without a hint in its name (for example `user=bob p4ss`) stays in the line.
