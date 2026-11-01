@@ -1082,6 +1082,9 @@
       "cluster.operatorDegraded": "Деградировавшие ClusterOperators",
       "cluster.updateFailing": "Обновление кластера не проходит",
       "cluster.mcpDegraded": "Деградировавшие MachineConfigPools",
+      "cluster.componentFailed": "Компоненты DropApp в сбое",
+      "cluster.dropappNodeNotReady": "Узлы DropApp не готовы",
+      "cluster.ingressTlsNotReady": "IngressTLS не готовы",
       "node.notReady": "Ноды не готовы",
       "node.pressure": "Ноды под нагрузкой",
       "node.requestsHigh": "Ноды почти заняты запросами",
@@ -1136,6 +1139,21 @@
         "title": "MachineConfigPools деградировали",
         "details": "MachineConfigPools с Degraded=True: {{pools}} (всего {{count}}). Ноды этих пулов не получают обновления конфигурации.",
         "fix": "Проверьте условия пула и логи machine-config-daemon на его нодах."
+      },
+      "cluster.componentFailed": {
+        "title": "Компоненты DropApp в сбое",
+        "details": "Component и Tool в статусе failed или error: {{names}} (всего {{count}}).",
+        "fix": "Причина — в событиях объекта: kubectl describe tool <имя> (или component)."
+      },
+      "cluster.dropappNodeNotReady": {
+        "title": "Узлы DropApp не готовы",
+        "details": "DropAppNode не в статусе ready: {{names}} (всего {{count}}).",
+        "fix": "Проверьте узел: kubectl describe dropappnode <имя> и журнал dactl."
+      },
+      "cluster.ingressTlsNotReady": {
+        "title": "Сертификаты IngressTLS не готовы",
+        "details": "IngressTLS с Ready не True: {{names}} (всего {{count}}). Ingress может отдавать истёкший сертификат или не отдавать его вовсе.",
+        "fix": "Проверьте cert-manager (его поды и события) и объект IngressTLS: kubectl describe ingresstls <имя>."
       },
       "node.notReady": {
         "title": "Нода {{name}} не готова",

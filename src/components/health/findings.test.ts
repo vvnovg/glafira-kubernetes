@@ -94,6 +94,13 @@ describe("findingTexts", () => {
       count: 1,
     });
     expect(findingTexts(operators, t).details).toBe("ClusterOperators с Degraded=True или Available=False: dns (всего 1).");
+    const components = finding("cluster.componentFailed", "critical", { kind: "cluster" }, {
+      components: [{ kind: "Tool", name: "grafana", namespace: null, status: "failed", event: null }],
+      names: ["Tool grafana"],
+      count: 1,
+    });
+    expect(findingTexts(components, t).details).toBe("Component и Tool в статусе failed или error: Tool grafana (всего 1).");
+    expect(findingTexts(components, t).fix).toBe("Причина — в событиях объекта: kubectl describe tool <имя> (или component).");
   });
 
   it("every rule and every variant has texts in both languages", () => {
@@ -111,7 +118,7 @@ describe("findingTexts", () => {
     };
     for (const dict of [en as Dict, ru as Dict]) {
       const rules = dict.health.rules;
-      expect(Object.keys(rules)).toHaveLength(37);
+      expect(Object.keys(rules)).toHaveLength(40);
       expect(Object.keys(dict.health.ruleNames).sort()).toEqual(Object.keys(rules).sort());
       for (const [id, texts] of Object.entries(rules)) {
         expect(Object.keys(texts)).toEqual(expect.arrayContaining(["title", "details", "fix"]));

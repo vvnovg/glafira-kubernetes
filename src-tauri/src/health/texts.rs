@@ -133,6 +133,30 @@ pub fn english(f: &Finding) -> (String, String) {
                 list(f, "pools")
             ),
         ),
+        "cluster.componentFailed" => (
+            "DropApp components have failed".into(),
+            format!(
+                "{} DropApp Component(s) or Tool(s) are in failed or error state: {}. The latest Warning event of each is in params; the cause is in the events of the object (kubectl describe tool NAME or component).",
+                param(f, "count"),
+                list(f, "names")
+            ),
+        ),
+        "cluster.dropappNodeNotReady" => (
+            "DropApp nodes are not ready".into(),
+            format!(
+                "{} DropAppNode(s) are not ready: {}. Check them with kubectl describe dropappnode NAME and the dactl log.",
+                param(f, "count"),
+                list(f, "names")
+            ),
+        ),
+        "cluster.ingressTlsNotReady" => (
+            "IngressTLS certificates are not ready".into(),
+            format!(
+                "{} IngressTLS object(s) report Ready other than True: {}. Ingress may serve an expired or missing certificate; check cert-manager and the IngressTLS object.",
+                param(f, "count"),
+                list(f, "names")
+            ),
+        ),
         "node.notReady" => (
             format!("Node {} is not ready", f.target.name.as_deref().unwrap_or("")),
             format!(
@@ -529,6 +553,48 @@ mod tests {
             assert_ne!(title, id, "{id}");
             assert!(!details.is_empty(), "{id}");
         }
+    }
+
+    #[test]
+    fn dropapp_texts_name_the_objects() {
+        let finding = |id: &str, params: serde_json::Value| {
+            english(&Finding::new(
+                id,
+                Severity::Critical,
+                Target::cluster(),
+                None,
+                params,
+            ))
+        };
+        let (title, details) = finding(
+            "cluster.componentFailed",
+            serde_json::json!({ "count": 2, "names": ["Component cert-manager", "Tool grafana"] }),
+        );
+        assert_eq!(title, "DropApp components have failed");
+        assert!(
+            details.starts_with(
+                "2 DropApp Component(s) or Tool(s) are in failed or error state: Component cert-manager, Tool grafana."
+            ),
+            "{details}"
+        );
+        let (_, details) = finding(
+            "cluster.dropappNodeNotReady",
+            serde_json::json!({ "count": 1, "names": ["worker-2"] }),
+        );
+        assert!(
+            details.starts_with("1 DropAppNode(s) are not ready: worker-2."),
+            "{details}"
+        );
+        let (_, details) = finding(
+            "cluster.ingressTlsNotReady",
+            serde_json::json!({ "count": 1, "names": ["dapp-system/apps"] }),
+        );
+        assert!(
+            details.starts_with(
+                "1 IngressTLS object(s) report Ready other than True: dapp-system/apps."
+            ),
+            "{details}"
+        );
     }
 
     #[test]

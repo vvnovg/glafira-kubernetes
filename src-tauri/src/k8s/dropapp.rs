@@ -131,6 +131,16 @@ impl ComponentRow {
                 .any(|p| s.eq_ignore_ascii_case(p))
         })
     }
+
+    /// Сбой (`failed`, `error` без учёта регистра) — правило `cluster.componentFailed`;
+    /// обновление (`upgrading`) — проблема обзора, но не сбой.
+    pub fn is_failed(&self) -> bool {
+        self.status.as_deref().is_some_and(|s| {
+            ["failed", "error"]
+                .iter()
+                .any(|p| s.eq_ignore_ascii_case(p))
+        })
+    }
 }
 
 /// Строка без события: его читает `component_problems`, только для проблемных.
@@ -495,6 +505,35 @@ mod tests {
             json,
             serde_json::json!({"kind": "Tool", "name": "grafana", "namespace": null,
                 "status": "failed", "retry": 2, "event": null})
+        );
+    }
+
+    #[test]
+    fn failed_is_failed_or_error_but_not_upgrading() {
+        let row = |status: &str| {
+            component_row(
+                ComponentKind::Tool,
+                &object(item(
+                    "Tool",
+                    "x",
+                    None,
+                    serde_json::json!({"phase": status}),
+                )),
+            )
+        };
+        let view: Vec<_> = ["Failed", "ERROR", "upgrading", "Success", ""]
+            .into_iter()
+            .map(|s| (s, row(s).is_failed()))
+            .collect();
+        assert_eq!(
+            view,
+            [
+                ("Failed", true),
+                ("ERROR", true),
+                ("upgrading", false),
+                ("Success", false),
+                ("", false),
+            ]
         );
     }
 

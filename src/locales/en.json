@@ -1062,6 +1062,9 @@
       "cluster.operatorDegraded": "Degraded ClusterOperators",
       "cluster.updateFailing": "Cluster update failing",
       "cluster.mcpDegraded": "Degraded MachineConfigPools",
+      "cluster.componentFailed": "Failed DropApp components",
+      "cluster.dropappNodeNotReady": "DropApp nodes not ready",
+      "cluster.ingressTlsNotReady": "IngressTLS not ready",
       "node.notReady": "Nodes not ready",
       "node.pressure": "Nodes under pressure",
       "node.requestsHigh": "Nodes almost fully requested",
@@ -1116,6 +1119,21 @@
         "title": "MachineConfigPools are degraded",
         "details": "MachineConfigPools with Degraded=True: {{pools}} (total {{count}}). Nodes of these pools do not get configuration updates.",
         "fix": "Check the pool conditions and the machine-config-daemon logs on its nodes."
+      },
+      "cluster.componentFailed": {
+        "title": "DropApp components have failed",
+        "details": "Components and Tools in failed or error state: {{names}} (total {{count}}).",
+        "fix": "The cause is in the events of the object: kubectl describe tool NAME (or component)."
+      },
+      "cluster.dropappNodeNotReady": {
+        "title": "DropApp nodes are not ready",
+        "details": "DropAppNodes that are not ready: {{names}} (total {{count}}).",
+        "fix": "Check the node with kubectl describe dropappnode NAME and the dactl log."
+      },
+      "cluster.ingressTlsNotReady": {
+        "title": "IngressTLS certificates are not ready",
+        "details": "IngressTLS objects with Ready other than True: {{names}} (total {{count}}). Ingress may serve an expired or missing certificate.",
+        "fix": "Check cert-manager (its pods and events) and the IngressTLS object: kubectl describe ingresstls NAME."
       },
       "node.notReady": {
         "title": "Node {{name}} is not ready",

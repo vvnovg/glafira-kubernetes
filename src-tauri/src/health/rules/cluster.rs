@@ -1,11 +1,11 @@
 //! Правила уровня кластера (спец. §8.2): API-сервер, OpenShift (операторы, обновление, пулы
-//! машин), ноды; сводка непроверенного `check.partial`.
+//! машин), DropApp (компоненты, узлы, `IngressTLS`), ноды; сводка непроверенного `check.partial`.
 
 use serde_json::json;
 
 use super::{Findings, listed};
 use crate::health::model::Target;
-use crate::health::snapshot::ClusterSnapshot;
+use crate::health::snapshot::{ClusterSnapshot, DropAppSnap};
 
 /// Доля requests от allocatable, выше которой нода перегружена заявками, %.
 pub const REQUESTS_HIGH_PERCENT: i64 = 90;
@@ -65,6 +65,9 @@ pub fn check(s: &ClusterSnapshot, out: &mut Findings) {
             );
         }
     }
+    if let Some(d) = &s.dropapp {
+        dropapp(d, out);
+    }
     for n in s.nodes.iter().flatten() {
         let target = || Target::node(&n.name);
         match &n.ready {
@@ -114,6 +117,79 @@ pub fn check(s: &ClusterSnapshot, out: &mut Findings) {
     }
 }
 
+/// Правила DropApp (спека O5 §7.2): списки — до `MAX_LISTED`, `count` — всех.
+fn dropapp(d: &DropAppSnap, out: &mut Findings) {
+    let failed: Vec<_> = d
+        .components
+        .iter()
+        .flatten()
+        .filter(|c| c.is_failed())
+        .collect();
+    if !failed.is_empty() {
+        let components: Vec<_> = failed
+            .iter()
+            .map(|c| {
+                json!({ "kind": c.kind.as_str(), "name": c.name, "namespace": c.namespace,
+                    "status": c.status, "event": c.event })
+            })
+            .collect();
+        let names: Vec<_> = failed
+            .iter()
+            .map(|c| format!("{} {}", c.kind.as_str(), c.name))
+            .collect();
+        out.emit(
+            "cluster.componentFailed",
+            Target::cluster(),
+            None,
+            json!({ "components": listed(&components), "count": failed.len(),
+                "names": listed(&names) }),
+        );
+    }
+    let nodes: Vec<_> = d
+        .nodes
+        .iter()
+        .flatten()
+        .filter(|n| n.has_problem())
+        .collect();
+    if !nodes.is_empty() {
+        let rows: Vec<_> = nodes
+            .iter()
+            .map(|n| json!({ "name": n.name, "status": n.status }))
+            .collect();
+        let names: Vec<_> = nodes.iter().map(|n| n.name.clone()).collect();
+        out.emit(
+            "cluster.dropappNodeNotReady",
+            Target::cluster(),
+            None,
+            json!({ "nodes": listed(&rows), "count": nodes.len(), "names": listed(&names) }),
+        );
+    }
+    if let Some(tls) = &d.ingress_tls
+        && !tls.is_empty()
+    {
+        let rows: Vec<_> = tls
+            .iter()
+            .map(|t| {
+                json!({ "name": t.name, "namespace": t.namespace, "reason": t.reason,
+                    "message": t.message })
+            })
+            .collect();
+        let names: Vec<_> = tls
+            .iter()
+            .map(|t| match &t.namespace {
+                Some(ns) => format!("{ns}/{}", t.name),
+                None => t.name.clone(),
+            })
+            .collect();
+        out.emit(
+            "cluster.ingressTlsNotReady",
+            Target::cluster(),
+            None,
+            json!({ "ingressTls": listed(&rows), "count": tls.len(), "names": listed(&names) }),
+        );
+    }
+}
+
 /// `check.partial`: что не проверено и почему. `gaps` — список пробелов целиком (проектов не
 /// больше 50, частей на проект около дюжины): шлюз MCP сужает его по области LLM до обрезки, иначе
 /// пробелы вне области, попавшие в первые 20, вытеснили бы пробелы области. Двадцатью обрезают
@@ -155,6 +231,7 @@ mod tests {
     use super::*;
     use crate::health::model::{Finding, Severity};
     use crate::health::snapshot::*;
+    use crate::k8s::dropapp::{ComponentKind, ComponentRow, DropAppNodeRow, IngressTlsRow};
     use crate::platform::PlatformKind;
     use crate::storage::profile::Environment;
 
@@ -262,6 +339,175 @@ mod tests {
             run(&s, Environment::Prod).is_empty(),
             "не прочитано — не находка"
         );
+    }
+
+    fn component(kind: ComponentKind, name: &str, status: Option<&str>) -> ComponentRow {
+        ComponentRow {
+            kind,
+            name: name.into(),
+            namespace: (kind == ComponentKind::Component).then(|| "dapp-system".into()),
+            status: status.map(String::from),
+            retry: None,
+            event: None,
+        }
+    }
+
+    fn dropapp_node(name: &str, status: Option<&str>) -> DropAppNodeRow {
+        DropAppNodeRow {
+            name: name.into(),
+            status: status.map(String::from),
+        }
+    }
+
+    #[test]
+    fn dropapp_components_nodes_and_ingress_tls() {
+        let mut s = ClusterSnapshot::empty(NOW, PlatformKind::Dropapp);
+        let mut failed = component(ComponentKind::Component, "cert-manager", Some("Failed"));
+        failed.event = Some("InstallFailed: helm install failed: timed out".into());
+        s.dropapp = Some(DropAppSnap {
+            components: Some(vec![
+                failed,
+                component(ComponentKind::Tool, "grafana", Some("error")),
+                // Обновление — проблема обзора, но не правило.
+                component(ComponentKind::Tool, "dex", Some("upgrading")),
+                component(ComponentKind::Component, "ingress-nginx", Some("Success")),
+                component(ComponentKind::Tool, "loki", None),
+            ]),
+            nodes: Some(vec![
+                dropapp_node("master-1", Some("ready")),
+                dropapp_node("worker-2", Some("NotReady")),
+                // Статуса нет — состояние неизвестно.
+                dropapp_node("worker-3", None),
+            ]),
+            ingress_tls: Some(vec![IngressTlsRow {
+                name: "apps".into(),
+                namespace: Some("dapp-system".into()),
+                reason: Some("CertificateExpired".into()),
+                message: Some("certificate expired on 2026-10-30".into()),
+            }]),
+        });
+        let v = run(&s, Environment::Prod);
+        assert_eq!(
+            ids(&v),
+            [
+                "cluster.componentFailed -",
+                "cluster.dropappNodeNotReady -",
+                "cluster.ingressTlsNotReady -"
+            ]
+        );
+        let c = &v[0].params;
+        assert_eq!(c["count"], 2);
+        assert_eq!(
+            c["names"],
+            json!(["Component cert-manager", "Tool grafana"])
+        );
+        assert_eq!(
+            c["components"][0],
+            json!({"kind": "Component", "name": "cert-manager", "namespace": "dapp-system",
+                "status": "Failed", "event": "InstallFailed: helm install failed: timed out"})
+        );
+        assert_eq!(
+            c["components"][1],
+            json!({"kind": "Tool", "name": "grafana", "namespace": null, "status": "error",
+                "event": null})
+        );
+        let n = &v[1].params;
+        assert_eq!(n["count"], 1);
+        assert_eq!(n["names"], json!(["worker-2"]));
+        assert_eq!(
+            n["nodes"],
+            json!([{"name": "worker-2", "status": "NotReady"}])
+        );
+        let t = &v[2].params;
+        assert_eq!(t["count"], 1);
+        assert_eq!(t["names"], json!(["dapp-system/apps"]));
+        assert_eq!(
+            t["ingressTls"],
+            json!([{"name": "apps", "namespace": "dapp-system", "reason": "CertificateExpired",
+                "message": "certificate expired on 2026-10-30"}])
+        );
+    }
+
+    #[test]
+    fn dropapp_rules_by_environment() {
+        let mut s = ClusterSnapshot::empty(NOW, PlatformKind::Dropapp);
+        s.dropapp = Some(DropAppSnap {
+            components: Some(vec![component(
+                ComponentKind::Tool,
+                "grafana",
+                Some("failed"),
+            )]),
+            nodes: Some(vec![dropapp_node("worker-2", Some("NotReady"))]),
+            ingress_tls: Some(vec![IngressTlsRow {
+                name: "apps".into(),
+                namespace: None,
+                reason: None,
+                message: None,
+            }]),
+        });
+        let levels = |env| {
+            run(&s, env)
+                .iter()
+                .map(|f| (f.rule_id.clone(), f.severity))
+                .collect::<Vec<_>>()
+        };
+        use Severity::*;
+        for (env, component, other) in [
+            (Environment::Prod, Critical, Warning),
+            (Environment::Stage, Critical, Warning),
+            (Environment::Test, Warning, Info),
+            (Environment::Dev, Warning, Info),
+            (Environment::Local, Warning, Info),
+        ] {
+            assert_eq!(
+                levels(env),
+                [
+                    ("cluster.componentFailed".to_string(), component),
+                    ("cluster.dropappNodeNotReady".to_string(), other),
+                    ("cluster.ingressTlsNotReady".to_string(), other),
+                ],
+                "{env:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dropapp_without_problems_or_unread_parts_is_quiet() {
+        let mut s = ClusterSnapshot::empty(NOW, PlatformKind::Dropapp);
+        s.dropapp = Some(DropAppSnap {
+            components: Some(vec![
+                component(ComponentKind::Tool, "dex", Some("upgrading")),
+                component(ComponentKind::Component, "ingress-nginx", Some("Success")),
+            ]),
+            nodes: Some(vec![
+                dropapp_node("master-1", Some("Ready")),
+                dropapp_node("worker-3", None),
+            ]),
+            ingress_tls: Some(vec![]),
+        });
+        assert!(run(&s, Environment::Prod).is_empty());
+        s.dropapp = Some(DropAppSnap::default());
+        assert!(
+            run(&s, Environment::Prod).is_empty(),
+            "не прочитано — не находка"
+        );
+    }
+
+    #[test]
+    fn dropapp_lists_at_most_twenty_but_counts_all() {
+        let mut s = ClusterSnapshot::empty(NOW, PlatformKind::Dropapp);
+        s.dropapp = Some(DropAppSnap {
+            components: Some(
+                (0..25)
+                    .map(|i| component(ComponentKind::Tool, &format!("t{i:02}"), Some("failed")))
+                    .collect(),
+            ),
+            ..Default::default()
+        });
+        let v = run(&s, Environment::Prod);
+        assert_eq!(v[0].params["count"], 25);
+        assert_eq!(v[0].params["components"].as_array().unwrap().len(), 20);
+        assert_eq!(v[0].params["names"].as_array().unwrap().len(), 20);
     }
 
     #[test]
