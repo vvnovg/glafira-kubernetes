@@ -309,7 +309,7 @@
       "mask": "Список заменяет стандартный. В экспорт не попадает: каждый пользователь решает сам."
     },
     "cluster": {
-      "platform": "Определяется по группам API и версии: OpenShift или Kubernetes с дистрибутивом (EKS, GKE, AKS, Rancher, Deckhouse, k3s, RKE2).",
+      "platform": "Определяется по группам API и версии: OpenShift, Platform V DropApp или Kubernetes с дистрибутивом (EKS, GKE, AKS, Rancher, Deckhouse, k3s, RKE2).",
       "apiGroups": "Что есть в кластере сверх обычного Kubernetes: Route, проекты и DeploymentConfig (OpenShift), проекты DropApp, Gateway API. От этого зависит, какие объекты показываются.",
       "readyz": "Проверки <code>/readyz</code> API-сервера. Их может читать любой пользователь; непройденная проверка называет часть сервера, которая не готова."
     },
@@ -1177,17 +1177,17 @@
       "cluster.componentFailed": {
         "title": "Компоненты DropApp в сбое",
         "details": "Component и Tool в статусе failed или error: {{names}} (всего {{count}}).",
-        "fix": "Причина — в событиях объекта: kubectl describe tool <имя> (или component)."
+        "fix": "Причина — в событиях объекта: kubectl describe tool ИМЯ (или component)."
       },
       "cluster.dropappNodeNotReady": {
         "title": "Узлы DropApp не готовы",
         "details": "DropAppNode не в статусе ready: {{names}} (всего {{count}}).",
-        "fix": "Проверьте узел: kubectl describe dropappnode <имя> и журнал dactl."
+        "fix": "Проверьте узел: kubectl describe dropappnode ИМЯ и журнал dactl."
       },
       "cluster.ingressTlsNotReady": {
         "title": "Сертификаты IngressTLS не готовы",
         "details": "IngressTLS с Ready не True: {{names}} (всего {{count}}). Ingress может отдавать истёкший сертификат или не отдавать его вовсе.",
-        "fix": "Проверьте cert-manager (его поды и события) и объект IngressTLS: kubectl describe ingresstls <имя>."
+        "fix": "Проверьте cert-manager (его поды и события) и объект IngressTLS: kubectl describe ingresstls ИМЯ."
       },
       "node.notReady": {
         "title": "Нода {{name}} не готова",

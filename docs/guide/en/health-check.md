@@ -19,8 +19,9 @@ it. The result is kept until the next check.
 ## What is checked {#rules}
 
 - Cluster and nodes: the API server is not ready (`/readyz`), on OpenShift — ClusterOperators and MachineConfigPools
-  are not healthy, the update is failing; a node is not ready, under pressure (`MemoryPressure`, `DiskPressure`,
-  `PIDPressure`), almost fully requested by pods (over 90%) or cordoned.
+  are not healthy, the update is failing, on DropApp — Components and Tools have failed, DropApp nodes or IngressTLS
+  certificates are not ready (see [Platform V DropApp](dropapp.md#overview)); a node is not ready, under pressure
+  (`MemoryPressure`, `DiskPressure`, `PIDPressure`), almost fully requested by pods (over 90%) or cordoned.
 - Pods: restart loops (`CrashLoopBackOff` or exiting with an error between restarts), an image cannot be pulled,
   `Pending` for more than 5 minutes, `OOMKilled` in the last day, frequent restarts. The pods of one workload make one
   finding with a list of pods.
