@@ -15,7 +15,7 @@ use crate::policy::PolicyStatus;
 use crate::storage::profile::{
     AuthConfig, CaConfig, ConnectionProfile, DEFAULT_OIDC_CLIENT_ID, DEFAULT_OIDC_SCOPES,
     EXEC_API_V1, EXEC_API_V1BETA1, Environment, ExecAuth, ExecEnv, OidcAuth, ProxyConfig, REDACTED,
-    is_valid_namespace, normalize_profile, pem_certificates,
+    is_valid_namespace, normalize_profile, pem_certificates, pem_has_private_key,
 };
 
 /// Поиск команды exec-плагина: имя из kubeconfig и каталог файла → абсолютный путь.
@@ -295,6 +295,21 @@ pub fn oidc_login(command: &str, args: &[String]) -> Option<OidcLogin> {
     })
 }
 
+/// Предел размера файла CA издателя.
+const MAX_ISSUER_CA_BYTES: u64 = 1024 * 1024;
+
+/// Читает файл CA: только обычный файл не больше 1 МиБ.
+fn read_ca_file(path: &Path) -> Result<String, String> {
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("not a regular file".to_string());
+    }
+    if meta.len() > MAX_ISSUER_CA_BYTES {
+        return Err("the file is larger than 1 MiB".to_string());
+    }
+    std::fs::read_to_string(path).map_err(|e| e.to_string())
+}
+
 /// PEM CA издателя: данные декодируются, файл читается (относительный путь — от каталога
 /// kubeconfig `base`). Ошибка — предупреждение с путём (у данных — именем аргумента).
 fn issuer_ca_pem(ca: &IssuerCa, base: Option<&Path>) -> Result<String, LocalizedText> {
@@ -312,11 +327,15 @@ fn issuer_ca_pem(ca: &IssuerCa, base: Option<&Path>) -> Result<String, Localized
                 Some(dir) if Path::new(file).is_relative() => dir.join(file),
                 _ => PathBuf::from(file),
             };
-            let text = std::fs::read_to_string(&path).map_err(|e| e.to_string());
+            let text = read_ca_file(&path);
             (path.display().to_string(), text)
         }
     };
     text.and_then(|pem| {
+        // Общий файл с приватным ключом в предпросмотр не попадает: ни ключ, ни его текст.
+        if pem_has_private_key(&pem) {
+            return Err("the file also contains a private key".to_string());
+        }
         pem_certificates(&pem)
             .map(|_| pem)
             .map_err(|_| "not a PEM certificate".to_string())
@@ -1319,6 +1338,11 @@ contexts:
     fn issuer_ca_comes_from_the_oidc_login_arguments() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("dex-ca.crt"), TEST_CERT_PEM).unwrap();
+        // Общий файл с сертификатом и приватным ключом: ключ не должен попасть в предпросмотр.
+        let bundle = format!(
+            "{TEST_CERT_PEM}\n-----BEGIN PRIVATE KEY-----\nc2VjcmV0\n-----END PRIVATE KEY-----\n"
+        );
+        std::fs::write(dir.path().join("bundle.pem"), &bundle).unwrap();
         let user = |name: &str, ca: &str| {
             format!(
                 r#"
@@ -1335,7 +1359,7 @@ contexts:
 clusters:
 - name: c1
   cluster: {{server: "https://api.c1.example.com:6443"}}
-users:{}{}{}{}
+users:{}{}{}{}{}{}
 contexts:
 - name: file
   context: {{cluster: c1, user: file}}
@@ -1345,6 +1369,10 @@ contexts:
   context: {{cluster: c1, user: missing}}
 - name: not-pem
   context: {{cluster: c1, user: not-pem}}
+- name: key-file
+  context: {{cluster: c1, user: key-file}}
+- name: key-data
+  context: {{cluster: c1, user: key-data}}
 "#,
             user("file", "--certificate-authority=dex-ca.crt"),
             user(
@@ -1355,6 +1383,11 @@ contexts:
             user(
                 "not-pem",
                 &format!("--certificate-authority-data={}", b64("nope"))
+            ),
+            user("key-file", "--certificate-authority=bundle.pem"),
+            user(
+                "key-data",
+                &format!("--certificate-authority-data={}", b64(&bundle))
             ),
         ));
         let path = dir.path().join("config");
@@ -1376,9 +1409,12 @@ contexts:
             assert_eq!(auth.issuer_ca_pem.as_deref(), Some(TEST_CERT_PEM), "{name}");
         }
         let missing = dir.path().join("missing.crt").display().to_string();
+        let bundle_path = dir.path().join("bundle.pem").display().to_string();
         for (name, shown) in [
             ("missing", missing.as_str()),
             ("not-pem", "--certificate-authority-data"),
+            ("key-file", bundle_path.as_str()),
+            ("key-data", "--certificate-authority-data"),
         ] {
             let c = ctx(name);
             assert_eq!(
@@ -1405,6 +1441,25 @@ contexts:
             json["contexts"][2]["oidc"]["issuerCaWarning"]["key"],
             "errors.kubeconfig.issuerCaUnreadable"
         );
+        // Ни ключ, ни его текст не попадают в предпросмотр (в том числе в предупреждение).
+        let text = json.to_string();
+        assert!(
+            !text.contains("PRIVATE KEY") && !text.contains("c2VjcmV0"),
+            "{text}"
+        );
+    }
+
+    /// Файл CA больше 1 МиБ или не обычный файл (каталог) — то же предупреждение, без чтения.
+    #[test]
+    fn oversized_or_irregular_issuer_ca_file_is_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("big.pem"), vec![b'a'; 1024 * 1024 + 1]).unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        for file in ["big.pem", "sub"] {
+            let ca = IssuerCa::File(file.to_string());
+            let e = issuer_ca_pem(&ca, Some(dir.path())).unwrap_err();
+            assert_eq!(e.key, "errors.kubeconfig.issuerCaUnreadable", "{file}");
+        }
     }
 
     #[test]
