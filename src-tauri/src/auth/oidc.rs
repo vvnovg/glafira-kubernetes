@@ -117,12 +117,15 @@ fn issuer_error(e: &reqwest::Error, issuer_url: &str) -> AppError {
 }
 
 /// Адрес авторизации открывается в браузере, а на адрес токенов уходят код, verifier и секрет
-/// клиента: только https. http допустим лишь для локального издателя (127.0.0.1 и localhost,
-/// как в `validate_oidc`: тесты и имитация).
+/// клиента: только https. http допустим лишь у локального издателя (127.0.0.1 и localhost,
+/// как в `validate_oidc`: тесты и имитация) и лишь для адресов на 127.0.0.1 и localhost.
 fn check_endpoints(issuer: &str, meta: &OidcMetadata) -> AppResult<()> {
-    let local_http = url::Url::parse(issuer).is_ok_and(|u| {
-        u.scheme() == "http" && matches!(u.host_str(), Some("127.0.0.1" | "localhost"))
-    });
+    let local_http = |u: &str| {
+        url::Url::parse(u.trim()).is_ok_and(|u| {
+            u.scheme() == "http" && matches!(u.host_str(), Some("127.0.0.1" | "localhost"))
+        })
+    };
+    let local_issuer = local_http(issuer);
     for (name, value) in [
         ("authorization_endpoint", &meta.authorization_endpoint),
         ("token_endpoint", &meta.token_endpoint),
@@ -130,7 +133,8 @@ fn check_endpoints(issuer: &str, meta: &OidcMetadata) -> AppResult<()> {
         if !is_http_url(value) {
             return Err(no_metadata(issuer).with_details(format!("{name}: {value}")));
         }
-        if !local_http && !value.trim().to_ascii_lowercase().starts_with("https://") {
+        let https = value.trim().to_ascii_lowercase().starts_with("https://");
+        if !https && !(local_issuer && local_http(value)) {
             return Err(app_err!(
                 ErrorCode::AuthFailed,
                 "errors.oidc.insecureEndpoint",
@@ -226,6 +230,32 @@ struct TokenError {
     error_description: String,
 }
 
+/// Предел тела ответа адреса токенов: токены и ошибка провайдера занимают килобайты.
+const MAX_TOKEN_RESPONSE_BYTES: usize = 1024 * 1024;
+
+fn bad_token_response() -> AppError {
+    app_err!(
+        ErrorCode::AuthFailed,
+        "errors.oidc.badTokenResponse",
+        "The OIDC provider returned an unexpected response"
+    )
+}
+
+/// Тело ответа как текст, если оно не больше `limit` байт; больше — `None`, остаток не читается.
+async fn read_limited(
+    mut r: reqwest::Response,
+    limit: usize,
+) -> Result<Option<String>, reqwest::Error> {
+    let mut body = Vec::new();
+    while let Some(chunk) = r.chunk().await? {
+        if body.len() + chunk.len() > limit {
+            return Ok(None);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(Some(String::from_utf8_lossy(&body).into_owned()))
+}
+
 /// Запрос к `token_endpoint` формой; секрет клиента — `client_secret_post`, если он есть.
 /// Отказ провайдера — его `error` и `error_description`; секрет, код и токены в ошибку не
 /// попадают.
@@ -248,10 +278,15 @@ async fn token_request(
         .await
         .map_err(|e| issuer_error(&e, &auth.issuer_url))?;
     let status = r.status();
-    let text = r
-        .text()
+    let text = read_limited(r, MAX_TOKEN_RESPONSE_BYTES)
         .await
-        .map_err(|e| issuer_error(&e, &auth.issuer_url))?;
+        .map_err(|e| issuer_error(&e, &auth.issuer_url))?
+        .ok_or_else(|| {
+            bad_token_response().with_details(format!(
+                "HTTP {status}: the response is larger than {} bytes",
+                MAX_TOKEN_RESPONSE_BYTES
+            ))
+        })?;
     if !status.is_success() {
         let err: TokenError = serde_json::from_str(&text).unwrap_or_default();
         let reason = match (err.error.as_str(), err.error_description.as_str()) {
@@ -266,14 +301,8 @@ async fn token_request(
             reason = reason
         ));
     }
-    let r: TokenResponse = serde_json::from_str(&text).map_err(|e| {
-        app_err!(
-            ErrorCode::AuthFailed,
-            "errors.oidc.badTokenResponse",
-            "The OIDC provider returned an unexpected response"
-        )
-        .with_details(e.to_string())
-    })?;
+    let r: TokenResponse = serde_json::from_str(&text)
+        .map_err(|e| bad_token_response().with_details(e.to_string()))?;
     let id_token = r.id_token.filter(|t| !t.trim().is_empty()).ok_or_else(|| {
         app_err!(
             ErrorCode::AuthFailed,
@@ -614,6 +643,16 @@ mod tests {
         // Локальный http-издатель (тесты и имитация) может отдавать http-адреса.
         let local = meta("http://127.0.0.1:1/auth", "http://127.0.0.1:1/token");
         assert!(check_endpoints("http://127.0.0.1:1", &local).is_ok());
+        let localhost = meta("http://localhost:1/auth", "https://auth.c1/token");
+        assert!(check_endpoints("http://127.0.0.1:1", &localhost).is_ok());
+        // Но только на 127.0.0.1 и localhost: http-адрес другого хоста отклоняется и у него.
+        for bad in [
+            meta("http://auth.c1/auth", "http://127.0.0.1:1/token"),
+            meta("http://127.0.0.1:1/auth", "http://10.0.0.1/token"),
+        ] {
+            let e = check_endpoints("http://127.0.0.1:1", &bad).unwrap_err();
+            assert_eq!(e.key, "errors.oidc.insecureEndpoint");
+        }
         // Адрес не http(s) отклоняется и для локального издателя.
         let junk = meta("javascript:alert(1)", "http://127.0.0.1:1/token");
         assert_eq!(
@@ -977,6 +1016,35 @@ mod tests {
         assert!(e.params["reason"].contains("Invalid client credentials."));
         let json = serde_json::to_string(&e).unwrap();
         assert!(!json.contains("s3cr3t") && !json.contains("r0"), "{json}");
+    }
+
+    /// Ответ адреса токенов больше 1 МиБ не читается целиком: ошибка без тела ответа.
+    #[tokio::test]
+    async fn oversized_token_response_is_rejected_without_the_body() {
+        let id_token = jwt(serde_json::json!({"exp": now() + 3600}));
+        let padding = "x".repeat(1024 * 1024);
+        let (issuer_url, _) = issuer(move |_| {
+            (
+                200,
+                serde_json::json!({"id_token": id_token, "padding": padding}).to_string(),
+            )
+        })
+        .await;
+        let http = http_client(&test_profile()).unwrap();
+        let meta = fetch_metadata(&http, &issuer_url).await.unwrap();
+        let e = refresh(&http, &meta, &auth(&issuer_url), None, "r1")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (ErrorCode::AuthFailed, "errors.oidc.badTokenResponse")
+        );
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(
+            json.len() < 4096 && !json.contains("xxxx"),
+            "{}",
+            json.len()
+        );
     }
 
     fn oidc_profile(issuer_url: &str) -> ConnectionProfile {

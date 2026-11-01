@@ -303,16 +303,29 @@ pub fn oidc_login(command: &str, args: &[String]) -> Option<OidcLogin> {
 /// Предел размера файла CA издателя.
 const MAX_ISSUER_CA_BYTES: u64 = 1024 * 1024;
 
-/// Читает файл CA: только обычный файл не больше 1 МиБ.
+/// Читает файл CA: только обычный файл не больше 1 МиБ. Читается не больше предела + 1 байт
+/// (файл мог вырасти после проверки размера); тип проверяется и до открытия — открытие FIFO
+/// ждало бы писателя, — и у открытого файла (путь могли подменить между проверкой и открытием).
 fn read_ca_file(path: &Path) -> Result<String, String> {
-    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
-    if !meta.is_file() {
-        return Err("not a regular file".to_string());
-    }
-    if meta.len() > MAX_ISSUER_CA_BYTES {
+    use std::io::Read;
+    let regular = |m: std::fs::Metadata| {
+        if m.is_file() {
+            Ok(())
+        } else {
+            Err("not a regular file".to_string())
+        }
+    };
+    regular(std::fs::metadata(path).map_err(|e| e.to_string())?)?;
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    regular(file.metadata().map_err(|e| e.to_string())?)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_ISSUER_CA_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_ISSUER_CA_BYTES {
         return Err("the file is larger than 1 MiB".to_string());
     }
-    std::fs::read_to_string(path).map_err(|e| e.to_string())
+    String::from_utf8(bytes).map_err(|_| "not valid UTF-8".to_string())
 }
 
 /// PEM CA издателя: данные декодируются, файл читается (относительный путь — от каталога
@@ -1474,7 +1487,11 @@ contexts:
     #[test]
     fn oversized_or_irregular_issuer_ca_file_is_a_warning() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("big.pem"), vec![b'a'; 1024 * 1024 + 1]).unwrap();
+        // Корректный PEM-сертификат, дополненный пустыми строками сверх 1 МиБ: разбор его принял
+        // бы, отклоняет именно предел размера.
+        let big = format!("{TEST_CERT_PEM}{}", "\n".repeat(1024 * 1024));
+        assert!(pem_certificates(&big).is_ok());
+        std::fs::write(dir.path().join("big.pem"), big).unwrap();
         std::fs::create_dir(dir.path().join("sub")).unwrap();
         for file in ["big.pem", "sub"] {
             let ca = IssuerCa::File(file.to_string());
