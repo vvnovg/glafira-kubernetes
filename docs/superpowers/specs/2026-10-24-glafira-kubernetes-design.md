@@ -197,25 +197,25 @@ crates/glafira-mcp-kubernetes — инструменты, типы ответо�
 
 Две независимые вещи:
 - **Группы API** из discovery решают, какие объекты читаются и показываются: Route — при `route.openshift.io`,
-  DeploymentConfig — при `apps.openshift.io`, проекты — при `project.openshift.io` (иначе список namespace), Ingress —
+  DeploymentConfig — при `apps.openshift.io`, проекты — при `project.openshift.io`, иначе при `projects.dropapp.ru`, иначе список namespace, Ingress —
   всегда, Gateway API — при `gateway.networking.k8s.io/v1`. Правило одно для всех платформ: кластер DropApp с CRD
   `Route` покажет Route.
 - **Платформа** — то, что у вендоров устроено по-разному и из групп API не выводится. Трейт `Platform` в `platform/`,
   реализация выбирается при `connect`:
 
-| Что задаёт платформа | `openshift` | `dropapp` (этап O5) | `kubernetes` |
+| Что задаёт платформа | `openshift` | `dropapp` | `kubernetes` |
 |---|---|---|---|
-| Вход через браузер (§5.2) | OAuth OpenShift | уточняется на O5 | не предлагается |
-| Автопоиск метрик (§7.1) | Thanos Querier в `openshift-monitoring` | уточняется на O5 | Prometheus через прокси API-сервера по списку известных сервисов |
-| Обзор и правила уровня кластера (§6.2, §8.2) | `/readyz`, ClusterVersion, ClusterOperators, MachineConfigPools; правила `cluster.*` | `/readyz`; состояние компонентов платформы — уточняется на O5 | `/readyz`, правило `cluster.apiNotReady` |
-| Срок токена в обзоре подключения (§5.2) | `useroauthaccesstokens` | — | — |
-| Название в интерфейсе и MCP | «OpenShift 4.18» или «OKD 4.15» (по строке версии ClusterVersion) | «DropApp <версия>» | «Kubernetes 1.31», с дистрибутивом — «Kubernetes 1.31 (EKS)» |
+| Вход через браузер (§5.2) | OAuth OpenShift | OIDC (Dex), параметры — из kubeconfig Loginapp | OIDC, если API-сервер к нему подключён |
+| Автопоиск метрик (§7.1) | Thanos Querier в `openshift-monitoring` | VictoriaMetrics: `dapp-monitoring/vmselect-victoria-metrics-k8s-stack:8481` через прокси API-сервера, затем кандидаты `kubernetes` | Prometheus через прокси API-сервера по списку известных сервисов |
+| Обзор и правила уровня кластера (§6.2, §8.2) | `/readyz`, ClusterVersion, ClusterOperators, MachineConfigPools; правила `cluster.*` | `/readyz`, `ClusterMetadata`, `Component`/`Tool`, `DropAppNode`, `IngressTLS`; правила `cluster.componentFailed`, `cluster.dropappNodeNotReady`, `cluster.ingressTlsNotReady` | `/readyz`, правило `cluster.apiNotReady` |
+| Срок токена в обзоре подключения (§5.2) | `useroauthaccesstokens` | `exp` токена OIDC | `exp` токена OIDC |
+| Название в интерфейсе и MCP | «OpenShift 4.18» или «OKD 4.15» (по строке версии ClusterVersion) | «DropApp 5.1.2» (`ClusterMetadata.spec.dappVersion`), без версии — «DropApp (Kubernetes 1.29)» | «Kubernetes 1.31», с дистрибутивом — «Kubernetes 1.31 (EKS)» |
 
 **Определение** — чистая функция `platform::detect(discovery, version) -> PlatformInfo { kind, distribution?, version }`,
 вызывается при `connect` и на шаге 4 `test_connection`, признаки проверяются по порядку:
 1. группа `config.openshift.io` → `openshift`;
-2. признак DropApp (устанавливается на этапе O5 по живому кластеру) → `dropapp`. CRD Kubelatte признаком не считаются:
-   это open-source, его ставят где угодно;
+2. группа `config.dropapp.ru` → `dropapp` (своя группа DropApp с 3.x; CRD Kubelatte признаком не считаются: это
+   open-source, его ставят где угодно);
 3. иначе — `kubernetes`.
 
 **Дистрибутив** (`distribution`) — справочное поле платформы `kubernetes`, только из discovery, `/version` и нод:
@@ -230,23 +230,15 @@ crates/glafira-mcp-kubernetes — инструменты, типы ответо�
 
 #### Platform V DropApp
 
-Фокусная платформа; адаптер — этап O5. Публично известно (октябрь 2026): сборка Kubernetes и набора операторов
-(реестр отечественного ПО, запись № 18621), по материалам производителя — Cilium для CNI и service mesh; при
-переезде с OpenShift Route переводятся в Ingress (`ingressClassName: nginx`), DeploymentConfig — в Deployment,
-поведение SCC повторяет admission-webhook Kubelatte; веб-консоль внешне похожа на консоль OpenShift (вероятно,
-переиспользована консоль OKD — не подтверждено). Документация производителя закрыта. Источник о переезде — доклад
-СберТеха на Saint Highload++ (https://habr.com/ru/articles/905816).
-
-До O5 DropApp работает как `kubernetes`: Ingress, workloads, поды, логи, анализ ресурсов, изменения, проверка без
-правил OpenShift, MCP. Первая задача O5 — обследование живого кластера; по его итогам пишется спека этапа:
-- признак для `detect` — группы API операторов DropApp; если найдутся `config.openshift.io`, кластер уже определяется
-  как `openshift`, и адаптер не нужен;
-- способ входа людей: OIDC через `kubectl oidc-login` закрывается exec-плагинами (§5.2), иное — отдельная задача;
-- где Prometheus и как до него добраться namespace-пользователю;
-- объекты состояния платформы и операторов — для обзора и правил уровня кластера;
-- мультитенантность (что заменяет проекты OpenShift) и serverless (если это Knative — Knative Service как вид
-  workload'а);
-- ingress-классы и service mesh (в том числе Platform V Synapse Service Mesh) — что показывать в «Сети».
+Фокусная платформа; адаптер — этап O5, спека этапа `2026-11-01-glafira-kubernetes-o5-dropapp-design.md`. Сборка
+Kubernetes и набора операторов (реестр отечественного ПО, запись № 18621) с публичной документацией
+(https://platformv.sbertech.ru/docs/public/K8S/; спека O5 написана по версии 5.1.2): свои группы API
+`*.dropapp.ru` (`Component`, `Tool`, `ClusterMetadata`, `DropAppNode`, `IngressTLS`, `Project`), namespace платформы
+`dapp-*`, вход через Dex (LDAP), метрики — VictoriaMetrics, CNI и service mesh — Cilium, консоль — OpenShift Console
+4.12, политики — Gatekeeper и Pod Security Admission. При переезде с OpenShift Route переводятся в Ingress
+(`ingressClassName: nginx`), DeploymentConfig — в Deployment (доклад СберТеха на Saint Highload++,
+https://habr.com/ru/articles/905816). Knative, своих объектов service mesh и проектов OpenShift нет; проекты —
+`projects.dropapp.ru` (5.x, группы API выше). DropApp 1.x–2.x без `config.dropapp.ru` работает как `kubernetes`.
 
 #### Кандидаты после MVP
 
@@ -296,6 +288,7 @@ crates/glafira-mcp-kubernetes — инструменты, типы ответо�
 |---|---|---|
 | **Токен** | `sha256~…` (OAuth OpenShift) или токен ServiceAccount | заголовок `Authorization: Bearer`; в логах маскируется |
 | **Вход через браузер** | — | discovery `GET <api>/.well-known/oauth-authorization-server` → Authorization Code + PKCE (S256) с OAuthClient `openshift-cli-client` и loopback-redirect `http://127.0.0.1:<случайный порт>/callback` (как `oc login --web`); ожидание до 5 мин, отмена — `cancel_oauth_login`. Если клиента нет или он отклоняет redirect — фолбэк: открыть `/oauth/token/request` в системном браузере, пользователь вставляет токен |
+| **Вход через OIDC** | издатель, client id (по умолчанию `dapp`), секрет клиента (keychain), scopes | `<издатель>/.well-known/openid-configuration` → Authorization Code + PKCE (S256) с redirect на фиксированный порт `http://localhost:8000`, если занят — `:18000` (адреса kubelogin, Dex сверяет порт); в API-сервер уходит `id_token`, обновление — по `refresh_token` (оба в keychain); параметры — из аргументов `oidc-login` при импорте kubeconfig или вручную; спека O5 §5 |
 | **Клиентский сертификат** | сертификат + ключ PEM (например, kubeconfig установщика) | ключ — в keychain |
 | **Exec-плагин** | команда, аргументы и переменные окружения (обычно из kubeconfig) | только из списка разрешённых (ниже); Glafira запускает команду напрямую, без оболочки, с таймаутом и отменой, и держит учётные данные до `expirationTimestamp` (не через `kube`: там запуск блокирующий, без таймаута, а текст ошибки содержит переменные окружения) |
 | **Импорт kubeconfig** | файл (по умолчанию `~/.kube/config` и `$KUBECONFIG`), выбор контекстов | §5.5 |
@@ -372,11 +365,13 @@ oc. В тексте отказа — только имя ключа: значе�
   учётные данные плагин выдаёт заново — одной попыткой на всех ожидающих. Отказ 401 клиенту потока сбрасывает его, и
   поток открывается снова новым клиентом — не чаще раза в минуту; повторный отказ завершает сессию (`fatal`).
 - **Срок токена** показывается в обзоре подключения, если его можно прочитать через `useroauthaccesstokens`
-  (`oauth.openshift.io/v1`); за 1 час до истечения — ненавязчивое предупреждение. Оно пересчитывается со временем, без
+  (`oauth.openshift.io/v1`), а у входа через OIDC — из `exp` в `id_token`; за 1 час до истечения — ненавязчивое
+  предупреждение. Оно пересчитывается со временем, без
   перечитывания вкладки; истёкший токен — «Срок токена истёк» с кнопкой «Подключиться заново».
-- **Платформа:** вход через браузер — только OAuth-сервер OpenShift. На других платформах способ в форме доступен,
-  но без метаданных OAuth завершается `AUTH_FAILED` с подсказкой: токен, kubeconfig или exec-плагин. «Войти снова»
-  через браузер и срок токена — только у `openshift`; у exec-плагина «Войти снова» запускает плагин повторно.
+- **Платформа:** вход через браузер в OAuth — только OAuth-сервер OpenShift. На других платформах способ в форме
+  доступен, но без метаданных OAuth завершается `AUTH_FAILED` с подсказкой: вход через OIDC, токен, kubeconfig или
+  exec-плагин. Вход через OIDC от платформы не зависит (у DropApp — Dex). «Войти снова» через браузер и срок токена —
+  у входа OAuth на `openshift` и у входа через OIDC; у exec-плагина «Войти снова» запускает плагин повторно.
 - **Не поддерживаются в MVP:** `auth-provider`-плагины kubeconfig (устаревший механизм), exec-плагины вне списка
   разрешённых и с запрещёнными переменными окружения, логин и пароль через `openshift-challenging-client`.
 
@@ -452,7 +447,9 @@ oc. В тексте отказа — только имя ключа: значе�
   ClusterOperators: список `Degraded` / `Unavailable` / `Progressing`; MachineConfigPools: деградировавшие и
   обновляющиеся. Чего у кластера нет (404: на ROSA HCP нет группы `machineconfiguration.openshift.io`, у выключенной
   консоли нет её объекта), то «—», а не ошибка; запросы к ним пока не гейтятся по группам API.
-- `dropapp`: состояние компонентов платформы — состав уточняется на этапе O5.
+- `dropapp`: версия и имя кластера (`ClusterMetadata`), `Component` и `Tool` (всего и проблемные: `failed`,
+  `upgrading`, с последним событием `Warning`), `DropAppNode` не `ready`, `IngressTLS` с `Ready` ≠ `True`; чего нет
+  (404) — пустая часть (спека O5 §7.1).
 - Без прав — то, что доступно (`/version`, число проектов), и пояснение «Остальное скрыто правами».
 - Кнопка «Проверить» и строка последней проверки (§8).
 
@@ -583,7 +580,11 @@ workloads, событий, PVC, нод, обзора проекта и дере�
      `observability` (Prometheus Operator); кандидаты дистрибутива проверяются первыми. Нужно право
      `get services/proxy` в namespace сервиса — обычно оно есть только у администраторов; 403 — «нет прав на прокси
      к Prometheus». `ReadClient` пропускает через прокси только GET к `/api/v1/query` и `/api/v1/query_range`;
-   - `dropapp` — уточняется на этапе O5.
+   - `dropapp` — сначала VictoriaMetrics через прокси API-сервера:
+     `dapp-monitoring/vmselect-victoria-metrics-k8s-stack:8481` с префиксом пути `/select/0/prometheus` (его
+     `ReadClient` тоже пропускает), затем кандидаты `kubernetes`. Изоляции по namespace у VictoriaMetrics нет: 403 —
+     «нет прав на прокси к VictoriaMetrics», дальше — свой URL профиля (ingress `metrics.<cluster>.<домен>` или
+     `vmauth`, если их включил администратор).
 2. **Свой URL Thanos или Prometheus** из профиля (например, tenancy-endpoint, открытый администраторами) с выбранной
    авторизацией. Tenancy-endpoint без `namespace` отвечает 400, поэтому свой Thanos проверяется с `namespace` проекта
    пользователя: первого избранного, иначе первого из заданных вручную, иначе первого проекта кластера (без проектов —
@@ -729,6 +730,9 @@ request и limit, пометки и нарушения ограничений; �
 | `cluster.operatorDegraded` | cluster | у ClusterOperator `Degraded=True` или `Available=False`; список (до 20) | К | К | П |
 | `cluster.updateFailing` | cluster | у ClusterVersion `Failing=True` | К | К | П |
 | `cluster.mcpDegraded` | cluster | у MachineConfigPool `Degraded=True`; список | К | К | П |
+| `cluster.componentFailed` | cluster | `Component` или `Tool` DropApp в статусе `failed` или `error`; список (до 20) с последним событием `Warning` | К | К | П |
+| `cluster.dropappNodeNotReady` | cluster | `DropAppNode` не `ready`; список | П | П | И |
+| `cluster.ingressTlsNotReady` | cluster | у `IngressTLS` `Ready` ≠ `True`; список | П | П | И |
 | `node.notReady` | node | `Ready` ≠ `True` | К | К | П |
 | `node.pressure` | node | `MemoryPressure`, `DiskPressure` или `PIDPressure` = `True` | К | П | П |
 | `node.requestsHigh` | node | сумма requests подов ноды > 90 % allocatable по CPU или памяти (нужно чтение подов всех namespace) | П | П | И |
@@ -770,7 +774,8 @@ request и limit, пометки и нарушения ограничений; �
   источника или ответе 404 источника или прокси — пробел `resources` в `check.partial` (проверка частичная);
 - правила `cluster.*` и `node.*` требуют прав уровня кластера (кроме `cluster.apiNotReady`); без них — пометка
   в `check.partial`, а не находка. `cluster.operatorDegraded`, `cluster.updateFailing` и `cluster.mcpDegraded` — только
-  у платформы `openshift`; правила уровня кластера для `dropapp` добавляет этап O5;
+  у платформы `openshift`; `cluster.componentFailed`, `cluster.dropappNodeNotReady` и `cluster.ingressTlsNotReady` —
+  только у `dropapp`;
 - правила Route, Ingress и Gateway API работают, только если есть соответствующая группа API. Ingress, из которого
   OpenShift создал Routes (Route с `ownerReference` на Ingress), проверяется правилами `route.*` по этим Routes, а
   `ingress.classMissing` к нему не применяется. Правило пропускает и все Ingress проекта, где Routes ожидались (группа
@@ -1209,7 +1214,7 @@ keychain: сервис glafira-kubernetes, ключи <connection-id>/<field>
 - **Смоук** `docs/smoke/oN.md` на каждый этап: OpenShift Local (CRC) или dev-кластер — вход через браузер, токен,
   kubeconfig; namespace-пользователь без прав на мониторинг (метрики через `metrics.k8s.io`); пользователь с
   `cluster-monitoring-view` (Thanos); кластер Kubernetes без OpenShift (kind или k3s) с Ingress и Gateway API, вход
-  через exec-плагин (`kubectl oidc-login` или облачный); с O5 — кластер DropApp; Claude Desktop и Claude Code; Windows
+  через exec-плагин (`kubectl oidc-login` или облачный); с O5 — имитация DropApp в kind, затем стенд DropApp; Claude Desktop и Claude Code; Windows
   и Linux AppImage.
 
 ---
@@ -1240,7 +1245,7 @@ keychain: сервис glafira-kubernetes, ключи <connection-id>/<field>
 | **O3. Ресурсы, изменения, предложения** | Источники метрик (включая автопоиск Prometheus через прокси API-сервера), PromQL-шаблоны, движок рекомендаций, вкладки «Ресурсы» workload'а и проекта, графики; правила `resources.*`; изменяющие операции §9 с dry-run и guard; `get_resource_usage`, `recommend_resources`, `propose_change`, `list_proposals`, `withdraw_proposal` с заполнением форм (22 инструмента) |
 | **O4. Логи для LLM** | Уровень `logs`, маскировка логов и значений, политика `mcpLogsEnabled`, `get_pod_logs`, `search_workload_logs` (24 инструмента) |
 | **O4b. Локальные модели** | Подсказка формы при ошибке аргументов, приведение аргументов к схеме, предел размера ответа 100 / 48 / 24 КБ, компактный набор инструментов клиента с инструкциями без инструментов записи (спека этапа `2026-11-01-glafira-kubernetes-o4b-local-llm-design.md`) |
-| **O5. DropApp** | Обследование живого кластера DropApp и спека этапа (§4.3); адаптер `dropapp`: признак для `detect`, вход, автопоиск метрик, обзор и правила уровня кластера, найденное по мультитенантности, serverless и сети; смоук на DropApp. Условие начала — стенд DropApp и доступ к документации; без них этап переносится, и O6 его не ждёт |
+| **O5. DropApp** | Адаптер `dropapp` по публичной документации DropApp 5.1.2: признак `config.dropapp.ru` и версия, проекты `projects.dropapp.ru`, вход через OIDC (Dex), автопоиск VictoriaMetrics, обзор и три правила уровня кластера; имитация DropApp в kind; смоук на стенде DropApp проводит пользователь позже (спека этапа `2026-11-01-glafira-kubernetes-o5-dropapp-design.md`) |
 | **O6. Раздача** | Остальные 10 языков и глоссарий, руководство на 12 языках, `docs/admin.md` и примеры политики со всеми ключами, подписание, установщики, updater, репозиторий релизов |
 
 **После MVP (кандидаты):** `query_metrics` (произвольный PromQL с принудительным ограничением по namespace), локальная
@@ -1268,7 +1273,7 @@ cordon/drain нод, настраиваемые коэффициенты рек�
 | Расхождение общего кода с Kafka-версией | `PORTED.md` с коммитом источника, границы крейтов под будущий вынос |
 | Windows: stdio шима из GUI-бинаря | Решение Kafka-версии переносится; проверка — первая задача плана O2 |
 | Неверное определение платформы | Признаки — группы API и строка версии, а не имена namespace; объекты показываются по наличию групп API, а не по платформе; платформа видна в проверке подключения; табличные тесты на снимках discovery |
-| Документация DropApp закрыта, стенда нет | До O5 DropApp работает на общем уровне; O5 начинается с обследования живого кластера и переносится, если стенда нет |
+| Стенда DropApp нет, адаптер написан по документации | Документация публичная (спека O5 §1); код проверяется на имитации DropApp в kind, смоук на стенде — отдельно (`docs/smoke/o5.md`) с пунктами, которые имитация не покрывает; поля статуса читаются терпимо (спека O5 §7.1) |
 | Exec-плагины запускают внешние команды | Список разрешённых, абсолютный путь, подтверждение строки запуска человеком (повторно — при её изменении и при импорте файла), запуск без оболочки, политика `allowExecAuth` |
 | GUI-приложение не видит PATH оболочки (macOS) | Путь к команде exec-плагина ищется в PATH оболочки входа и стандартных каталогах при импорте и сохраняется в профиле; его можно поправить в форме |
 | Товарный знак Kubernetes в названии продукта | Форма «for Kubernetes» описывает совместимость; перед первым релизом сверить с правилами использования знаков The Linux Foundation |
