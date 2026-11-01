@@ -149,7 +149,8 @@
       "badTokenResponse": "The OIDC provider returned an unexpected response",
       "noIdToken": "The OIDC provider returned no ID token — check that the scopes include openid",
       "nonceMismatch": "The ID token from the OIDC provider does not belong to this sign-in — sign in again",
-      "issuerCaInvalid": "The OIDC issuer CA certificate must be in PEM format (-----BEGIN CERTIFICATE-----)"
+      "issuerCaInvalid": "The OIDC issuer CA certificate must be in PEM format (-----BEGIN CERTIFICATE-----)",
+      "issuerCaUntrusted": "The certificate of the OIDC issuer {{url}} is not trusted — add the issuer CA (PEM) to the connection"
     },
     "exec": {
       "commandMissing": "Specify the exec plugin command",

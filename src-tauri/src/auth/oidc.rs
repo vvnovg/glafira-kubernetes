@@ -97,6 +97,25 @@ fn no_metadata(url: &str) -> AppError {
     )
 }
 
+/// Сетевая ошибка запроса к издателю. Недоверенный сертификат — ключ про CA издателя: общий
+/// текст `errors.k8s.caUntrusted` советует указать CA кластера, а у издателя он свой.
+fn issuer_error(e: &reqwest::Error, issuer_url: &str) -> AppError {
+    let err = from_reqwest(e);
+    if err.key != "errors.k8s.caUntrusted" {
+        return err;
+    }
+    let untrusted = app_err!(
+        ErrorCode::TlsError,
+        "errors.oidc.issuerCaUntrusted",
+        "The certificate of the OIDC issuer {{url}} is not trusted — add the issuer CA (PEM) to the connection",
+        url = issuer_url.trim().trim_end_matches('/')
+    );
+    match err.details {
+        Some(d) => untrusted.with_details(d),
+        None => untrusted,
+    }
+}
+
 /// Адрес авторизации открывается в браузере, а на адрес токенов уходят код, verifier и секрет
 /// клиента: только https. http допустим лишь для локального издателя (127.0.0.1 и localhost,
 /// как в `validate_oidc`: тесты и имитация).
@@ -129,7 +148,11 @@ fn check_endpoints(issuer: &str, meta: &OidcMetadata) -> AppResult<()> {
 pub async fn fetch_metadata(http: &reqwest::Client, issuer_url: &str) -> AppResult<OidcMetadata> {
     let issuer = issuer_url.trim().trim_end_matches('/');
     let url = format!("{issuer}/.well-known/openid-configuration");
-    let r = http.get(&url).send().await.map_err(|e| from_reqwest(&e))?;
+    let r = http
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| issuer_error(&e, issuer))?;
     if !r.status().is_success() {
         return Err(no_metadata(issuer).with_details(format!("{url}: HTTP {}", r.status())));
     }
@@ -223,9 +246,12 @@ async fn token_request(
         .form(&form)
         .send()
         .await
-        .map_err(|e| from_reqwest(&e))?;
+        .map_err(|e| issuer_error(&e, &auth.issuer_url))?;
     let status = r.status();
-    let text = r.text().await.map_err(|e| from_reqwest(&e))?;
+    let text = r
+        .text()
+        .await
+        .map_err(|e| issuer_error(&e, &auth.issuer_url))?;
     if !status.is_success() {
         let err: TokenError = serde_json::from_str(&text).unwrap_or_default();
         let reason = match (err.error.as_str(), err.error_description.as_str()) {
@@ -729,13 +755,15 @@ mod tests {
             });
             p
         };
-        // Сертификат издателя выпущен не CA подключения: без CA издателя — ошибка TLS с адресом.
+        // Сертификат издателя выпущен не CA подключения: без CA издателя — ошибка TLS про CA
+        // издателя (а не про CA кластера) с адресом.
         let http = http_client(&with(None, CaConfig::System)).unwrap();
         let e = fetch_metadata(&http, &issuer_url).await.unwrap_err();
         assert_eq!(
             (e.code, e.key.as_str()),
-            (ErrorCode::TlsError, "errors.k8s.caUntrusted")
+            (ErrorCode::TlsError, "errors.oidc.issuerCaUntrusted")
         );
+        assert_eq!(e.params["url"], issuer_url);
         assert!(e.details.unwrap().contains(&issuer_url), "адрес издателя");
         // CA издателя добавляется к CA подключения, а не заменяет его.
         let connection_ca = CaConfig::Pem {

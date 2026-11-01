@@ -219,7 +219,7 @@ fn exec_auth(
 
 /// Вход через OIDC из exec-плагина int128/kubelogin (`kubelogin get-token …` или
 /// `kubectl oidc-login get-token …`) с `--oidc-issuer-url` (спека O5 §5.4): издатель, client id
-/// (нет — `dapp`), scopes (`openid` и `--oidc-extra-scope`; нет ни одного — scopes DropApp) и
+/// (нет — `dapp`), scopes (`openid`, `--oidc-extra-scope` и `offline_access`; нет ни одного — scopes DropApp) и
 /// секрет клиента, CA издателя (`--certificate-authority-data` важнее `--certificate-authority`,
 /// как `*-data` в kubeconfig). Ключ и значение — `--k=v` или `--k v`, у повторённого ключа —
 /// последнее значение. Azure kubelogin (`--login`, `--server-id`) — не вход через OIDC.
@@ -274,11 +274,16 @@ pub fn oidc_login(command: &str, args: &[String]) -> Option<OidcLogin> {
         .filter(|s| !s.is_empty() && *s != "openid")
         .map(String::from)
         .collect();
-    let scopes = if extra.is_empty() {
+    let mut scopes: Vec<String> = if extra.is_empty() {
         DEFAULT_OIDC_SCOPES.map(String::from).to_vec()
     } else {
         std::iter::once("openid".to_string()).chain(extra).collect()
     };
+    // Без `offline_access` Dex не выдаёт refresh-токен, и вход пришлось бы повторять, когда истечёт
+    // `id_token`; kubelogin обходится без него, Glafira — обновляет токен сама (спека O5 §5.3).
+    if !scopes.iter().any(|s| s == "offline_access") {
+        scopes.push("offline_access".to_string());
+    }
     let auth = OidcAuth {
         issuer_url,
         client_id: last("oidc-client-id").unwrap_or_else(|| DEFAULT_OIDC_CLIENT_ID.to_string()),
@@ -1205,6 +1210,22 @@ contexts:
         assert_eq!(login.auth.scopes, DEFAULT_OIDC_SCOPES);
         assert_eq!((login.client_secret, login.issuer_ca), (None, None));
 
+        // Без `offline_access` в аргументах он добавляется: иначе Dex не выдаёт refresh-токен.
+        let login = oidc_login(
+            "kubelogin",
+            &args(&[
+                "get-token",
+                "--oidc-issuer-url=https://sso.corp",
+                "--oidc-extra-scope=email",
+                "--oidc-extra-scope=groups",
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            login.auth.scopes,
+            ["openid", "email", "groups", "offline_access"]
+        );
+
         // CA данными важнее CA файлом, как `certificate-authority-data` в kubeconfig.
         let login = oidc_login(
             "kubelogin",
@@ -1296,7 +1317,7 @@ contexts:
         assert_eq!((c.auth, c.unsupported.clone()), (ImportAuth::Oidc, None));
         let oidc = c.oidc.as_ref().unwrap();
         assert_eq!(oidc.auth.issuer_url, "https://auth.c1.example.com");
-        assert_eq!(oidc.auth.scopes, ["openid", "groups"]);
+        assert_eq!(oidc.auth.scopes, ["openid", "groups", "offline_access"]);
         assert!(oidc.has_client_secret);
         assert_eq!(c.exec, None);
         assert_eq!(
@@ -1313,7 +1334,7 @@ contexts:
             AuthConfig::Oidc(OidcAuth {
                 issuer_url: "https://auth.c1.example.com".into(),
                 client_id: "dapp".into(),
-                scopes: vec!["openid".into(), "groups".into()],
+                scopes: vec!["openid".into(), "groups".into(), "offline_access".into()],
                 issuer_ca_pem: None,
             })
         );

@@ -149,7 +149,8 @@
       "badTokenResponse": "OIDC-провайдер вернул неожиданный ответ",
       "noIdToken": "OIDC-провайдер не вернул ID-токен — проверьте, что в scopes есть openid",
       "nonceMismatch": "ID-токен от OIDC-провайдера относится не к этому входу — войдите снова",
-      "issuerCaInvalid": "CA издателя OIDC должен быть в формате PEM (-----BEGIN CERTIFICATE-----)"
+      "issuerCaInvalid": "CA издателя OIDC должен быть в формате PEM (-----BEGIN CERTIFICATE-----)",
+      "issuerCaUntrusted": "Сертификат издателя OIDC {{url}} не доверен — добавьте CA издателя (PEM) в подключение"
     },
     "exec": {
       "commandMissing": "Укажите команду exec-плагина",
