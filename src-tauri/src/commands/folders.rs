@@ -168,9 +168,9 @@ fn import_from_file(
         return Ok(planned.preview);
     }
     // Токены входа и секрет клиента подключений, у которых сменились издатель OIDC, client id или
-    // CA издателя, удаляются до записи профиля и вне блокировки хранилища: сбой keychain
-    // останавливает импорт, пока ничего не изменено, а секреты прежнего издателя не достаются
-    // новому. Подключения, которые план под блокировкой добавит к этому списку (хранилище
+    // CA издателя либо способ входа с OIDC или на OIDC (`ImportPlan::oidc_reset`), удаляются до
+    // записи профиля и вне блокировки хранилища: сбой keychain останавливает импорт, пока ничего
+    // не изменено, а секреты прежнего издателя не достаются новому. Подключения, которые план под блокировкой добавит к этому списку (хранилище
     // изменилось между снимком и записью), чистятся после записи.
     reset_oidc_secrets(st, &planned.oidc_reset)?;
     let (preview, reset) = st.connections.update(|data| {
@@ -331,6 +331,21 @@ mod tests {
     fn oidc_secrets_after_import(
         edit: impl FnOnce(&mut crate::storage::profile::OidcAuth),
     ) -> (ImportPreview, [Option<String>; 3]) {
+        let local =
+            crate::storage::profile::AuthConfig::Oidc(crate::storage::profile::sample_oidc());
+        secrets_after_import(local, |p| {
+            if let crate::storage::profile::AuthConfig::Oidc(o) = &mut p.auth {
+                edit(o);
+            }
+        })
+    }
+
+    /// Подключение `a` со способом входа `local_auth` и секретами OIDC в keychain (у не-OIDC —
+    /// остатки), применение файла, где профиль изменён `edit`; предпросмотр и оставшиеся секреты.
+    fn secrets_after_import(
+        local_auth: crate::storage::profile::AuthConfig,
+        edit: impl FnOnce(&mut crate::storage::connections::ConnectionProfile),
+    ) -> (ImportPreview, [Option<String>; 3]) {
         use crate::secrets::{OIDC_CLIENT_SECRET, OIDC_ID_TOKEN, OIDC_REFRESH_TOKEN};
         let dir = tempfile::tempdir().unwrap();
         let secrets = Arc::new(MemoryStore::default());
@@ -340,14 +355,11 @@ mod tests {
         }
         let st = AppState::new(dir.path(), secrets.clone()).unwrap();
         let mut local = sample_profile("a");
-        local.auth =
-            crate::storage::profile::AuthConfig::Oidc(crate::storage::profile::sample_oidc());
+        local.auth = local_auth;
         st.connections.upsert(local.clone()).unwrap();
         let mut changed = local;
         changed.environment = crate::storage::profile::Environment::Prod;
-        if let crate::storage::profile::AuthConfig::Oidc(o) = &mut changed.auth {
-            edit(o);
-        }
+        edit(&mut changed);
         let path = dir.path().join("in.glafira-kubernetes-connections.json");
         std::fs::write(
             &path,
@@ -362,6 +374,31 @@ mod tests {
         assert_eq!(preview.updated.len(), 1);
         let left = fields.map(|f| secrets.get(&secret_key("a", f)).unwrap());
         (preview, left)
+    }
+
+    /// Импорт, после которого подключение не входит через OIDC, удаляет токены и секрет клиента
+    /// (как форма — `secret_ops`) и предупреждает: иначе следующий импорт с другим издателем
+    /// отправил бы их ему.
+    #[test]
+    fn import_leaving_oidc_drops_oidc_secrets() {
+        let oidc =
+            crate::storage::profile::AuthConfig::Oidc(crate::storage::profile::sample_oidc());
+        let token = sample_profile("a").auth;
+        let (preview, left) = secrets_after_import(oidc, |p| p.auth = token);
+        assert_eq!(preview.warnings.len(), 1);
+        assert_eq!(preview.warnings[0].key, "messages.import.oidcDropped");
+        assert_eq!(preview.warnings[0].params["name"], "conn-a");
+        assert_eq!(left, [None, None, None]);
+    }
+
+    /// Переход на OIDC импортом удаляет оставшиеся от прежнего входа токены и секрет клиента.
+    #[test]
+    fn import_switching_to_oidc_drops_leftover_oidc_secrets() {
+        let (_, left) = secrets_after_import(sample_profile("a").auth, |p| {
+            p.auth =
+                crate::storage::profile::AuthConfig::Oidc(crate::storage::profile::sample_oidc())
+        });
+        assert_eq!(left, [None, None, None]);
     }
 
     /// Импорт с другим издателем, client id или CA издателя предупреждает и удаляет токены и

@@ -271,6 +271,7 @@
       "addressChanged": "“{{name}}”: the API address changes from {{from}} to {{to}}. The saved credentials (token, key or confirmed exec plugin) will be sent to the new address.",
       "proxyChanged": "“{{name}}”: the proxy settings change. The saved credentials (token, key or confirmed exec plugin) will go through the new proxy.",
       "oidcChanged": "“{{name}}”: the OIDC issuer, client ID or issuer CA changes. The saved sign-in tokens and client secret will be deleted — sign in again.",
+      "oidcDropped": "“{{name}}”: the connection stops using OIDC sign-in. The saved sign-in tokens and client secret will be deleted.",
       "tlsChanged": "“{{name}}”: the certificate verification settings (CA or TLS server name) change. The saved credentials (token, key or confirmed exec plugin) will be used with the new settings."
     },
     "metrics": {

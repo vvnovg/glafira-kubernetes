@@ -364,8 +364,9 @@ pub struct ImportPreview {
 pub(crate) struct ImportPlan {
     pub next: StoreData,
     pub preview: ImportPreview,
-    /// Обновлённые подключения, у которых сменились издатель OIDC, client id или CA издателя: их
-    /// токены входа и секрет клиента удаляются после записи хранилища.
+    /// Обновлённые подключения, у которых сменились издатель OIDC, client id или CA издателя или
+    /// способ входа с OIDC или на OIDC: их токены входа и секрет клиента удаляются (до записи
+    /// хранилища, `import_from_file`).
     pub oidc_reset: Vec<String>,
 }
 
@@ -700,9 +701,21 @@ pub(crate) fn plan_import(
             preview
                 .warnings
                 .extend(destination_warnings(stored, slot, &profile));
-            // Токены и секрет клиента выданы прежнему издателю и клиенту: после записи профиля
-            // они удаляются, как при сохранении формы.
-            if oidc_identity_changed(&slot.auth, &profile.auth) {
+            // Токены и секрет клиента выданы прежнему издателю и клиенту: они удаляются, если
+            // сменились издатель, клиент или CA издателя, если подключение больше не входит через
+            // OIDC (как при сохранении формы — `secret_ops`; иначе следующий импорт с другим
+            // издателем отправил бы их ему) и если оно только переходит на OIDC (остатки прежнего
+            // входа).
+            let was_oidc = matches!(slot.auth, AuthConfig::Oidc(_));
+            let is_oidc = matches!(profile.auth, AuthConfig::Oidc(_));
+            if was_oidc && !is_oidc {
+                preview.warnings.push(ltext!(
+                    "messages.import.oidcDropped",
+                    "“{{name}}”: the connection stops using OIDC sign-in. The saved sign-in tokens and client secret will be deleted.",
+                    name = profile.name
+                ));
+            }
+            if was_oidc != is_oidc || oidc_identity_changed(&slot.auth, &profile.auth) {
                 oidc_reset.push(profile.id.clone());
             }
             updated.push((TreeItemKind::Connection, profile.id.clone()));
