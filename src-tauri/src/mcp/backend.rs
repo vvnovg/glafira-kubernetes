@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use glafira_mcp_core::{BackendError, BoxFuture, Hooks, SessionAccess, SessionView};
+use glafira_mcp_core::{BackendError, BoxFuture, ClientOptions, Hooks, SessionAccess, SessionView};
 use glafira_mcp_kubernetes::health as mh;
 use glafira_mcp_kubernetes::logs::{LogsOp, LogsOutput};
 use glafira_mcp_kubernetes::model::{self as m, LogsAccess, Scope, not_allowed};
@@ -906,6 +906,18 @@ impl Hooks for AppBackend {
     fn sessions_changed(&self) {
         (self.on_change)(false);
     }
+
+    fn client_options(&self, session: &SessionView) -> ClientOptions {
+        let mcp = self.state.settings.mcp();
+        let name = session.client.as_ref().map(|c| c.name.as_str());
+        ClientOptions {
+            response_limit_bytes: mcp.response_limit_kb() as usize * 1024,
+            compact_tools: mcp
+                .approved_clients
+                .iter()
+                .any(|c| Some(c.name.as_str()) == name && c.compact_tools),
+        }
+    }
 }
 
 impl Backend for AppBackend {
@@ -1066,6 +1078,29 @@ mod tests {
             200,
             serde_json::json!({"apiVersion": "v1", "kind": "List", "metadata": {}, "items": items}),
         )
+    }
+
+    #[test]
+    fn client_options_follow_the_settings() {
+        let (_dir, b) = backend();
+        let opts = |name| b.client_options(&view("s1", name));
+        assert_eq!(
+            opts(Some("cursor")),
+            glafira_mcp_core::ClientOptions::default()
+        );
+        b.state.settings.remember_client("cursor", "1", 1).unwrap();
+        b.state.settings.set_mcp_response_limit(48).unwrap();
+        b.state.settings.set_client_compact("cursor", true).unwrap();
+        assert_eq!(
+            opts(Some("cursor")),
+            glafira_mcp_core::ClientOptions {
+                response_limit_bytes: 48 * 1024,
+                compact_tools: true,
+            }
+        );
+        assert!(!opts(Some("claude-code")).compact_tools);
+        assert!(!opts(None).compact_tools, "клиент без имени — полный набор");
+        assert_eq!(opts(None).response_limit_bytes, 48 * 1024);
     }
 
     fn view(id: &str, name: Option<&str>) -> SessionView {

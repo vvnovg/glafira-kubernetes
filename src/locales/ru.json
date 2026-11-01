@@ -50,7 +50,8 @@
     },
     "settings": {
       "unknownLanguage": "Неизвестный язык «{{code}}»",
-      "languageByPolicy": "Язык задан вашей организацией"
+      "languageByPolicy": "Язык задан вашей организацией",
+      "unknownResponseLimit": "Неподдерживаемый предел ответа {{kb}} КБ"
     },
     "policy": {
       "invalidBool": "{{key}}: недопустимое логическое {{value}}",

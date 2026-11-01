@@ -50,7 +50,8 @@
     },
     "settings": {
       "unknownLanguage": "Unknown language “{{code}}”",
-      "languageByPolicy": "The language is set by your organization"
+      "languageByPolicy": "The language is set by your organization",
+      "unknownResponseLimit": "Unsupported response limit {{kb}} KB"
     },
     "policy": {
       "invalidBool": "{{key}}: invalid boolean {{value}}",
