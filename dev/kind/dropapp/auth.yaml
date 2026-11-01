@@ -1,0 +1,93 @@
+# Dex в dapp-auth (как Tool dex DropApp): HTTPS с самоподписанным CA (сертификат и ключ — Secret dex-tls, их пишет
+# up.sh из out/), клиент dapp с redirectURIs DropApp (порты 8000 и 18000 kubectl oidc-login, callback Loginapp),
+# пароли вместо LDAP (у DropApp passwordConnector: ldap). Под с hostNetwork на ноде: порт 5556 ноды проброшен на
+# 127.0.0.1:5556 машины разработчика (kind.yaml), и издатель одинаков для браузера, Glafira и API-сервера. Группы Dex
+# со статическими паролями не даёт — RBAC привязан к email: admin@dropapp.test — cluster-admin, dev@dropapp.test —
+# admin только в team-a (пользователь namespace DropApp). Пароли — в README.md.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dex
+  namespace: dapp-auth
+data:
+  config.yaml: |
+    issuer: https://dex.glafira-dropapp.localhost:5556
+    storage:
+      type: memory
+    web:
+      https: 0.0.0.0:5556
+      tlsCert: /etc/dex/tls/tls.crt
+      tlsKey: /etc/dex/tls/tls.key
+    oauth2:
+      skipApprovalScreen: true
+      passwordConnector: local
+    enablePasswordDB: true
+    staticClients:
+      - id: dapp
+        name: DropApp
+        secret: glafira-dropapp-secret
+        redirectURIs:
+          - http://localhost:8000
+          - http://localhost:18000
+          - http://127.0.0.1:9000/auth/callback
+          - http://localhost:9000/auth/callback
+    staticPasswords:
+      - email: admin@dropapp.test
+        hash: "$2a$10$4QlMHMy3lVnfhJhUDa48A.e7KRrRcK8ibI29jWtnXL6E3V/cQr/ay"
+        username: admin
+        userID: 3c5f1052-6543-4e82-ae20-3fd44fc3e344
+      - email: dev@dropapp.test
+        hash: "$2a$10$9SaYPmMMys1yt3fYU7h.ROR15AS9Ap4Y19Coo1/oD9vzq91eo.t0S"
+        username: dev
+        userID: c420e738-e806-4edb-b4ab-55d7d6aa8471
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dex
+  namespace: dapp-auth
+spec:
+  replicas: 1
+  # hostNetwork: новый под не поднимется, пока старый держит порт 5556.
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: dex }
+  template:
+    metadata:
+      labels: { app: dex }
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: dex
+          image: ghcr.io/dexidp/dex:v2.45.1
+          imagePullPolicy: IfNotPresent
+          command: ["dex", "serve", "/etc/dex/cfg/config.yaml"]
+          readinessProbe:
+            httpGet: { scheme: HTTPS, port: 5556, path: /.well-known/openid-configuration }
+          volumeMounts:
+            - { name: config, mountPath: /etc/dex/cfg }
+            - { name: tls, mountPath: /etc/dex/tls }
+      volumes:
+        - name: config
+          configMap: { name: dex }
+        - name: tls
+          secret: { secretName: dex-tls }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dropapp-admin
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: cluster-admin }
+subjects:
+  - { apiGroup: rbac.authorization.k8s.io, kind: User, name: admin@dropapp.test }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dropapp-dev
+  namespace: team-a
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: admin }
+subjects:
+  - { apiGroup: rbac.authorization.k8s.io, kind: User, name: dev@dropapp.test }

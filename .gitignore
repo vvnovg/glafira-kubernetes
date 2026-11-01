@@ -29,6 +29,8 @@ dist-ssr
 
 # Стенд kind: kubeconfig с ключом администратора и токеном
 dev/kind/out/
+# Имитация DropApp: kubeconfig с ключом администратора, CA и ключ Dex, кэш токенов oidc-login
+dev/kind/dropapp/out/
 
 # Сборка крейтов MCP-шлюза
 /crates/*/target/

@@ -1,0 +1,218 @@
+# VictoriaMetrics мониторинга DropApp в dapp-monitoring, кластерный режим по одному поду: vmstorage, vminsert,
+# vmselect за Service vmselect-victoria-metrics-k8s-stack:8481 (имя и порт — как у DropApp, кандидат
+# DROPAPP_VMSELECT в metrics/discovery.rs; API Prometheus — /select/0/prometheus) и vmagent. vmagent собирает метрики
+# kubelet и cAdvisor каждой ноды через прокси API-сервера (/api/v1/nodes/<нода>/proxy/metrics[/cadvisor]) — права
+# nodes/proxy и nodes/metrics у его ServiceAccount — и пишет их в vminsert. kube-state-metrics нет: владельцы подов
+# в метриках не видны. Данные — в emptyDir, пропадают с подом vmstorage.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dapp-monitoring
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vmstorage
+  namespace: dapp-monitoring
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: vmstorage }
+  template:
+    metadata:
+      labels: { app: vmstorage }
+    spec:
+      containers:
+        - name: vmstorage
+          image: victoriametrics/vmstorage:v1.148.0-cluster
+          imagePullPolicy: IfNotPresent
+          args: ["-storageDataPath=/storage", "-retentionPeriod=7d"]
+          ports:
+            - { name: http, containerPort: 8482 }
+            - { name: vminsert, containerPort: 8400 }
+            - { name: vmselect, containerPort: 8401 }
+          readinessProbe:
+            httpGet: { port: 8482, path: /health }
+          volumeMounts:
+            - { name: storage, mountPath: /storage }
+      volumes:
+        - name: storage
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vmstorage
+  namespace: dapp-monitoring
+spec:
+  selector: { app: vmstorage }
+  ports:
+    - { name: vminsert, port: 8400 }
+    - { name: vmselect, port: 8401 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vminsert
+  namespace: dapp-monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: vminsert }
+  template:
+    metadata:
+      labels: { app: vminsert }
+    spec:
+      containers:
+        - name: vminsert
+          image: victoriametrics/vminsert:v1.148.0-cluster
+          imagePullPolicy: IfNotPresent
+          args: ["-storageNode=vmstorage:8400"]
+          ports:
+            - { name: http, containerPort: 8480 }
+          readinessProbe:
+            httpGet: { port: 8480, path: /health }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vminsert
+  namespace: dapp-monitoring
+spec:
+  selector: { app: vminsert }
+  ports:
+    - { name: http, port: 8480 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vmselect
+  namespace: dapp-monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: vmselect }
+  template:
+    metadata:
+      labels: { app: vmselect }
+    spec:
+      containers:
+        - name: vmselect
+          image: victoriametrics/vmselect:v1.148.0-cluster
+          imagePullPolicy: IfNotPresent
+          args: ["-storageNode=vmstorage:8401"]
+          ports:
+            - { name: http, containerPort: 8481 }
+          readinessProbe:
+            httpGet: { port: 8481, path: /health }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vmselect-victoria-metrics-k8s-stack
+  namespace: dapp-monitoring
+spec:
+  selector: { app: vmselect }
+  ports:
+    - { name: http, port: 8481 }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vmagent
+  namespace: dapp-monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dapp-vmagent
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [nodes/proxy, nodes/metrics]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dapp-vmagent
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: dapp-vmagent }
+subjects:
+  - { kind: ServiceAccount, name: vmagent, namespace: dapp-monitoring }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vmagent
+  namespace: dapp-monitoring
+data:
+  scrape.yml: |
+    global:
+      scrape_interval: 15s
+    scrape_configs:
+      - job_name: kubelet
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/$1/proxy/metrics
+          - source_labels: [__meta_kubernetes_node_name]
+            target_label: node
+      - job_name: cadvisor
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/$1/proxy/metrics/cadvisor
+          - source_labels: [__meta_kubernetes_node_name]
+            target_label: node
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vmagent
+  namespace: dapp-monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: vmagent }
+  template:
+    metadata:
+      labels: { app: vmagent }
+    spec:
+      serviceAccountName: vmagent
+      containers:
+        - name: vmagent
+          image: victoriametrics/vmagent:v1.148.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - -promscrape.config=/config/scrape.yml
+            - -remoteWrite.url=http://vminsert:8480/insert/0/prometheus/api/v1/write
+            - -remoteWrite.tmpDataPath=/data
+          ports:
+            - { name: http, containerPort: 8429 }
+          volumeMounts:
+            - { name: config, mountPath: /config }
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: config
+          configMap: { name: vmagent }
+        - name: data
+          emptyDir: {}

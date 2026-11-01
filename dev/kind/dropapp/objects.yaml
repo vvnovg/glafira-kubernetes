@@ -1,0 +1,106 @@
+# Объекты DropApp для обзора и проверки кластера (tests/it_dropapp.rs). Статусы — подресурс status: их пишет up.sh
+# (kubectl patch --subresource=status), событие Warning у Tool console — тоже он (нужен uid объекта). Проект team-a —
+# Project и namespace с Deployment web, чтобы у vmagent были метрики подов. Образ __HELPER_IMAGE__ — помощник
+# local-path-provisioner, который уже есть на ноде (как в dev/kind/setup.sh).
+apiVersion: config.dropapp.ru/v1alpha1
+kind: ClusterMetadata
+metadata:
+  name: cluster-metadata
+spec:
+  clusterName: glafira-dropapp
+  dappVersion: 5.1.2
+---
+apiVersion: config.dropapp.ru/v1alpha1
+kind: Component
+metadata:
+  name: auth
+---
+apiVersion: config.dropapp.ru/v1alpha1
+kind: Component
+metadata:
+  name: cni
+---
+apiVersion: config.dropapp.ru/v1alpha1
+kind: Component
+metadata:
+  name: monitoring
+---
+apiVersion: config.dropapp.ru/v1alpha1
+kind: Component
+metadata:
+  name: ingress-controller
+---
+apiVersion: config.dropapp.ru/v1alpha1
+kind: Tool
+metadata:
+  name: dex
+---
+apiVersion: config.dropapp.ru/v1alpha1
+kind: Tool
+metadata:
+  name: grafana
+---
+apiVersion: config.dropapp.ru/v1alpha1
+kind: Tool
+metadata:
+  name: console
+---
+apiVersion: nodes.dropapp.ru/v1alpha1
+kind: DropAppNode
+metadata:
+  name: glafira-dropapp-control-plane
+---
+apiVersion: nodes.dropapp.ru/v1alpha1
+kind: DropAppNode
+metadata:
+  name: worker-2
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dapp-ingress
+---
+apiVersion: tls.dropapp.ru/v1alpha1
+kind: IngressTLS
+metadata:
+  name: default-cert
+  namespace: dapp-ingress
+---
+apiVersion: tls.dropapp.ru/v1alpha1
+kind: IngressTLS
+metadata:
+  name: apps-cert
+  namespace: dapp-ingress
+---
+apiVersion: projects.dropapp.ru/v1alpha1
+kind: Project
+metadata:
+  name: team-a
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: team-a
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: team-a
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: web }
+  template:
+    metadata:
+      labels: { app: web }
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: app
+          image: __HELPER_IMAGE__
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c", "exec 3<> <(:); read -u 3"]
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 50m, memory: 32Mi }
