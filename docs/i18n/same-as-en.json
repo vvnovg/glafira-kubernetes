@@ -40,6 +40,9 @@
     "resources.col.cpu",
     "resources.col.oom",
     "resources.col.workload",
-    "resources.risk.oom"
+    "resources.risk.oom",
+    "connections.form.oidc.issuerUrl",
+    "connections.form.oidc.clientId",
+    "connections.form.oidc.scopes"
   ]
 }

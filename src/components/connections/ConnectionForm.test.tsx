@@ -344,6 +344,55 @@ describe("ConnectionForm", () => {
     expect(screen.queryByRole("button", { name: "Показать" })).not.toBeInTheDocument();
   });
 
+  it("вход через OIDC: поля Dex со значениями DropApp, секрет клиента скрыт до «Показать» и уходит секретом", async () => {
+    vi.mocked(api.saveConnection).mockResolvedValue({ ...newProfile(), id: "d1", name: "dropapp" });
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionForm initial={newProfile()} tabId="t" />);
+    await user.type(screen.getByLabelText("Имя"), "dropapp");
+    await user.selectOptions(screen.getByLabelText("Способ входа"), "Вход через OIDC (Dex)");
+    expect(screen.getByLabelText("Client ID")).toHaveValue("dapp");
+    expect(screen.getByLabelText("Scopes")).toHaveValue("openid email groups profile offline_access");
+    expect(screen.getByText("Значения есть в kubeconfig, который выдаёт Loginapp DropApp")).toBeInTheDocument();
+    expect(screen.getByText("После сохранения войдите на вкладке подключения кнопкой «Войти через OIDC».")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Issuer URL"), "https://auth.c1.example.com");
+    const secret = screen.getByLabelText("Секрет клиента");
+    expect(secret).toHaveAttribute("type", "password");
+    await user.type(secret, "s3cr3t");
+    await user.click(screen.getByRole("button", { name: "Показать" }));
+    expect(secret).toHaveAttribute("type", "text");
+    await user.clear(screen.getByLabelText("Scopes"));
+    await user.type(screen.getByLabelText("Scopes"), "openid  groups");
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(api.saveConnection).toHaveBeenCalled());
+    expect(api.saveConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        auth: { method: "oidc", issuerUrl: "https://auth.c1.example.com", clientId: "dapp", scopes: ["openid", "groups"] },
+      }),
+      { token: null, clientKey: null, oidcClientSecret: "s3cr3t" },
+      false,
+    );
+  });
+
+  it("вход через OIDC: сохранённое подключение — пустой секрет не меняется, способ сохраняет поля при переключении", async () => {
+    const d1: ConnectionProfile = {
+      ...newProfile(),
+      id: "d1",
+      name: "dropapp",
+      auth: { method: "oidc", issuerUrl: "https://auth.c1.example.com", clientId: "kubelogin-app", scopes: ["openid", "profile"] },
+    };
+    vi.mocked(api.saveConnection).mockResolvedValue(d1);
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionForm initial={d1} tabId="connection-form:d1" />);
+    expect(screen.getByLabelText("Секрет клиента")).toHaveAttribute("placeholder", "оставьте пустым, чтобы не менять");
+    await user.selectOptions(screen.getByLabelText("Способ входа"), "token");
+    await user.selectOptions(screen.getByLabelText("Способ входа"), "oidc");
+    expect(screen.getByLabelText("Client ID")).toHaveValue("kubelogin-app");
+    expect(screen.getByLabelText("Scopes")).toHaveValue("openid profile");
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(api.saveConnection).toHaveBeenCalled());
+    expect(api.saveConnection).toHaveBeenCalledWith(expect.objectContaining({ auth: d1.auth }), { token: null, clientKey: null, oidcClientSecret: null }, false);
+  });
+
   it("удаление с подтверждением закрывает вкладки подключения", async () => {
     vi.mocked(api.deleteConnection).mockResolvedValue();
     useWorkspace.getState().open({ kind: "cluster", connectionId: "c1" });

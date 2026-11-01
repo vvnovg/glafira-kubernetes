@@ -103,9 +103,10 @@ export const api = {
   /**
    * `approveExec` — отпечатки строк запуска exec-плагина, которые подтвердил человек
    * (`launchFingerprint` контекстов из предпросмотра). Имя контекста ничего не подтверждает.
+   * `useExec` — контексты с входом через OIDC, для которых выбран exec-плагин.
    */
-  applyKubeconfigImport: (path: string, contexts: string[], folderId: string | null, approveExec: string[] = []) =>
-    call<ConnectionProfile[]>("apply_kubeconfig_import", { path, contexts, folderId, approveExec }),
+  applyKubeconfigImport: (path: string, contexts: string[], folderId: string | null, approveExec: string[] = [], useExec: string[] = []) =>
+    call<ConnectionProfile[]>("apply_kubeconfig_import", { path, contexts, folderId, approveExec, useExec }),
 
   listFolders: () => call<ConnectionFolder[]>("list_folders"),
   createFolder: (name: string, parentId: string | null) =>

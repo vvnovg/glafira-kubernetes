@@ -360,6 +360,7 @@ fn exec_message(
 
 /// Проверяет и несохранённый профиль: секреты берутся из `secrets` (поверх keychain — форма).
 /// У exec-плагина после TCP идёт шаг `exec` — запуск плагина; `cancel` прерывает его ожидание.
+/// Вход через OIDC берёт действующий сохранённый `id_token`; его нет — не пройден шаг «Вход».
 pub async fn test_connection(
     p: &ConnectionProfile,
     secrets: Arc<dyn SecretStore>,
@@ -421,6 +422,21 @@ pub async fn test_connection(
             }
             Err(e) => {
                 steps.push(failed_step("exec", e));
+                return report(steps);
+            }
+        }
+    }
+
+    if matches!(p.auth, AuthConfig::Oidc(_)) {
+        match crate::auth::oidc::stored_credential(p, &secrets).await {
+            Ok(tokens) => {
+                config.auth_info = kube::config::AuthInfo {
+                    token: Some(secrecy::SecretString::from(tokens.id_token)),
+                    ..Default::default()
+                };
+            }
+            Err(e) => {
+                steps.push(failed_step("auth", e));
                 return report(steps);
             }
         }
@@ -1072,6 +1088,95 @@ mod tests {
         let (_keep, cancel) = oneshot::channel();
         let r = test_connection(&p, Arc::new(secrets), &PolicyStatus::default(), cancel).await;
         assert_eq!(names(&r.steps), [("config", true), ("tcp", false)]);
+    }
+
+    /// Вход через OIDC при проверке: сохранённый `id_token`, если он действует ещё больше минуты;
+    /// иначе шаг «Вход» не пройден с просьбой войти — без обновления, без записи в keychain и без
+    /// анонимного запроса.
+    #[tokio::test]
+    async fn oidc_uses_a_valid_stored_token_or_asks_to_sign_in() {
+        use crate::secrets::{OIDC_ID_TOKEN, OIDC_REFRESH_TOKEN};
+        use base64::Engine;
+        let jwt = |exp: i64| {
+            let b64 = |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s);
+            format!(
+                "{}.{}.sig",
+                b64(r#"{"alg":"RS256"}"#),
+                b64(&format!(r#"{{"exp":{exp}}}"#))
+            )
+        };
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Сервер принимает соединения и сразу закрывает их: TLS дальше не пройдёт.
+        tokio::spawn(async move {
+            while let Ok((s, _)) = listener.accept().await {
+                drop(s);
+            }
+        });
+        let mut p = sample_profile("a");
+        p.api_url = format!("https://127.0.0.1:{port}");
+        p.proxy = crate::storage::profile::ProxyConfig::None;
+        p.auth = AuthConfig::Oidc(crate::storage::profile::sample_oidc());
+        let run = |store: Arc<MemoryStore>| {
+            let p = p.clone();
+            async move {
+                let (_keep, cancel) = oneshot::channel();
+                test_connection(&p, store, &PolicyStatus::default(), cancel).await
+            }
+        };
+
+        // Действующий токен: дальше TCP — к TLS.
+        let store = Arc::new(MemoryStore::default());
+        store
+            .set(&secret_key("a", OIDC_ID_TOKEN), &jwt(now + 600))
+            .unwrap();
+        let r = run(store).await;
+        assert_eq!(
+            names(&r.steps),
+            [("config", true), ("tcp", true), ("tls", false)]
+        );
+
+        // Истекает в ближайшую минуту, есть refresh_token: проверка его не тратит.
+        let store = Arc::new(MemoryStore::default());
+        let expiring = jwt(now + 30);
+        store
+            .set(&secret_key("a", OIDC_ID_TOKEN), &expiring)
+            .unwrap();
+        store
+            .set(&secret_key("a", OIDC_REFRESH_TOKEN), "r1")
+            .unwrap();
+        let r = run(store.clone()).await;
+        assert_eq!(
+            names(&r.steps),
+            [("config", true), ("tcp", true), ("auth", false)]
+        );
+        assert_eq!(
+            r.steps[2].error.as_ref().unwrap().key,
+            "errors.connections.oidcLoginRequired"
+        );
+        assert_eq!(
+            store
+                .get(&secret_key("a", OIDC_ID_TOKEN))
+                .unwrap()
+                .as_deref(),
+            Some(expiring.as_str())
+        );
+        assert_eq!(
+            store
+                .get(&secret_key("a", OIDC_REFRESH_TOKEN))
+                .unwrap()
+                .as_deref(),
+            Some("r1")
+        );
+
+        // Токена нет.
+        let r = run(Arc::new(MemoryStore::default())).await;
+        assert_eq!(names(&r.steps)[2], ("auth", false));
+        assert_eq!(
+            r.steps[2].error.as_ref().unwrap().key,
+            "errors.connections.oidcLoginRequired"
+        );
     }
 
     /// Шаг `exec` идёт после TCP: плагин — скрипт `sh` с именем `kubectl`.

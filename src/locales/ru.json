@@ -348,11 +348,21 @@
       "authMethod": "Способ входа",
       "auth": {
         "browser": "Браузер (OAuth OpenShift)",
+        "oidc": "Вход через OIDC (Dex)",
         "token": "Токен",
         "clientCert": "Клиентский сертификат",
         "exec": "Exec-плагин"
       },
       "browserNote": "После сохранения войдите на вкладке подключения кнопкой «Войти через браузер».",
+      "oidcNote": "После сохранения войдите на вкладке подключения кнопкой «Войти через OIDC».",
+      "oidc": {
+        "issuerUrl": "Issuer URL",
+        "clientId": "Client ID",
+        "clientSecret": "Секрет клиента",
+        "scopes": "Scopes",
+        "showSecret": "Показать",
+        "hint": "Значения есть в kubeconfig, который выдаёт Loginapp DropApp"
+      },
       "token": "Токен",
       "certificate": "Сертификат (PEM)",
       "clientKey": "Ключ (PEM)",
@@ -470,6 +480,7 @@
     "session": {
       "title": "Войдите снова",
       "loginBrowser": "Войти через браузер",
+      "loginOidc": "Войти через OIDC",
       "waitingBrowser": "Ожидание входа в браузере…",
       "cancelLogin": "Отменить",
       "loginExec": "Запустить exec-плагин снова",
@@ -714,8 +725,12 @@
       "token": "токен",
       "clientCert": "клиентский сертификат",
       "browser": "вход через браузер",
-      "exec": "exec-плагин"
+      "exec": "exec-плагин",
+      "oidc": "вход через OIDC"
     },
+    "signInChoice": "Способ входа",
+    "useOidc": "Вход через браузер (OIDC)",
+    "useExec": "exec-плагин",
     "apply_one": "Импортировать {{count}} контекст",
     "apply_few": "Импортировать {{count}} контекста",
     "apply_many": "Импортировать {{count}} контекстов",

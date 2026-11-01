@@ -42,7 +42,7 @@ export async function reconnect(queryClient: QueryClient, connectionId: string):
 }
 
 /**
- * Что сделать, если сессия истекла или токена нет: войти через браузер, вставить токен
+ * Что сделать, если сессия истекла или токена нет: войти через браузер или OIDC, вставить токен
  * (в том числе со страницы токена кластера OpenShift), запустить exec-плагин снова или изменить
  * подключение (сертификат, строка запуска exec-плагина).
  */
@@ -112,6 +112,23 @@ export function SessionActions({ profile }: { profile: ConnectionProfile }) {
           </button>
         </div>
         {rerun.error && <ErrorBanner error={rerun.error} />}
+      </div>
+    );
+
+  // Вход через OIDC — та же команда, что вход через браузер; токен он не хранит, вставлять нечего.
+  if (profile.auth.method === "oidc")
+    return (
+      <div className="panel">
+        <div className="toolbar">
+          {login.isPending ? (
+            <LoginWait connectionId={id} label={t("cluster.session.waitingBrowser")} />
+          ) : (
+            <button type="button" className="primary" disabled={connecting} onClick={() => login.mutate()}>
+              {t("cluster.session.loginOidc")}
+            </button>
+          )}
+        </div>
+        {login.error && toAppError(login.error).key !== "errors.oauth.cancelled" && <ErrorBanner error={login.error} />}
       </div>
     );
 

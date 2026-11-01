@@ -36,6 +36,8 @@ const ctx = (name: string, extra: Partial<KubeContext> = {}): KubeContext => ({
   insecure: false,
   current: false,
   exec: null,
+  oidc: null,
+  execUnsupported: null,
   unsupported: null,
   existingId: null,
   ...extra,
@@ -70,6 +72,29 @@ const execCtx = (name: string, fingerprint: string, extra: Partial<KubeContext> 
   });
 
 const ALLOW = "Разрешить Glafira запускать эту команду";
+
+/** Контекст kubeconfig от Loginapp DropApp: `kubectl oidc-login get-token` с аргументами Dex. */
+const oidcCtx = (name: string, extra: Partial<KubeContext> = {}): KubeContext =>
+  ctx(name, {
+    auth: "oidc",
+    user: "oidc",
+    oidc: {
+      issuerUrl: "https://auth.c1.example.com",
+      clientId: "dapp",
+      scopes: ["openid", "groups"],
+      hasClientSecret: true,
+    },
+    exec: {
+      command: "/usr/local/bin/kubectl",
+      args: ["oidc-login", "get-token", "--oidc-issuer-url=https://auth.c1.example.com", "--oidc-client-secret=***"],
+      env: [],
+      apiVersion: "client.authentication.k8s.io/v1beta1",
+      provideClusterInfo: false,
+      approved: null,
+    },
+    launchFingerprint: `fp-${name}`,
+    ...extra,
+  });
 
 /** Диалог рядом с подписчиком на список подключений: после импорта список должен перечитаться. */
 function Mounted(props: ComponentProps<typeof KubeconfigImportDialog>) {
@@ -114,7 +139,7 @@ describe("KubeconfigImportDialog", () => {
     await user.selectOptions(screen.getByLabelText("Папка для новых подключений"), "f");
     await user.click(screen.getByRole("button", { name: "Импортировать 2 контекста" }));
     await waitFor(() => expect(onImported).toHaveBeenCalledWith([]));
-    expect(api.applyKubeconfigImport).toHaveBeenCalledWith("/home/u/.kube/config", ["dev", "lab"], "f", []);
+    expect(api.applyKubeconfigImport).toHaveBeenCalledWith("/home/u/.kube/config", ["dev", "lab"], "f", [], []);
   });
 
   it("exec-плагин: строка запуска и отдельное разрешение перед импортом", async () => {
@@ -149,7 +174,7 @@ describe("KubeconfigImportDialog", () => {
     await user.click(screen.getByRole("checkbox", { name: ALLOW }));
     await user.click(importButton);
     // Подтверждение — отпечаток показанной строки, а не имя контекста.
-    expect(api.applyKubeconfigImport).toHaveBeenCalledWith("/home/u/.kube/config", ["eks"], null, ["fp-eks"]);
+    expect(api.applyKubeconfigImport).toHaveBeenCalledWith("/home/u/.kube/config", ["eks"], null, ["fp-eks"], []);
   });
 
   it("exec-плагин: отпечатки уходят только у выбранных и разрешённых контекстов", async () => {
@@ -168,7 +193,7 @@ describe("KubeconfigImportDialog", () => {
     // Контекст b снят с выбора: его отпечаток не уходит, хотя галочка у него стояла.
     await user.click(screen.getByRole("checkbox", { name: "b" }));
     await user.click(screen.getByRole("button", { name: "Импортировать 2 контекста" }));
-    expect(api.applyKubeconfigImport).toHaveBeenCalledWith("/home/u/.kube/config", ["a", "c"], null, ["fp-a"]);
+    expect(api.applyKubeconfigImport).toHaveBeenCalledWith("/home/u/.kube/config", ["a", "c"], null, ["fp-a"], []);
   });
 
   it("exec-плагин: после перечитывания с другой строкой запуска галочка не переносится", async () => {
@@ -191,7 +216,45 @@ describe("KubeconfigImportDialog", () => {
     expect(screen.getByRole("button", { name: "Импортировать 1 контекст" })).toBeDisabled();
     await user.click(screen.getByRole("checkbox", { name: ALLOW }));
     await user.click(screen.getByRole("button", { name: "Импортировать 1 контекст" }));
-    expect(api.applyKubeconfigImport).toHaveBeenLastCalledWith("/home/u/.kube/config", ["eks"], null, ["fp-2"]);
+    expect(api.applyKubeconfigImport).toHaveBeenLastCalledWith("/home/u/.kube/config", ["eks"], null, ["fp-2"], []);
+  });
+
+  it("OIDC: по умолчанию вход через браузер, exec-плагин — по выбору и с разрешением", async () => {
+    vi.mocked(api.previewKubeconfigImport).mockResolvedValue({
+      path: "/home/u/.kube/config",
+      contexts: [
+        oidcCtx("dropapp", { current: true }),
+        oidcCtx("no-kubectl", {
+          exec: null,
+          launchFingerprint: undefined,
+          execUnsupported: { key: "errors.exec.badApiVersion", params: { version: "client.authentication.io/v1beta1" }, text: "x" },
+        }),
+      ],
+    });
+    vi.mocked(api.applyKubeconfigImport).mockResolvedValue([]);
+    const user = userEvent.setup();
+    renderWithClient(<KubeconfigImportDialog initialTargetId={null} onClose={() => {}} onImported={() => {}} />);
+    const [oidcA, oidcB] = await screen.findAllByRole("radio", { name: "Вход через браузер (OIDC)" });
+    const [execA, execB] = screen.getAllByRole("radio", { name: "exec-плагин" });
+    expect(oidcA).toBeChecked();
+    expect(oidcB).toBeChecked();
+    expect(execA).not.toBeChecked();
+    // Exec-плагин недоступен — его причина видна, вход через OIDC остаётся.
+    expect(execB).toBeDisabled();
+    expect(screen.getByText(/client\.authentication\.io\/v1beta1/)).toBeInTheDocument();
+    expect(screen.getAllByText(/https:\/\/auth\.c1\.example\.com · dapp/)).toHaveLength(2);
+    // При входе через OIDC строку запуска не разрешают.
+    expect(screen.queryByRole("checkbox", { name: ALLOW })).not.toBeInTheDocument();
+    const importButton = screen.getByRole("button", { name: "Импортировать 1 контекст" });
+    await user.click(importButton);
+    expect(api.applyKubeconfigImport).toHaveBeenLastCalledWith("/home/u/.kube/config", ["dropapp"], null, [], []);
+
+    await user.click(execA);
+    expect(screen.getByLabelText("Строка запуска")).toHaveTextContent("kubectl oidc-login get-token");
+    expect(importButton).toBeDisabled();
+    await user.click(screen.getByRole("checkbox", { name: ALLOW }));
+    await user.click(importButton);
+    expect(api.applyKubeconfigImport).toHaveBeenLastCalledWith("/home/u/.kube/config", ["dropapp"], null, ["fp-dropapp"], ["dropapp"]);
   });
 
   it("выбор другого файла перечитывает контексты", async () => {

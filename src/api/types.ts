@@ -52,11 +52,19 @@ export interface ExecAuth {
   approved?: string | null;
 }
 
+/** Вход через OIDC (спека O5 §5): издатель, клиент и scopes; секрет клиента — в keychain. */
+export interface OidcAuth {
+  issuerUrl: string;
+  clientId: string;
+  scopes: string[];
+}
+
 export type AuthConfig =
   | { method: "token" }
   | { method: "browser" }
   | { method: "clientCert"; certificatePem: string }
-  | ({ method: "exec" } & ExecAuth);
+  | ({ method: "exec" } & ExecAuth)
+  | ({ method: "oidc" } & OidcAuth);
 export type AuthMethod = AuthConfig["method"];
 
 export type CaConfig = { mode: "system" } | { mode: "pem"; pem: string } | { mode: "insecure" };
@@ -115,6 +123,7 @@ export interface SecretsInput {
   token?: string | null;
   clientKey?: string | null;
   metricsToken?: string | null;
+  oidcClientSecret?: string | null;
 }
 
 export interface ConnectionFolder {
@@ -213,11 +222,11 @@ export interface ConnectionInfo {
   platform: PlatformInfo;
   apiGroups: ApiGroups;
   capabilities: Capabilities;
-  /** Когда истекает токен входа (секунды Unix), если платформа это сообщает (OpenShift). */
+  /** Когда истекает токен входа (секунды Unix), если платформа это сообщает (OpenShift) или это вход через OIDC. */
   tokenExpiresAt: number | null;
 }
 
-export type ImportAuth = "token" | "clientCert" | "browser" | "exec";
+export type ImportAuth = "token" | "clientCert" | "browser" | "exec" | "oidc";
 
 export interface KubeContext {
   name: string;
@@ -240,6 +249,10 @@ export interface KubeContext {
    * ничего не подтверждает. Есть только у контекста с `exec`.
    */
   launchFingerprint?: string;
+  /** Вход через OIDC из аргументов exec-плагина (`auth: "oidc"`); секрета клиента нет — только признак. */
+  oidc: (OidcAuth & { hasClientSecret: boolean }) | null;
+  /** Почему у контекста с входом через OIDC нельзя выбрать exec-плагин; null — можно. */
+  execUnsupported: LocalizedText | null;
   /** Почему контекст нельзя импортировать; null — можно. */
   unsupported: LocalizedText | null;
   /** Подключение с тем же адресом и именем: импорт обновит его. */

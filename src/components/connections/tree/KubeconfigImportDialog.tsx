@@ -24,7 +24,8 @@ interface Props {
  * список контекстов с причинами, почему контекст нельзя импортировать, папка и применение.
  * Строку запуска exec-плагина человек разрешает отдельной галочкой (спец. §5.2); подтверждением
  * служит отпечаток показанной строки, а не имя контекста: если файл изменился после предпросмотра,
- * изменённая строка останется неподтверждённой.
+ * изменённая строка останется неподтверждённой. Контекст с exec-плагином входа через OIDC
+ * по умолчанию импортируется как вход через браузер (OIDC); exec-плагин выбирают вместо него.
  */
 export function KubeconfigImportDialog({ initialTargetId, onClose, onImported }: Props) {
   const { t } = useTranslation();
@@ -37,6 +38,8 @@ export function KubeconfigImportDialog({ initialTargetId, onClose, onImported }:
   // Разрешённые строки запуска — по отпечатку, а не по имени контекста: если после перечитывания
   // файла строка изменилась, прежняя галочка к ней не относится.
   const [allowed, setAllowed] = useState<Set<string>>(new Set());
+  // Контексты с входом через OIDC, у которых вместо него выбран exec-плагин.
+  const [execChosen, setExecChosen] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
@@ -53,7 +56,8 @@ export function KubeconfigImportDialog({ initialTargetId, onClose, onImported }:
   const chosen = selected ?? new Set(preview?.contexts.filter((c) => c.current && !c.unsupported).map((c) => c.name) ?? []);
   // Выбранные exec-плагины, строку запуска которых ещё не разрешили.
   const isAllowed = (c: KubeContext) => !!c.launchFingerprint && allowed.has(c.launchFingerprint);
-  const unconfirmed = (preview?.contexts ?? []).filter((c) => c.exec && chosen.has(c.name) && !isAllowed(c));
+  const usesExec = (c: KubeContext) => c.auth !== "oidc" || execChosen.has(c.name);
+  const unconfirmed = (preview?.contexts ?? []).filter((c) => c.exec && usesExec(c) && chosen.has(c.name) && !isAllowed(c));
 
   useEffect(() => {
     const returnTo = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -78,12 +82,20 @@ export function KubeconfigImportDialog({ initialTargetId, onClose, onImported }:
     setAllowed(next);
   };
 
+  const chooseExec = (c: KubeContext, exec: boolean) => {
+    const next = new Set(execChosen);
+    if (exec) next.add(c.name);
+    else next.delete(c.name);
+    setExecChosen(next);
+  };
+
   const pickFile = async () => {
     try {
       const file = await openDialog({ multiple: false, directory: false });
       if (typeof file === "string") {
         setSelected(null);
         setAllowed(new Set());
+        setExecChosen(new Set());
         setError(null);
         setPath(file);
       }
@@ -99,13 +111,14 @@ export function KubeconfigImportDialog({ initialTargetId, onClose, onImported }:
     const picked = preview.contexts.filter((c) => chosen.has(c.name));
     const names = picked.map((c) => c.name);
     // Подтверждение — отпечаток показанной строки запуска выбранного и разрешённого контекста.
-    const approveExec = picked.flatMap((c) => (c.exec && c.launchFingerprint && isAllowed(c) ? [c.launchFingerprint] : []));
+    const approveExec = picked.flatMap((c) => (c.exec && usesExec(c) && c.launchFingerprint && isAllowed(c) ? [c.launchFingerprint] : []));
+    const useExec = picked.filter((c) => c.auth === "oidc" && usesExec(c)).map((c) => c.name);
     // Подключения, которые импорт мог обновить: их кэш (адрес, вход) после импорта устарел.
     const existing = picked.flatMap((c) => (c.existingId ? [c.existingId] : []));
     const touched = new Set(existing);
     let saved: ConnectionProfile[] | null = null;
     try {
-      saved = await api.applyKubeconfigImport(preview.path, names, targetId, approveExec);
+      saved = await api.applyKubeconfigImport(preview.path, names, targetId, approveExec, useExec);
       for (const p of saved) touched.add(p.id);
     } catch (err) {
       setError(err);
@@ -165,7 +178,35 @@ export function KubeconfigImportDialog({ initialTargetId, onClose, onImported }:
                 {c.insecure && <span className="warn"> · {t("kubeconfig.insecure")}</span>}
                 {c.existingId && <span className="muted"> · {t("kubeconfig.updatesExisting")}</span>}
                 {c.unsupported && <p className="muted">{tr(c.unsupported)}</p>}
-                {c.exec && (
+                {c.oidc && (
+                  <div role="radiogroup" aria-label={t("kubeconfig.signInChoice")}>
+                    <label className="inline">
+                      <input
+                        type="radio"
+                        name={`${titleId}-auth-${c.name}`}
+                        checked={!usesExec(c)}
+                        disabled={busy}
+                        onChange={() => chooseExec(c, false)}
+                      />
+                      {t("kubeconfig.useOidc")}
+                    </label>{" "}
+                    <span className="muted">
+                      {c.oidc.issuerUrl} · {c.oidc.clientId}
+                    </span>{" "}
+                    <label className="inline">
+                      <input
+                        type="radio"
+                        name={`${titleId}-auth-${c.name}`}
+                        checked={usesExec(c)}
+                        disabled={!c.exec || busy}
+                        onChange={() => chooseExec(c, true)}
+                      />
+                      {t("kubeconfig.useExec")}
+                    </label>
+                    {c.execUnsupported && <p className="muted">{tr(c.execUnsupported)}</p>}
+                  </div>
+                )}
+                {c.exec && usesExec(c) && (
                   <>
                     <pre aria-label={t("connections.form.exec.line")}>{launchLine(c.exec)}</pre>
                     <label className="inline">

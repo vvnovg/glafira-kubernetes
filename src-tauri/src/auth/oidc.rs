@@ -359,6 +359,35 @@ pub async fn client_secret(secrets: &Arc<dyn SecretStore>, id: &str) -> AppResul
     read_secret(secrets, secret_key(id, OIDC_CLIENT_SECRET)).await
 }
 
+/// `id_token` подключения из keychain, если до `exp` больше минуты; ничего не обновляет и не
+/// записывает.
+async fn fresh_id_token(
+    p: &ConnectionProfile,
+    secrets: &Arc<dyn SecretStore>,
+) -> AppResult<Option<OidcTokens>> {
+    let id_token = read_secret(secrets, secret_key(&p.id, OIDC_ID_TOKEN)).await?;
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    Ok(id_token.and_then(|id_token| {
+        let expires_at = jwt_exp(&id_token);
+        expires_at
+            .is_none_or(|exp| exp > now + REFRESH_AHEAD_SECS)
+            .then_some(OidcTokens {
+                id_token,
+                refresh_token: None,
+                expires_at,
+            })
+    }))
+}
+
+/// Токен для проверки подключения: только действующий сохранённый `id_token` — без обновления
+/// (хранилище проверки только на чтение) и без входа; его нет — нужен вход.
+pub async fn stored_credential(
+    p: &ConnectionProfile,
+    secrets: &Arc<dyn SecretStore>,
+) -> AppResult<OidcTokens> {
+    fresh_id_token(p, secrets).await?.ok_or_else(login_required)
+}
+
 /// Токен для подключения: `id_token` из keychain, если до `exp` больше минуты; иначе — обновление
 /// по `refresh_token` (оба новых токена записываются в keychain). Одновременные подключения
 /// профиля сериализует `ClientPool::connect_lock`: второе видит уже обновлённый токен.
@@ -371,17 +400,8 @@ pub async fn credential_for(
             "credential_for: not an OIDC profile",
         ));
     };
-    let id_token = read_secret(&secrets, secret_key(&p.id, OIDC_ID_TOKEN)).await?;
-    let now = time::OffsetDateTime::now_utc().unix_timestamp();
-    if let Some(id_token) = id_token {
-        let expires_at = jwt_exp(&id_token);
-        if expires_at.is_none_or(|exp| exp > now + REFRESH_AHEAD_SECS) {
-            return Ok(OidcTokens {
-                id_token,
-                refresh_token: None,
-                expires_at,
-            });
-        }
+    if let Some(tokens) = fresh_id_token(p, &secrets).await? {
+        return Ok(tokens);
     }
     let Some(refresh_token) = read_secret(&secrets, secret_key(&p.id, OIDC_REFRESH_TOKEN)).await?
     else {

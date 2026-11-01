@@ -79,7 +79,7 @@ export function ConnectionPanel({ connectionId }: { connectionId: string }) {
       )}
       {!exec && q.isPending && <p className="muted">{t("cluster.connection.connecting")}</p>}
       {error && <ConnectionError error={error} signIn={signIn} onRetry={() => void q.refetch()} profile={profile} />}
-      {q.data && <ConnectionSummary info={q.data} now={now} busy={q.isFetching || signingIn} onReconnect={reconnectNow} />}
+      {q.data && <ConnectionSummary info={q.data} profile={profile} now={now} busy={q.isFetching || signingIn} onReconnect={reconnectNow} />}
       {q.data && <ClusterOverviewView connectionId={connectionId} />}
     </div>
   );
@@ -100,7 +100,19 @@ function ConnectionError({ error, signIn, onRetry, profile }: { error: AppError;
   );
 }
 
-function ConnectionSummary({ info, now, busy, onReconnect }: { info: ConnectionInfo; now: number; busy: boolean; onReconnect: () => void }) {
+function ConnectionSummary({
+  info,
+  profile,
+  now,
+  busy,
+  onReconnect,
+}: {
+  info: ConnectionInfo;
+  profile: ConnectionProfile;
+  now: number;
+  busy: boolean;
+  onReconnect: () => void;
+}) {
   const { t } = useTranslation();
   const openShift = info.platform.kind === "openshift";
   const found = [...new Set(API_GROUPS.filter(([k]) => info.apiGroups[k]).map(([, name]) => name))];
@@ -110,19 +122,27 @@ function ConnectionSummary({ info, now, busy, onReconnect }: { info: ConnectionI
       {/* Область объявления есть, пока у токена есть срок: предупреждение появляется в ней со временем. */}
       {expiresIn !== null && (
         <div role="status">
-          {expiresIn < TOKEN_WARNING_SEC && (
-            <p className="warn">
-              {expiresIn > 0 ? (
-                t("cluster.connection.tokenExpiresSoon")
-              ) : (
-                <>
-                  {t("cluster.connection.tokenExpired")}{" "}
-                  <button type="button" disabled={busy} onClick={onReconnect}>
-                    {t("cluster.connection.reconnect")}
-                  </button>
-                </>
-              )}
-            </p>
+          {/* Истёкший токен OIDC: вход заново через OIDC (спека O5 §5.3), как у панели «Войдите снова». */}
+          {expiresIn <= 0 && profile.auth.method === "oidc" ? (
+            <>
+              <p className="warn">{t("cluster.connection.tokenExpired")}</p>
+              <SessionActions profile={profile} />
+            </>
+          ) : (
+            expiresIn < TOKEN_WARNING_SEC && (
+              <p className="warn">
+                {expiresIn > 0 ? (
+                  t("cluster.connection.tokenExpiresSoon")
+                ) : (
+                  <>
+                    {t("cluster.connection.tokenExpired")}{" "}
+                    <button type="button" disabled={busy} onClick={onReconnect}>
+                      {t("cluster.connection.reconnect")}
+                    </button>
+                  </>
+                )}
+              </p>
+            )
           )}
         </div>
       )}

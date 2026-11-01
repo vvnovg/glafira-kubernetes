@@ -348,11 +348,21 @@
       "authMethod": "Sign-in method",
       "auth": {
         "browser": "Browser (OpenShift OAuth)",
+        "oidc": "OIDC sign-in (Dex)",
         "token": "Token",
         "clientCert": "Client certificate",
         "exec": "Exec plugin"
       },
       "browserNote": "After saving, sign in on the connection tab with “Sign in via browser”.",
+      "oidcNote": "After saving, sign in on the connection tab with “Sign in via OIDC”.",
+      "oidc": {
+        "issuerUrl": "Issuer URL",
+        "clientId": "Client ID",
+        "clientSecret": "Client secret",
+        "scopes": "Scopes",
+        "showSecret": "Show",
+        "hint": "The values are in the kubeconfig that DropApp Loginapp issues"
+      },
       "token": "Token",
       "certificate": "Certificate (PEM)",
       "clientKey": "Key (PEM)",
@@ -468,6 +478,7 @@
     "session": {
       "title": "Sign in again",
       "loginBrowser": "Sign in via browser",
+      "loginOidc": "Sign in via OIDC",
       "waitingBrowser": "Waiting for sign-in in the browser…",
       "cancelLogin": "Cancel",
       "loginExec": "Run the exec plugin again",
@@ -710,8 +721,12 @@
       "token": "token",
       "clientCert": "client certificate",
       "browser": "sign-in via browser",
-      "exec": "exec plugin"
+      "exec": "exec plugin",
+      "oidc": "OIDC sign-in"
     },
+    "signInChoice": "Sign-in method",
+    "useOidc": "Sign in via browser (OIDC)",
+    "useExec": "exec plugin",
     "apply_one": "Import {{count}} context",
     "apply_other": "Import {{count}} contexts",
     "imported_one": "Imported {{count}} connection",

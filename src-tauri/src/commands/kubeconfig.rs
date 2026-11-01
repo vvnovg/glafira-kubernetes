@@ -84,7 +84,8 @@ fn preview_from(
 /// (`launchFingerprint` предпросмотра). Строка запуска сохраняется подтверждённой, только если
 /// отпечаток именно той строки, что читается из файла сейчас, есть в `approve_exec`: имя
 /// контекста ничего не подтверждает, а изменившийся после предпросмотра файл даёт
-/// неподтверждённую строку, которую форма подключения потом спросит заново.
+/// неподтверждённую строку, которую форма подключения потом спросит заново. `use_exec` — контексты
+/// с входом через OIDC, для которых выбран exec-плагин (по умолчанию — вход через OIDC).
 #[tauri::command]
 pub async fn apply_kubeconfig_import(
     state: State<'_, AppState>,
@@ -92,6 +93,7 @@ pub async fn apply_kubeconfig_import(
     contexts: Vec<String>,
     folder_id: Option<String>,
     approve_exec: Vec<String>,
+    use_exec: Vec<String>,
 ) -> AppResult<Vec<ConnectionProfile>> {
     let st = state.inner().clone();
     let dirs = crate::auth::exec::command_dirs().await;
@@ -101,6 +103,7 @@ pub async fn apply_kubeconfig_import(
             names: &contexts,
             folder_id,
             approve_exec: &approve_exec,
+            use_exec: &use_exec,
             dirs: &dirs,
         };
         apply_blocking(&st, request)
@@ -108,12 +111,14 @@ pub async fn apply_kubeconfig_import(
     .await
 }
 
-/// Что импортировать: файл, контексты, папка для новых, отпечатки подтверждённых строк запуска.
+/// Что импортировать: файл, контексты, папка для новых, отпечатки подтверждённых строк запуска,
+/// контексты с выбранным вместо OIDC exec-плагином.
 struct ApplyRequest<'a> {
     path: &'a Path,
     names: &'a [String],
     folder_id: Option<String>,
     approve_exec: &'a [String],
+    use_exec: &'a [String],
     dirs: &'a [PathBuf],
 }
 
@@ -149,7 +154,11 @@ fn prepare(
     ctx: &KubeContext,
     r: &ApplyRequest,
 ) -> AppResult<ConnectionInput> {
-    let imported = kubeconfig::import_context(kc, &ctx.name, ctx)?;
+    let imported = if r.use_exec.contains(&ctx.name) {
+        kubeconfig::import_context(kc, &ctx.name, &kubeconfig::with_exec(ctx)?)?
+    } else {
+        kubeconfig::import_context(kc, &ctx.name, ctx)?
+    };
     let confirm_exec = match &imported.profile.auth {
         AuthConfig::Exec(e) => r.approve_exec.contains(&fingerprint(e)),
         _ => false,
@@ -173,7 +182,7 @@ fn prepare(
             token,
             client_key: Some(imported.client_key.unwrap_or_default()),
             metrics_token: None,
-            oidc_client_secret: None,
+            oidc_client_secret: Some(imported.oidc_client_secret.unwrap_or_default()),
         },
         confirm_exec,
     })
@@ -217,7 +226,7 @@ mod tests {
 
     use super::*;
     use crate::auth::exec::write_test_file;
-    use crate::secrets::{MemoryStore, TOKEN, secret_key};
+    use crate::secrets::{MemoryStore, OIDC_CLIENT_SECRET, TOKEN, secret_key};
     use crate::storage::profile::{
         AuthConfig, Environment, ExecAuth, TEST_CERT_PEM, sample_profile,
     };
@@ -231,6 +240,7 @@ mod tests {
         st.secrets.get(&secret_key(id, TOKEN)).unwrap()
     }
 
+    /// Импорт с выбором exec-плагина у всех контекстов, где есть и вариант OIDC, — как до него.
     fn apply(
         st: &AppState,
         path: &Path,
@@ -239,13 +249,27 @@ mod tests {
         approve_exec: &[&str],
         dirs: &[PathBuf],
     ) -> AppResult<Vec<ConnectionProfile>> {
-        let names: Vec<String> = names.iter().map(|s| s.to_string()).collect();
-        let approve: Vec<String> = approve_exec.iter().map(|s| s.to_string()).collect();
+        apply_choosing(st, path, names, folder_id, approve_exec, names, dirs)
+    }
+
+    /// Импорт; `use_exec` — контексты, у которых вместо входа через OIDC выбран exec-плагин.
+    fn apply_choosing(
+        st: &AppState,
+        path: &Path,
+        names: &[&str],
+        folder_id: Option<String>,
+        approve_exec: &[&str],
+        use_exec: &[&str],
+        dirs: &[PathBuf],
+    ) -> AppResult<Vec<ConnectionProfile>> {
+        let strings = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let (names, approve, use_exec) = (strings(names), strings(approve_exec), strings(use_exec));
         let request = ApplyRequest {
             path,
             names: &names,
             folder_id,
             approve_exec: &approve,
+            use_exec: &use_exec,
             dirs,
         };
         apply_blocking(st, request)
@@ -498,6 +522,74 @@ contexts:
         );
     }
 
+    /// Вход через OIDC выбран по умолчанию: профиль `oidc` и секрет клиента из аргументов в
+    /// keychain. Выбор exec-плагина сохраняет строку запуска, как раньше, а секрет клиента OIDC
+    /// не остаётся.
+    #[test]
+    fn oidc_is_the_default_choice_and_stores_the_client_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = new_state(dir.path());
+        let path = dir.path().join("config");
+        std::fs::write(
+            &path,
+            r#"
+clusters:
+- name: c1
+  cluster: {server: "https://api.c1.example.com:6443"}
+users:
+- name: oidc
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: kubelogin
+      args: [get-token, --oidc-issuer-url=https://auth.c1.example.com, --oidc-client-secret, s3cr3t]
+contexts:
+- name: dropapp
+  context: {cluster: c1, user: oidc}
+"#,
+        )
+        .unwrap();
+        let dirs = kubelogin_dirs(dir.path());
+        let secret = |id: &str| st.secrets.get(&secret_key(id, OIDC_CLIENT_SECRET)).unwrap();
+
+        let preview = preview_for_ui(&st, &path, &dirs).unwrap();
+        let json = serde_json::to_string(&preview).unwrap();
+        assert!(!json.contains("s3cr3t"), "{json}");
+
+        let saved = apply_choosing(&st, &path, &["dropapp"], None, &[], &[], &dirs).unwrap();
+        let AuthConfig::Oidc(o) = &saved[0].auth else {
+            panic!("oidc: {:?}", saved[0].auth)
+        };
+        assert_eq!(o.issuer_url, "https://auth.c1.example.com");
+        assert_eq!(o.client_id, "dapp");
+        assert_eq!(secret(&saved[0].id).as_deref(), Some("s3cr3t"));
+
+        let shown = shown_fingerprint(&st, &path, &dirs, "dropapp");
+        let id = saved[0].id.clone();
+        let saved = apply_choosing(
+            &st,
+            &path,
+            &["dropapp"],
+            None,
+            &[shown.as_str()],
+            &["dropapp"],
+            &dirs,
+        )
+        .unwrap();
+        assert_eq!(saved[0].id, id, "то же подключение");
+        let AuthConfig::Exec(e) = &saved[0].auth else {
+            panic!("exec-плагин")
+        };
+        assert!(e.command.ends_with("kubelogin"));
+        assert!(approved(&saved[0]));
+        assert_eq!(secret(&id), None);
+
+        // Exec-плагин выбран, а команды на машине нет: ошибка называет причину.
+        let e = apply_choosing(&st, &path, &["dropapp"], None, &[], &["dropapp"], &[]).unwrap_err();
+        assert_eq!(e.key, "errors.kubeconfig.execNotFound");
+        assert!(e.details.as_deref().unwrap_or("").contains("dropapp"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn non_executable_command_is_not_found() {
@@ -511,8 +603,9 @@ contexts:
         let p = preview_blocking(&st, &path, &dirs).unwrap();
         let oidc = p.contexts.iter().find(|c| c.name == "dev-oidc").unwrap();
         assert!(oidc.exec.is_none());
+        assert_eq!(oidc.unsupported, None, "вход через OIDC остаётся");
         assert_eq!(
-            oidc.unsupported.as_ref().unwrap().key,
+            oidc.exec_unsupported.as_ref().unwrap().key,
             "errors.kubeconfig.execNotFound"
         );
     }

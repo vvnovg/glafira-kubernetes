@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{AppResult, ErrorCode};
 use crate::i18n::LocalizedText;
-use crate::secrets::{CLIENT_KEY, SecretStore, TOKEN, secret_key};
+use crate::secrets::{CLIENT_KEY, OIDC_CLIENT_SECRET, SecretStore, TOKEN, secret_key};
 use crate::storage::connections::{
     ConnectionFolder, ConnectionProfile, ConnectionStore, StoreData, check_tree, folder_not_found,
     unique_name, validate_profile,
@@ -24,6 +24,16 @@ pub const EXCHANGE_VERSION: u32 = 1;
 pub struct NeedsSecret {
     pub token: bool,
     pub client_key: bool,
+    /// Секрет клиента OIDC; в файлах до O5 его нет.
+    #[serde(default)]
+    pub oidc_client_secret: bool,
+}
+
+impl NeedsSecret {
+    /// Нужен ли получателю хоть один секрет.
+    pub fn any(&self) -> bool {
+        self.token || self.client_key || self.oidc_client_secret
+    }
 }
 
 #[derive(Serialize)]
@@ -65,6 +75,7 @@ fn needs_secret(secrets: &dyn SecretStore, p: &ConnectionProfile) -> AppResult<N
     Ok(NeedsSecret {
         token: p.auth.uses_token() && stored(TOKEN)?,
         client_key: matches!(p.auth, AuthConfig::ClientCert { .. }) && stored(CLIENT_KEY)?,
+        oidc_client_secret: matches!(p.auth, AuthConfig::Oidc(_)) && stored(OIDC_CLIENT_SECRET)?,
     })
 }
 
@@ -469,8 +480,7 @@ impl StoredSecrets {
                     .any(|local| local.id == incoming.id && destination_changes(local, incoming))
             })
             .map(|(incoming, _)| {
-                let stored =
-                    needs_secret(secrets, incoming).map_or(true, |n| n.token || n.client_key);
+                let stored = needs_secret(secrets, incoming).map_or(true, |n| n.any());
                 (incoming.id.clone(), stored)
             })
             .collect();
@@ -692,7 +702,7 @@ pub(crate) fn plan_import(
         profile.llm_mask_fields = None;
         profile.metrics = Default::default();
         profile.extra = Default::default();
-        if needs.token || needs.client_key {
+        if needs.any() {
             preview.needs_secrets += 1;
         }
         added.push((TreeItemKind::Connection, profile.id.clone()));
@@ -861,17 +871,76 @@ mod tests {
             flags("tok"),
             NeedsSecret {
                 token: true,
-                client_key: false
+                ..Default::default()
             }
         );
         assert_eq!(
             flags("cert"),
             NeedsSecret {
-                token: false,
-                client_key: true
+                client_key: true,
+                ..Default::default()
             }
         );
         assert_eq!(flags("empty"), NeedsSecret::default());
+    }
+
+    /// Секрет клиента OIDC отмечается, как токен и ключ: получатель вводит свой. Токены входа
+    /// флага не поднимают — их даёт вход.
+    #[test]
+    fn oidc_client_secret_is_flagged_and_never_exported() {
+        use crate::secrets::{OIDC_CLIENT_SECRET, OIDC_ID_TOKEN, OIDC_REFRESH_TOKEN};
+        let (_d, s) = store();
+        let mut oidc = sample_profile("oidc");
+        oidc.auth = AuthConfig::Oidc(crate::storage::profile::sample_oidc());
+        s.upsert(oidc).unwrap();
+        let mut public = sample_profile("public");
+        public.auth = AuthConfig::Oidc(crate::storage::profile::sample_oidc());
+        s.upsert(public).unwrap();
+        let secrets = MemoryStore::default();
+        for (id, field, value) in [
+            ("oidc", OIDC_CLIENT_SECRET, "cs-s3cr3t"),
+            ("oidc", OIDC_ID_TOKEN, "idt-s3cr3t"),
+            ("oidc", OIDC_REFRESH_TOKEN, "rt-s3cr3t"),
+            ("public", OIDC_ID_TOKEN, "idt-s3cr3t"),
+        ] {
+            secrets.set(&secret_key(id, field), value).unwrap();
+        }
+        let out = build_export(&s, &secrets, None, "1", "now").unwrap();
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(!json.contains("s3cr3t"), "{json}");
+        let flags = |id: &str| {
+            out.connections
+                .iter()
+                .find(|c| c.profile.id == id)
+                .unwrap()
+                .needs_secret
+                .clone()
+        };
+        assert_eq!(
+            flags("oidc"),
+            NeedsSecret {
+                oidc_client_secret: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(flags("public"), NeedsSecret::default());
+        let v = serde_json::to_value(&out).unwrap();
+        let exported = v["connections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == "oidc")
+            .unwrap()
+            .clone();
+        assert_eq!(exported["needsSecret"]["oidcClientSecret"], true);
+
+        // Новое подключение из файла считается среди тех, кому нужен секрет.
+        let p = plan(
+            &StoreData::default(),
+            &file(vec![], vec![exported]),
+            &opts(None),
+        );
+        assert_eq!(p.preview.needs_secrets, 1);
     }
 
     #[test]
