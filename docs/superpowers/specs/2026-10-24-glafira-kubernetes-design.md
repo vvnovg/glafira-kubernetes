@@ -95,7 +95,7 @@ MCP-шлюз Glafira. Кластер меняет только человек �
 | Rust: защита и ошибки | `guard.rs`, `error.rs` | адаптированы: новые коды (§15), ввод имени пода (§9) |
 | Rust: проверка | `health/store.rs` (находки, скрытие, замечания, предложения, срок, лимиты), `health/service.rs` (`Checker`: одна проверка на подключение, ожидание идущей, дедлайн, событие), `health/texts.rs` (каркас) | адаптированы: объекты (`target`) Kubernetes и OpenShift, свои правила (§8) |
 | Rust: MCP в приложении | `mcp/approvals.rs`, `mcp/controller.rs`, `mcp/files.rs`, `mcp/shim.rs` | как есть, новые имена файлов, сокета и pipe |
-| Крейт `glafira-mcp-core` | из `crates/glafira-mcp`: `endpoint.rs`, `handshake.rs`, `audit.rs`, `limits.rs`, реестр сессий и доступ (`SessionView`, `SessionAccess`, `ClientIdent`), общая обвязка вызова инструмента (проверка доступа сессии, лимиты, журнал, усечение ответа до 100 КБ) из `server/mod.rs` | выделяется без доменных типов |
+| Крейт `glafira-mcp-core` | из `crates/glafira-mcp`: `endpoint.rs`, `handshake.rs`, `audit.rs`, `limits.rs`, реестр сессий и доступ (`SessionView`, `SessionAccess`, `ClientIdent`), общая обвязка вызова инструмента (проверка доступа сессии, лимиты, журнал, усечение ответа до предела размера ответа клиента, по умолчанию 100 КБ) из `server/mod.rs` | выделяется без доменных типов |
 | Крейт `glafira-mcp-kubernetes` | структура `server/*_tools.rs`, `rules.rs` (усечение, скрытие чувствительного), `observe.rs` (каркас хронологии), `health.rs`, `proposals.rs` (каркас) | новые инструменты и типы ответов (§10) |
 | Фронтенд | `styles.css`, `components/common/*` (ConfirmDialog, ErrorBanner, Hint, EnvBadge, ConfigTable), `components/help/*`, `guide/*`, `i18n/*`, `components/settings/McpSection`, `components/mcp/*`, `components/about/*`, `components/connections/tree/*`, `components/health/*` (CheckBar, FindingsPanel, HealthBlock, ProposalItem, ProposalBanner, useActivePrefill), `state/workspace.ts` (каркас), `lib/*` (format, formatAgo, focusTrap, activate, useAppMenu, useHelpShortcut, useLanguageSync, useMcpStatus, useHealth, useDebouncedValue, plainInputs, links), `test/*` | дизайн и поведение — как есть; `TabSpec` и тексты — новые |
 | Скрипты и CI | `scripts/i18n-check.mjs`, `check-dist-compat.mjs`, `guide-publish.mjs`, `third-party.mjs`, `.github/workflows/*`, `deny.toml` | адаптированы: без librdkafka, cmake и Docker-Kafka |
@@ -953,7 +953,7 @@ request и limit, пометки и нарушения ограничений; �
   обычных контейнеров (прошлый запуск — `get_pod_logs` с `previous`), контейнер, лог которого не прочитался или
   недоступен, — в `errors` с причиной; `get_pod_logs` читает под до лога: заданного `container` у пода нет
   (основные, init и эфемерные контейнеры) — `invalid_argument` со списком его контейнеров, лог не запрашивается;
-  без `container` берёт контейнер по умолчанию (аннотация `kubectl.kubernetes.io/default-container`, иначе первый), не помещается в 100 КБ — отбрасываются самые старые
+  без `container` берёт контейнер по умолчанию (аннотация `kubectl.kubernetes.io/default-container`, иначе первый), не помещается в предел размера ответа клиента (по умолчанию 100 КБ) — отбрасываются самые старые
   строки; лог недоступен, хотя запрос верен, — `log_unavailable` с причиной по-английски (у поиска — та же причина
   в `errors`): ответ 400 API-сервера «container … is waiting to start: <причина>» (контейнер ещё не запускался:
   `ContainerCreating`, `PodInitializing`, образ не скачивается), «previous terminated container … not found»
@@ -970,7 +970,14 @@ request и limit, пометки и нарушения ограничений; �
   `confidence: "low"`, а при недоступности всех источников — ошибкой `metrics_unavailable` с причинами;
 - замечания и предложения: `target` сверяется с кластером (объект существует), лимиты 200 открытых замечаний и 50
   открытых предложений на подключение, срок 7 дней с создания (у предложения — в любом статусе), обновление вместо
-  дубля того же автора, удаление только своих — как в Kafka G2/G3.
+  дубля того же автора, удаление только своих — как в Kafka G2/G3;
+- компактный набор (этап O4b): клиенту, у которого в списке подтверждённых отмечен «Компактный набор», не отдаются
+  `annotate`, `remove_annotation`, `propose_change`, `withdraw_proposal` (`tools/list` с `cache_scope: Private`; вызов —
+  `invalid_params` «tool not found»); `list_annotations` и `list_proposals` остаются;
+- схемы параметров публикуются без `$ref` (подсхемы `$defs` подставлены), аргументы до разбора приводятся к схеме:
+  строка с JSON-объектом или массивом там, где строка не допускается, разбирается; `null` удаляется там, где схема
+  его не допускает (`null`, который значит «убрать значение», как в `setResources`, остаётся); ключ `""` удаляется;
+  ошибка разбора дополняется наброском ожидаемых аргументов (`Expected arguments ("?" marks optional, …): {…}`).
 
 ### 10.5 Предложения LLM
 
@@ -1008,9 +1015,16 @@ request и limit, пометки и нарушения ограничений; �
 - конфигурация приложения, его внешние зависимости и логи вне кластера через шлюз недоступны — спросить у человека;
 - `confidence: "low"` у рекомендации — сказать об этом человеку и не выдавать её за точную.
 
+Клиент с компактным набором (§10.4) получает инструкции без инструментов записи — и в `initialize`, и в
+`server/discover`: фрагмент о `propose_change` в первом абзаце заменён фразой «Nothing in the clusters can be changed
+through it, and this client has no tools for notes or change proposals: describe a needed change in the chat, and the
+user applies it in Glafira.», предложения об `annotate` во втором абзаце убраны.
+
 ### 10.7 Лимиты и журнал
 
-- ответ — до 100 КБ JSON с усечением списков (`truncated`, `hint`); не больше 2 одновременных операций и 60 вызовов
+- ответ — до предела размера клиента: 100, 48 или 24 КБ JSON («Настройки» → «LLM-ассистенты (MCP)» → «Предел
+  размера ответа», по умолчанию 100; действует и на логи) с усечением списков (`truncated`, `hint` «… truncated to the
+  size limit …»), больше предела и 1 КБ — `response_too_large`; не больше 2 одновременных операций и 60 вызовов
   в минуту на сессию, 4 одновременных операций на все сессии (`rate_limited`); запросы Thanos с шагом не меньше 5 мин;
 - журнал `mcp-audit.jsonl` (0600, ротация при 5 МБ): `call` с `tool`, подключением, namespace, усечёнными аргументами,
   исходом, кодом, размером и длительностью; у логов — число просмотренных, отданных и замаскированных строк; тексты
@@ -1083,7 +1097,7 @@ request и limit, пометки и нарушения ограничений; �
 ```
 <app_data>/                      # macOS: ~/Library/Application Support/io.github.vvnovg.glafira.kubernetes/
   connections.json               # профили и папки, schemaVersion; секреты — в keychain, кроме значений exec-плагина (§5.2)
-  settings.json                  # язык, тема, MCP (enabled, approvedClients), открытые вкладки, окна анализа по умолчанию
+  settings.json                  # язык, тема, MCP (enabled, responseLimitKb, approvedClients[] с compactTools), открытые вкладки, окна анализа по умолчанию
   health/<connectionId>.json     # последняя проверка, скрытые находки, замечания и предложения LLM
   mcp.json  mcp.sock             # пока работает MCP-сервер
   mcp-audit.jsonl (+ .1.jsonl)   # журнал MCP
@@ -1186,7 +1200,7 @@ keychain: сервис glafira-kubernetes, ключи <connection-id>/<field>
   рабочую машину. kube-state-metrics, ingress-nginx и kube-prometheus на стенде не ставятся: настоящие метрики и
   DeploymentConfig проверяет смоук на OpenShift.
 - **MCP-крейты:** фейковый `Backend`, MCP-клиент rmcp — список инструментов и аннотации, сторожок имён, уровни
-  доступа (`not_allowed`, `logs_disabled`), `llmNamespaces`, маскировка в ответах, усечение до 100 КБ, лимиты,
+  доступа (`not_allowed`, `logs_disabled`), `llmNamespaces`, маскировка в ответах, усечение до предела размера ответа клиента (по умолчанию 100 КБ), лимиты,
   рукопожатие, журнал без содержимого; `tests/manifest.rs` каждого крейта — нет зависимости от `kube`, `k8s-openapi`,
   `reqwest`, `hyper`, `tauri` и приложения; сторожок «`src-tauri/src/mcp/`» — разбор `use`-деревьев и путей (§4.1).
 - **Фронтенд:** Vitest + Testing Library — формы подключения и импорта kubeconfig, дерево, вкладки проекта,
@@ -1225,6 +1239,7 @@ keychain: сервис glafira-kubernetes, ключи <connection-id>/<field>
 | **O2. MCP-шлюз и проверка** | `glafira-mcp-core` (перенос), `glafira-mcp-kubernetes`; уровень `metadata`, `llmNamespaces`, маскировка `command`/`args`/аннотаций и текстов из кластера; проверка (`health/`, 34 правила без `resources.*`, в том числе `cluster.apiNotReady`, `ingress.*`, `gatewayRoute.*`, `gateway.*`), вкладка «Замечания», значки и блоки; 17 инструментов (все, кроме `get_resource_usage`, `recommend_resources`, предложений и логов) |
 | **O3. Ресурсы, изменения, предложения** | Источники метрик (включая автопоиск Prometheus через прокси API-сервера), PromQL-шаблоны, движок рекомендаций, вкладки «Ресурсы» workload'а и проекта, графики; правила `resources.*`; изменяющие операции §9 с dry-run и guard; `get_resource_usage`, `recommend_resources`, `propose_change`, `list_proposals`, `withdraw_proposal` с заполнением форм (22 инструмента) |
 | **O4. Логи для LLM** | Уровень `logs`, маскировка логов и значений, политика `mcpLogsEnabled`, `get_pod_logs`, `search_workload_logs` (24 инструмента) |
+| **O4b. Локальные модели** | Подсказка формы при ошибке аргументов, приведение аргументов к схеме, предел размера ответа 100 / 48 / 24 КБ, компактный набор инструментов клиента с инструкциями без инструментов записи (спека этапа `2026-11-01-glafira-kubernetes-o4b-local-llm-design.md`) |
 | **O5. DropApp** | Обследование живого кластера DropApp и спека этапа (§4.3); адаптер `dropapp`: признак для `detect`, вход, автопоиск метрик, обзор и правила уровня кластера, найденное по мультитенантности, serverless и сети; смоук на DropApp. Условие начала — стенд DropApp и доступ к документации; без них этап переносится, и O6 его не ждёт |
 | **O6. Раздача** | Остальные 10 языков и глоссарий, руководство на 12 языках, `docs/admin.md` и примеры политики со всеми ключами, подписание, установщики, updater, репозиторий релизов |
 

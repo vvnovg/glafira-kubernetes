@@ -202,6 +202,9 @@ export const api = {
   answerMcpApproval: (sessionId: string, approve: boolean) =>
     call<McpStatus>("answer_mcp_approval", { sessionId, approve }),
   revokeMcpClient: (name: string) => call<McpStatus>("revoke_mcp_client", { name }),
+  setMcpResponseLimit: (kb: number) => call<McpStatus>("set_mcp_response_limit", { kb }),
+  setMcpClientCompact: (name: string, compact: boolean) =>
+    call<McpStatus>("set_mcp_client_compact", { name, compact }),
   disconnectMcpSessions: (sessionId: string | null) => call<McpStatus>("disconnect_mcp_sessions", { sessionId }),
   getMcpAudit: (limit: number) => call<McpAuditEntry[]>("get_mcp_audit", { limit }),
   getMcpClientConfigs: () => call<McpClientConfigs>("get_mcp_client_configs"),

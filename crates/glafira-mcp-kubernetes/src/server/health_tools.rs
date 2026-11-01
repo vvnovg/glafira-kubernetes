@@ -28,7 +28,7 @@ pub const FINDINGS_LIMIT_MAX: u32 = 200;
 pub const MAX_CHECK_NAMESPACES: usize = 50;
 
 /// У `list_annotations` нет страниц: при обрезке остаются самые свежие, остальное — сужением по status.
-const NOTES_TRUNCATED_HINT: &str = "The response was truncated to 100 KB: only the most recently updated notes are shown; narrow with status";
+const NOTES_TRUNCATED_HINT: &str = "The response was truncated to the size limit: only the most recently updated notes are shown; narrow with status";
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -133,7 +133,7 @@ fn notes_of(b: &mut NotesBody) -> &mut Vec<AnnotationView> {
 }
 
 /// Порядок списка без страниц: сначала недавно обновлённые, при равенстве — созданные позже,
-/// затем по id. Обрезка до 100 КБ оставляет голову.
+/// затем по id. Обрезка до предела размера ответа оставляет голову.
 fn newest_first(items: &mut [AnnotationView]) {
     items.sort_by(|a, b| {
         b.updated_at_ms

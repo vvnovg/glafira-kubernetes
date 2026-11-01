@@ -57,6 +57,24 @@ An allowed client is remembered by name and appears in [[ui:settings.mcp.clients
 Glafira asks again the next time. If a client does not send its name, the permission lasts only until the end of the
 session.
 
+## Response limit and compact tool set {#response-limit}
+
+For an assistant on a local model with a small context (see [Local model](local-llm.md#glafira-settings)),
+[[ui:settings.mcp.section]] has two settings:
+
+- [[ui:settings.mcp.responseLimit]] — the largest answer of one tool call: 100, 48 or 24 KB (100 by default; a 100 KB
+  answer is about 25–30 thousand tokens). Lists, logs and search matches are truncated to the limit, and the assistant
+  sees `truncated` and a hint on how to narrow the request. The limit applies to all clients from the next call.
+- [[ui:settings.mcp.colCompact]] in the [[ui:settings.mcp.clients]] list — a tool set without notes and change
+  proposals (`annotate`, `remove_annotation`, `propose_change`, `withdraw_proposal`): their descriptions take about
+  2,300 tokens. An assistant with this set describes the needed changes in words. The checkbox appears once the client
+  connects and you approve it; the client sees the new tool list after it reconnects, and Glafira refuses a call to a
+  hidden tool at once.
+
+If the assistant gets the arguments of a call wrong, Glafira answers with an error that sketches the expected
+arguments, and it parses a nested object sent as a JSON string by itself: this way small models correct themselves on
+the first retry.
+
 ## What the assistant sees {#what-llm-sees}
 
 The assistant sees only connections with LLM access and only their projects from [[ui:connections.form.llmScope]];
@@ -112,8 +130,10 @@ case-insensitive. Your own list replaces the standard one: clear [[ui:connection
 names one per line (at most 200 names of 64 characters). An empty own list turns off name-based masking: only the
 built-in value patterns (JWT and the like) remain. The log filter searches the original text, so the assistant can find
 a line by a value from an error, but it gets the line already masked. A line longer than 4 KB is cut. If the
-`get_pod_logs` answer does not fit 100 KB, the oldest lines are dropped. `search_workload_logs` reports `stopped` (which
-limit stopped the scan: pods, bytes or time) and `errors` (containers whose logs could not be read).
+`get_pod_logs` answer does not fit the response size limit (100 KB by default, see
+[Response limit and compact tool set](llm-mcp.md#response-limit)), the oldest lines are dropped. `search_workload_logs`
+reports `stopped` (which limit stopped the scan: pods, bytes or time) and `errors` (containers whose logs could not be
+read).
 
 Masking does not catch everything: a secret without a hint in its name (for example `user=bob p4ss`) stays in the line.
 The filter sees the unmasked text and reports its hits, so masking hides values from reading, not from deliberate

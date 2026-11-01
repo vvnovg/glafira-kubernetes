@@ -178,6 +178,8 @@ pub fn run() {
             commands::mcp::set_mcp_enabled,
             commands::mcp::answer_mcp_approval,
             commands::mcp::revoke_mcp_client,
+            commands::mcp::set_mcp_response_limit,
+            commands::mcp::set_mcp_client_compact,
             commands::mcp::disconnect_mcp_sessions,
             commands::mcp::get_mcp_audit,
             commands::mcp::get_mcp_client_configs,

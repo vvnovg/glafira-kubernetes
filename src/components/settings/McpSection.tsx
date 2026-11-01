@@ -68,6 +68,9 @@ function auditWhat(e: McpAuditEntry, t: (k: string, o?: Record<string, string>) 
   return key ? t(key) : e.event;
 }
 
+/** Как `glafira_mcp_core::fit::RESPONSE_LIMITS_KB`. */
+const RESPONSE_LIMITS_KB = [100, 48, 24];
+
 /** Что меняется вместе с журналом: состояние сервера, сессии, их записи в журнале и клиенты. */
 function activity(s: McpStatus): string {
   const sessions = s.sessions.map((x) => `${x.id}:${x.logged}`).join(",");
@@ -83,6 +86,11 @@ export function McpSection() {
   const audit = useQuery({ queryKey: ["mcp-audit"], queryFn: () => api.getMcpAudit(AUDIT_LIMIT) });
   const apply = (s: McpStatus) => qc.setQueryData(MCP_STATUS_KEY, s);
   const toggle = useMutation({ mutationFn: (enabled: boolean) => api.setMcpEnabled(enabled), onSuccess: apply });
+  const limit = useMutation({ mutationFn: (kb: number) => api.setMcpResponseLimit(kb), onSuccess: apply });
+  const compact = useMutation({
+    mutationFn: ({ name, on }: { name: string; on: boolean }) => api.setMcpClientCompact(name, on),
+    onSuccess: apply,
+  });
   const refreshAudit = () => void qc.invalidateQueries({ queryKey: ["mcp-audit"] });
   const revoke = useMutation({
     mutationFn: (name: string) => api.revokeMcpClient(name),
@@ -112,7 +120,7 @@ export function McpSection() {
   if (status.error) return <ErrorBanner error={status.error} onRetry={() => status.refetch()} />;
   const s = status.data;
   if (!s) return <p className="empty">{t("common.loading")}</p>;
-  const error = toggle.error ?? revoke.error ?? disconnect.error ?? reveal.error;
+  const error = toggle.error ?? limit.error ?? revoke.error ?? compact.error ?? disconnect.error ?? reveal.error;
 
   return (
     <section aria-labelledby="mcp-title">
@@ -131,6 +139,24 @@ export function McpSection() {
             disabled={!s.policyAllows || toggle.isPending}
             onChange={(e) => toggle.mutate(e.target.checked)}
           />
+        </span>
+        <span className="field-label">
+          <label htmlFor="mcp-response-limit">{t("settings.mcp.responseLimit")}</label>
+          <Hint k="hints.settings.mcpResponseLimit" label={t("settings.mcp.responseLimit")} />
+        </span>
+        <span>
+          <select
+            id="mcp-response-limit"
+            value={s.responseLimitKb}
+            disabled={limit.isPending}
+            onChange={(e) => limit.mutate(Number(e.target.value))}
+          >
+            {RESPONSE_LIMITS_KB.map((kb) => (
+              <option key={kb} value={kb}>
+                {t("settings.mcp.responseLimitKb", { kb })}
+              </option>
+            ))}
+          </select>
         </span>
       </div>
       {!s.policyAllows && <p className="hint">{t("settings.mcp.policy")}</p>}
@@ -199,6 +225,12 @@ export function McpSection() {
               <th>{t("settings.mcp.colClient")}</th>
               <th>{t("settings.mcp.colFirstSeen")}</th>
               <th>{t("settings.mcp.colLastSeen")}</th>
+              <th>
+                <span className="field-label">
+                  {t("settings.mcp.colCompact")}
+                  <Hint k="hints.settings.mcpCompact" label={t("settings.mcp.colCompact")} />
+                </span>
+              </th>
               <th />
             </tr>
           </thead>
@@ -210,6 +242,15 @@ export function McpSection() {
                 </td>
                 <td>{formatTimestamp(c.firstSeenMs)}</td>
                 <td>{formatTimestamp(c.lastSeenMs)}</td>
+                <td>
+                  <input
+                    type="checkbox"
+                    aria-label={t("settings.mcp.compactFor", { name: c.name })}
+                    checked={c.compactTools}
+                    disabled={compact.isPending}
+                    onChange={(e) => compact.mutate({ name: c.name, on: e.target.checked })}
+                  />
+                </td>
                 <td>
                   <button type="button" disabled={revoke.isPending} onClick={() => revoke.mutate(c.name)}>
                     {t("settings.mcp.revoke")}

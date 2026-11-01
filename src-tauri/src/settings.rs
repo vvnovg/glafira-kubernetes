@@ -81,6 +81,9 @@ pub struct ApprovedClient {
     pub version: String,
     pub first_seen_ms: u64,
     pub last_seen_ms: u64,
+    /// Компактный набор инструментов: без заметок и предложений (для локальной модели).
+    #[serde(default)]
+    pub compact_tools: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -90,6 +93,19 @@ pub struct McpSettings {
     pub enabled: bool,
     #[serde(default)]
     pub approved_clients: Vec<ApprovedClient>,
+    /// Предел размера ответа LLM, КБ; `None` — по умолчанию (100 КБ).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_limit_kb: Option<u32>,
+}
+
+impl McpSettings {
+    /// Значение вне [`RESPONSE_LIMITS_KB`](glafira_mcp_core::fit::RESPONSE_LIMITS_KB) (файл
+    /// правили руками: 0, 50) — тоже по умолчанию.
+    pub fn response_limit_kb(&self) -> u32 {
+        self.response_limit_kb
+            .filter(|kb| glafira_mcp_core::fit::RESPONSE_LIMITS_KB.contains(&(*kb as usize)))
+            .unwrap_or((glafira_mcp_core::fit::MAX_RESPONSE_BYTES / 1024) as u32)
+    }
 }
 
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -195,6 +211,7 @@ impl SettingsStore {
                     version: version.to_string(),
                     first_seen_ms: now_ms,
                     last_seen_ms: now_ms,
+                    compact_tools: false,
                 }),
             }
         })
@@ -220,6 +237,32 @@ impl SettingsStore {
         next.schema_version = 1;
         write_json(&self.path, &next)?;
         *data = next;
+        Ok(true)
+    }
+
+    /// Блокирующий вызов (запись файла).
+    pub fn set_mcp_response_limit(&self, kb: u32) -> AppResult<()> {
+        if !glafira_mcp_core::fit::RESPONSE_LIMITS_KB.contains(&(kb as usize)) {
+            return Err(crate::app_err!(
+                ErrorCode::InvalidInput,
+                "errors.settings.unknownResponseLimit",
+                "Unsupported response limit {{kb}} KB",
+                kb = kb
+            ));
+        }
+        self.update(|d| d.mcp.response_limit_kb = Some(kb))
+    }
+
+    /// Блокирующий вызов. `false` — такого клиента нет.
+    pub fn set_client_compact(&self, name: &str, compact: bool) -> AppResult<bool> {
+        if !self.is_client_approved(name) {
+            return Ok(false);
+        }
+        self.update(|d| {
+            for c in d.mcp.approved_clients.iter_mut().filter(|c| c.name == name) {
+                c.compact_tools = compact;
+            }
+        })?;
         Ok(true)
     }
 
@@ -349,8 +392,33 @@ mod tests {
                 name: "claude-ai".into(),
                 version: "1.1".into(),
                 first_seen_ms: 10,
-                last_seen_ms: 20
+                last_seen_ms: 20,
+                compact_tools: false
             }
+        );
+        assert_eq!(again.mcp().response_limit_kb(), 100);
+        again.set_mcp_response_limit(24).unwrap();
+        assert_eq!(
+            again.set_mcp_response_limit(50).unwrap_err().code,
+            crate::error::ErrorCode::InvalidInput
+        );
+        assert!(again.set_client_compact("cursor", true).unwrap());
+        assert!(!again.set_client_compact("unknown", true).unwrap());
+        let mcp = SettingsStore::open(dir.path()).mcp();
+        assert_eq!(mcp.response_limit_kb(), 24);
+        assert!(mcp.approved_clients[1].compact_tools);
+        for hand_edited in [0, 50] {
+            let mcp = McpSettings {
+                response_limit_kb: Some(hand_edited),
+                ..mcp.clone()
+            };
+            assert_eq!(mcp.response_limit_kb(), 100, "{hand_edited}");
+        }
+        assert!(again.revoke_client("cursor").unwrap());
+        again.remember_client("cursor", "3", 40).unwrap();
+        assert!(
+            !again.mcp().approved_clients[1].compact_tools,
+            "новое подтверждение — полный набор"
         );
         assert!(again.revoke_client("claude-ai").unwrap());
         assert!(!again.revoke_client("claude-ai").unwrap());

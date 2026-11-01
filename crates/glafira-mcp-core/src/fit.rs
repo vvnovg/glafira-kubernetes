@@ -2,10 +2,31 @@
 
 use serde::Serialize;
 
+/// Предел размера ответа по умолчанию. Клиенту с малым контекстом (локальная модель) пользователь
+/// задаёт меньший — [`RESPONSE_LIMITS_KB`]; инструмент узнаёт его из [`response_limit`].
 pub const MAX_RESPONSE_BYTES: usize = 100 * 1024;
-/// Страховка в обвязке инструментов: ответ больше этого (предел + запас на `truncated` и
+/// Пределы на выбор в настройках MCP, КБ.
+pub const RESPONSE_LIMITS_KB: [usize; 3] = [100, 48, 24];
+/// Страховка в обвязке инструментов: ответ больше предела и этого запаса (на `truncated` и
 /// `hint`) не отправляется — обрезка списков не справилась.
-pub const HARD_LIMIT_BYTES: usize = MAX_RESPONSE_BYTES + 1024;
+pub const HARD_LIMIT_MARGIN: usize = 1024;
+
+tokio::task_local! {
+    static RESPONSE_LIMIT: usize;
+}
+
+/// Предел размера ответа текущего вызова (обвязка задаёт его через [`with_response_limit`]); вне
+/// обвязки — [`MAX_RESPONSE_BYTES`].
+pub fn response_limit() -> usize {
+    RESPONSE_LIMIT
+        .try_with(|l| *l)
+        .unwrap_or(MAX_RESPONSE_BYTES)
+}
+
+/// Выполняет `f` с пределом размера ответа `limit`.
+pub async fn with_response_limit<F: std::future::Future>(limit: usize, f: F) -> F::Output {
+    RESPONSE_LIMIT.scope(limit, f).await
+}
 pub const DEFAULT_LIMIT: usize = 200;
 pub const MAX_LIMIT: usize = 500;
 
@@ -46,27 +67,28 @@ pub fn checked_limit(limit: Option<u32>) -> Result<usize, String> {
     }
 }
 
-/// Обрезает главный список ответа, пока JSON не уложится в [`MAX_RESPONSE_BYTES`].
+/// Обрезает главный список ответа, пока JSON не уложится в предел вызова ([`response_limit`]).
 /// Возвращает true, если что-то обрезано.
 pub fn fit<T: Serialize, I>(value: &mut T, list: fn(&mut T) -> &mut Vec<I>) -> bool {
+    let limit = response_limit();
     let mut truncated = false;
     loop {
         let size = serde_json::to_vec(&*value).map_or(usize::MAX, |v| v.len());
-        if size <= MAX_RESPONSE_BYTES {
+        if size <= limit {
             return truncated;
         }
         let l = list(value);
         if l.is_empty() {
             return truncated;
         }
-        let keep = (l.len() * MAX_RESPONSE_BYTES / size).min(l.len() - 1);
+        let keep = (l.len() * limit / size).min(l.len() - 1);
         l.truncate(keep);
         truncated = true;
     }
 }
 
 pub const TRUNCATED_HINT: &str =
-    "The response was truncated to 100 KB: narrow the filter or page with offset";
+    "The response was truncated to the size limit: narrow the filter or page with offset";
 
 #[cfg(test)]
 mod tests {
@@ -111,5 +133,27 @@ mod tests {
         assert!(fit(&mut big, items));
         let size = serde_json::to_vec(&big).unwrap().len();
         assert!(size <= MAX_RESPONSE_BYTES && big.items.len() > 50, "{size}");
+    }
+    #[tokio::test]
+    async fn fit_follows_the_limit_of_the_call() {
+        let big = || Big {
+            items: (0..2000)
+                .map(|i| format!("item-{i:05}-{}", "x".repeat(40)))
+                .collect(),
+        };
+        let mut wide = big();
+        assert!(fit(&mut wide, items));
+        let mut narrow = big();
+        let limited = with_response_limit(24 * 1024, async move {
+            assert_eq!(response_limit(), 24 * 1024);
+            assert!(fit(&mut narrow, items));
+            narrow
+        })
+        .await;
+        let size = |b: &Big| serde_json::to_vec(b).unwrap().len();
+        assert!(size(&limited) <= 24 * 1024, "{}", size(&limited));
+        assert!(size(&wide) > 90 * 1024 && size(&wide) <= MAX_RESPONSE_BYTES);
+        assert_eq!(response_limit(), MAX_RESPONSE_BYTES);
+        assert_eq!(RESPONSE_LIMITS_KB, [100, 48, 24]);
     }
 }

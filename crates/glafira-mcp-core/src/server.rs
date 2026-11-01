@@ -21,9 +21,9 @@ use crate::audit::{
     AuditConnection, AuditEvent, AuditLog, Outcome, now_ms, read_counts, truncate_args,
 };
 use crate::endpoint::{BoxStream, Endpoint, Listener};
-use crate::fit::HARD_LIMIT_BYTES;
+use crate::fit::{HARD_LIMIT_MARGIN, with_response_limit};
 use crate::limits::{CALLS_PER_MINUTE, GLOBAL_CONCURRENCY, RateLimiter, SESSION_CONCURRENCY};
-use crate::session::{BackendError, ClientIdent, Hooks, SessionAccess, SessionView};
+use crate::session::{BackendError, ClientIdent, ClientOptions, Hooks, SessionAccess, SessionView};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -464,6 +464,11 @@ impl Session {
         }
     }
 
+    /// Настройки клиента сессии (предел размера ответа, компактный набор инструментов).
+    pub fn client_options(&self, view: &SessionView) -> ClientOptions {
+        self.shared.hooks.client_options(view)
+    }
+
     /// Общая обвязка инструмента: право, лимит, предел размера ответа, журнал, ответ или ошибка
     /// для LLM. `args` — аргументы для журнала (без текстов, которые писать нельзя).
     pub async fn call<F>(
@@ -479,17 +484,18 @@ impl Session {
     {
         let started = tokio::time::Instant::now();
         let view = self.identify(ctx.client_info());
+        let limit = self.client_options(&view).response_limit_bytes;
         // Отметка «идёт вызов» снимается после записи в журнал: интерфейс перечитывает журнал по
         // событию статуса (счётчик `logged`) и должен застать в нём этот вызов.
         let (flag, result) = match self.admit(&view) {
-            Ok(flag) => (Some(flag), body.await),
+            Ok(flag) => (Some(flag), with_response_limit(limit, body).await),
             Err(e) => (None, Err(e)),
         };
         let result = result.and_then(|v| {
-            if serde_json::to_vec(&v).map_or(0, |b| b.len()) > HARD_LIMIT_BYTES {
+            if serde_json::to_vec(&v).map_or(0, |b| b.len()) > limit + HARD_LIMIT_MARGIN {
                 Err(BackendError::new(
                     "response_too_large",
-                    "The response is larger than 100 KB even after truncation; narrow the request: a filter, fewer items or a smaller page",
+                    "The response is larger than the size limit even after truncation; narrow the request: a filter, fewer items or a smaller page",
                 ))
             } else {
                 Ok(v)

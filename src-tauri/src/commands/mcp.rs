@@ -37,6 +37,22 @@ pub async fn revoke_mcp_client(ctl: Ctl<'_>, name: String) -> AppResult<McpStatu
 }
 
 #[tauri::command]
+pub async fn set_mcp_response_limit(ctl: Ctl<'_>, kb: u32) -> AppResult<McpStatus> {
+    let c = ctl.inner().clone();
+    blocking(move || c.set_response_limit(kb)).await
+}
+
+#[tauri::command]
+pub async fn set_mcp_client_compact(
+    ctl: Ctl<'_>,
+    name: String,
+    compact: bool,
+) -> AppResult<McpStatus> {
+    let c = ctl.inner().clone();
+    blocking(move || c.set_client_compact(&name, compact)).await
+}
+
+#[tauri::command]
 pub fn disconnect_mcp_sessions(ctl: Ctl<'_>, session_id: Option<String>) -> McpStatus {
     ctl.disconnect(session_id.as_deref())
 }

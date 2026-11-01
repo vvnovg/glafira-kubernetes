@@ -36,7 +36,7 @@ pub const SEARCH_PODS: usize = 20;
 pub const SEARCH_BYTES: u64 = 50 * 1024 * 1024;
 pub const SEARCH_SECONDS: u64 = 40;
 
-pub const OLDER_LINES_HINT: &str = "The response was truncated to 100 KB: the oldest lines were dropped. Narrow the time range, lower tailLines or add a filter";
+pub const OLDER_LINES_HINT: &str = "The response was truncated to the size limit: the oldest lines were dropped. Narrow the time range, lower tailLines or add a filter";
 
 // Описание типа уходит модели в схеме параметров — поэтому по-английски.
 /// Line filter: exactly one of contains and regex.
@@ -271,7 +271,7 @@ fn size(v: &impl Serialize) -> usize {
 }
 
 /// Лог контейнера для модели: фильтр по немаскированным строкам, маскировка, обрезка строк;
-/// не помещается в 100 КБ — отбрасываются самые старые строки.
+/// не помещается в предел размера ответа — отбрасываются самые старые строки.
 pub fn pod_logs(log: ContainerLog, matcher: &Matcher, m: &Masker) -> PodLogs {
     let scanned = log.lines.len() as u64;
     let mut lines: Vec<(Line, usize)> = log
@@ -291,7 +291,7 @@ pub fn pod_logs(log: ContainerLog, matcher: &Matcher, m: &Masker) -> PodLogs {
         hint: None,
     };
     // Размер без строк, затем строки с конца, пока помещаются.
-    let mut budget = glafira_mcp_core::fit::MAX_RESPONSE_BYTES
+    let mut budget = glafira_mcp_core::fit::response_limit()
         .saturating_sub(size(&out) + OLDER_LINES_HINT.len() + 16);
     let mut keep = 0;
     for (line, _) in lines.iter().rev() {
@@ -339,7 +339,7 @@ pub struct Search {
     pub scanned: u64,
     pub returned: u64,
     pub masked: u64,
-    /// Совпадений больше `maxMatches` или ответ обрезан до 100 КБ.
+    /// Совпадений больше `maxMatches` или ответ обрезан до предела размера ответа.
     pub truncated: bool,
     /// Просмотр остановлен пределом: подов (20), байт (50 МБ) или времени (40 с).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -351,6 +351,8 @@ pub struct Search {
 }
 
 pub const MORE_MATCHES_HINT: &str = "There are more matches than returned: narrow the filter or the time range, or raise maxMatches (up to 1000)";
+pub const SIZE_MATCHES_HINT: &str =
+    "Matches were truncated to the size limit: narrow the filter or the time range";
 pub const STOPPED_HINT: &str = "The scan stopped at a limit (20 pods, 50 MB of logs or 40 seconds, see stopped): the matches cover only the scanned part. Narrow the time range with sinceSeconds or read single pods with get_pod_logs";
 
 fn matches_of(s: &mut Search) -> &mut Vec<Match> {
@@ -358,7 +360,7 @@ fn matches_of(s: &mut Search) -> &mut Vec<Match> {
 }
 
 /// Поиск по логам workload'а: совпадения по немаскированным строкам, контекст до и после,
-/// всё — после маскировки; не больше `max_matches`, ответ — до 100 КБ.
+/// всё — после маскировки; не больше `max_matches`, ответ — в пределе размера вызова.
 pub fn search(
     w: WorkloadLogs,
     matcher: &Matcher,
@@ -424,13 +426,14 @@ pub fn search(
     if out.truncated {
         out.scanned = w.logs.iter().map(|l| l.lines.len() as u64).sum();
     }
-    if glafira_mcp_core::fit::fit(&mut out, matches_of) {
-        out.truncated = true;
-    }
+    let cut = glafira_mcp_core::fit::fit(&mut out, matches_of);
+    out.truncated |= cut;
     out.returned = out.matches.len() as u64;
     out.masked = masked[..out.matches.len()].iter().map(|n| *n as u64).sum();
     out.hint = if out.stopped.is_some() {
         Some(STOPPED_HINT)
+    } else if cut {
+        Some(SIZE_MATCHES_HINT)
     } else if out.truncated {
         Some(MORE_MATCHES_HINT)
     } else {
@@ -629,6 +632,43 @@ mod tests {
         let s = search(w, &m, &Masker::default(), 1000, 0);
         assert!(s.truncated && (s.returned as usize) < 100);
         assert!(size(&s) <= glafira_mcp_core::fit::MAX_RESPONSE_BYTES);
-        assert_eq!(s.hint, Some(MORE_MATCHES_HINT));
+        assert_eq!(s.hint, Some(SIZE_MATCHES_HINT));
+    }
+    #[tokio::test]
+    async fn logs_follow_the_response_limit_of_the_call() {
+        let lines: Vec<RawLine> = (0..400)
+            .map(|i| raw(&format!("{i:04} {}", "x".repeat(1000))))
+            .collect();
+        let long = format!("hit {}", "x".repeat(1000));
+        let refs: Vec<&str> = (0..100).map(|_| long.as_str()).collect();
+        let (pod, found) = glafira_mcp_core::fit::with_response_limit(24 * 1024, async {
+            let pod = pod_logs(
+                ContainerLog {
+                    pod: "p".into(),
+                    container: "c".into(),
+                    lines,
+                },
+                &Matcher::All,
+                &Masker::default(),
+            );
+            let w = WorkloadLogs {
+                logs: vec![container("a", &refs)],
+                pods_total: 1,
+                ..WorkloadLogs::default()
+            };
+            let m = Matcher::new(Some(&filter(Some("hit"), None, None))).unwrap();
+            (pod, search(w, &m, &Masker::default(), 1000, 0))
+        })
+        .await;
+        assert!(pod.truncated && size(&pod) <= 24 * 1024, "{}", size(&pod));
+        assert_eq!(pod.hint, Some(OLDER_LINES_HINT));
+        assert!(OLDER_LINES_HINT.contains("size limit"));
+        assert!(
+            found.truncated && size(&found) <= 24 * 1024,
+            "{}",
+            size(&found)
+        );
+        assert!((found.returned as usize) < 30);
+        assert_eq!(found.hint, Some(SIZE_MATCHES_HINT));
     }
 }

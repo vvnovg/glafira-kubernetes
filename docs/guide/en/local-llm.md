@@ -77,6 +77,14 @@ about 10 seconds later; the variable `OLLAMA_KEEP_ALIVE` sets how long it stays 
 the model on a computer with internet access and copy the Ollama models directory (`~/.ollama/models`), or deploy it from
 an internal mirror.
 
+## Glafira settings {#glafira-settings}
+
+With a 64 thousand token context, choose a [[ui:settings.mcp.responseLimit]] of 48 or 24 KB in
+[[ui:settings.mcp.section]]: a 100 KB answer takes about 25–30 thousand tokens and, together with the tool schemas and
+the conversation, can overflow the context. If the assistant does not need notes and change proposals, check
+[[ui:settings.mcp.colCompact]] for the client: the request on every step gets shorter by about 2,300 tokens. More in
+[Response limit and compact tool set](llm-mcp.md#response-limit).
+
 ## Qwen Code {#qwen-code}
 
 Qwen Code (https://github.com/QwenLM/qwen-code) is an open-source command-line assistant (Apache 2.0) designed for Qwen
@@ -262,8 +270,9 @@ developers check models with the script in `dev/llm-eval` of the repository: fiv
   `CLAUDE_CODE_MAX_CONTEXT_TOKENS` in the client.
 - The answer is empty or stops mid-thought — the model's reasoning used up the output token limit: raise it to 8
   thousand.
-- Glafira answers `invalid type: string, expected struct` — the model server passed a nested argument as a string.
-  Glafira versions that publish tool schemas without `$ref` do not trigger this; update Glafira.
+- The assistant gets the error `failed to deserialize parameters` — the model called a tool with wrong arguments.
+  Glafira adds a sketch of the expected arguments to the error and parses a nested object sent as a JSON string by
+  itself, so the model usually corrects itself on the next try.
 - The model keeps retrying similar calls with errors — this happens with small models; use a larger model or
   Qwen3.6-35B-A3B.
 - The first answer after a break takes longer than usual — Ollama unloaded the model from memory; see

@@ -24,6 +24,13 @@ pub const DEFAULT_EVENTS_SINCE_S: u32 = 3600;
 /// два не поместятся в 100 КБ вместе с хронологией — отказ сразу после первого образца.
 pub const MAX_STATE_BYTES: usize = 45 * 1024;
 
+/// Предел состояния `observe_workload` у текущего вызова: [`MAX_STATE_BYTES`] при пределе ответа
+/// 100 КБ и не больше 45% меньшего предела клиента — иначе отказ приходил бы от обвязки
+/// (`response_too_large`) только после всего окна наблюдения.
+fn max_state_bytes() -> usize {
+    MAX_STATE_BYTES.min(fit::response_limit() * 45 / 100)
+}
+
 /// Ответ со списком, обрезанным под предел размера.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -548,10 +555,10 @@ impl KubeServer {
             .await
             .map_err(|_| late())??;
         let first = expect!(first, WorkloadState)?;
-        if serde_json::to_vec(&Snapshot::from(&first)).map_or(0, |b| b.len()) > MAX_STATE_BYTES {
+        if serde_json::to_vec(&Snapshot::from(&first)).map_or(0, |b| b.len()) > max_state_bytes() {
             return Err(BackendError::new(
                 "response_too_large",
-                "The workload has too many pods to observe: its state alone does not fit into 100 KB; use list_pods and list_events instead",
+                "The workload has too many pods to observe: its state alone does not fit into the response size limit; use list_pods and list_events instead",
             ));
         }
         let total = (duration / INTERVAL_S) as usize + 1;
@@ -583,7 +590,7 @@ impl KubeServer {
         }
         let mut observation = rec.finish(started_at_ms, started.elapsed().as_millis() as u64);
         mask_observation(&text_masker(), &mut observation);
-        // Предел 100 КБ: лишние события отбрасываются, счётчики сводки остаются полными.
+        // Предел размера ответа: лишние события отбрасываются, счётчики сводки остаются полными.
         if fit::fit(&mut observation, events_of) {
             observation.truncated = true;
         }
@@ -1126,10 +1133,10 @@ impl KubeServer {
                 };
                 mask_network(&text_masker(), &mut n);
                 let v = to_value(&n)?;
-                if serde_json::to_vec(&v).map_or(0, |b| b.len()) > fit::MAX_RESPONSE_BYTES {
+                if serde_json::to_vec(&v).map_or(0, |b| b.len()) > fit::response_limit() {
                     return Err(BackendError::new(
                         "response_too_large",
-                        "The network objects of this project do not fit into 100 KB; narrow them with filter",
+                        "The network objects of this project do not fit into the response size limit; narrow them with filter",
                     ));
                 }
                 Ok(v)
