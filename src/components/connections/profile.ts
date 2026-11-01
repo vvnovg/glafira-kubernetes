@@ -1,4 +1,4 @@
-import type { AuthConfig, AuthMethod, CaConfig, CaMode, ConnectionProfile, ExecAuth, MetricsConfig, MetricsEndpoint, MetricsMode, ProxyConfig, ProxyMode } from "../../api/types";
+import type { AuthConfig, AuthMethod, CaConfig, CaMode, ConnectionProfile, ExecAuth, MetricsConfig, MetricsEndpoint, MetricsMode, OidcAuth, ProxyConfig, ProxyMode } from "../../api/types";
 import { newExec } from "./exec";
 
 export function newProfile(): ConnectionProfile {
@@ -23,6 +23,11 @@ export function newProfile(): ConnectionProfile {
   };
 }
 
+/** Вход через OIDC со значениями DropApp (Dex): client id `dapp`, scopes с `groups` и `offline_access`. */
+export function newOidc(): OidcAuth {
+  return { issuerUrl: "", clientId: "dapp", scopes: ["openid", "email", "groups", "profile", "offline_access"] };
+}
+
 export function newMetricsEndpoint(): MetricsEndpoint {
   return { url: "", auth: "connection", ca: { mode: "connection" } };
 }
@@ -34,10 +39,17 @@ export function withMetricsMode(metrics: MetricsConfig, mode: MetricsMode, last:
   return { mode, url, auth, ca };
 }
 
-/** Способ входа; сертификат и exec-плагин сохраняются при переключении туда и обратно. */
-export function withAuthMethod(auth: AuthConfig, method: AuthMethod, lastCertificate = "", lastExec: ExecAuth = newExec()): AuthConfig {
+/** Способ входа; сертификат, exec-плагин и поля OIDC сохраняются при переключении туда и обратно. */
+export function withAuthMethod(
+  auth: AuthConfig,
+  method: AuthMethod,
+  lastCertificate = "",
+  lastExec: ExecAuth = newExec(),
+  lastOidc: OidcAuth = newOidc(),
+): AuthConfig {
   if (method === "clientCert") return { method, certificatePem: auth.method === "clientCert" ? auth.certificatePem : lastCertificate };
   if (method === "exec") return auth.method === "exec" ? auth : { method, ...lastExec };
+  if (method === "oidc") return auth.method === "oidc" ? auth : { method, ...lastOidc };
   return { method };
 }
 

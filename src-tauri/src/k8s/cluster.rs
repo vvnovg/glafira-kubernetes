@@ -13,15 +13,16 @@ use kube::api::{Api, ApiResource, DynamicObject, GroupVersionKind, ListParams, P
 use serde::Serialize;
 
 use crate::error::AppResult;
+use crate::k8s::dropapp;
 use crate::k8s::errors::{from_kube, timeout};
-use crate::platform::{ApiGroups, Discovery, PlatformInfo, PlatformKind, detect};
+use crate::platform::{ApiGroups, Discovery, PlatformInfo, PlatformKind, ProjectSource, detect};
 
 /// Что пользователь может читать на уровне кластера. Без права соответствующие узлы и вкладки
 /// не показываются.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Capabilities {
-    /// Список проектов (`project.openshift.io`) или namespace.
+    /// Список проектов (`project.openshift.io`, `projects.dropapp.ru`) или namespace.
     pub list_projects: bool,
     pub list_nodes: bool,
     pub list_all_pods: bool,
@@ -92,6 +93,18 @@ async fn cluster_version(client: &kube::Client, limit: Duration) -> Option<Strin
     }
 }
 
+/// Версия DropApp из первого ClusterMetadata; нет прав, объекта или поля — `None`.
+async fn dropapp_version(client: &kube::Client, limit: Duration) -> Option<String> {
+    let api: Api<DynamicObject> = Api::all_with(client.clone(), &dropapp::cluster_metadatas());
+    match timed(limit, api.list(&ListParams::default().limit(1))).await {
+        Ok(list) => list.items.first().and_then(dropapp::dapp_version),
+        Err(e) => {
+            tracing::debug!("cluster metadata is not readable: {}", e.message);
+            None
+        }
+    }
+}
+
 /// Имена меток первой ноды (по ним узнаётся AKS); нет прав — пусто.
 async fn first_node_labels(client: &kube::Client, limit: Duration) -> Vec<String> {
     let api: Api<Node> = Api::all(client.clone());
@@ -108,7 +121,8 @@ async fn first_node_labels(client: &kube::Client, limit: Duration) -> Vec<String
 }
 
 /// Версия API-сервера, группы API и платформа (спец. §4.3). ClusterVersion читается только
-/// у OpenShift, ноды — только если дистрибутив не узнан по версии и группам.
+/// у OpenShift, ClusterMetadata — только у DropApp, ноды — только если дистрибутив Kubernetes
+/// не узнан по версии и группам.
 pub async fn discover(client: &kube::Client, limit: Duration) -> AppResult<Discovered> {
     let version = timed(limit, client.apiserver_version()).await?;
     let groups = timed(limit, client.list_api_groups()).await?;
@@ -123,6 +137,8 @@ pub async fn discover(client: &kube::Client, limit: Duration) -> AppResult<Disco
     };
     if d.has_group("config.openshift.io") {
         d.cluster_version = cluster_version(client, limit).await;
+    } else if d.has_group("config.dropapp.ru") {
+        d.dropapp_version = dropapp_version(client, limit).await;
     }
     let mut platform = detect(&d);
     if platform.kind == PlatformKind::Kubernetes && platform.distribution.is_none() {
@@ -172,21 +188,15 @@ pub async fn can_i(
 /// спрашиваются только у OpenShift.
 pub async fn capabilities(client: &kube::Client, limit: Duration, d: &Discovered) -> Capabilities {
     let open_shift = d.platform.kind == PlatformKind::Openshift;
-    let projects = async {
-        if d.api_groups.projects {
-            can_i(
-                client,
-                limit,
-                "list",
-                "project.openshift.io",
-                "projects",
-                None,
-            )
-            .await
-        } else {
-            can_i(client, limit, "list", "", "namespaces", None).await
-        }
-    };
+    let source = d.api_groups.project_source();
+    let projects = can_i(
+        client,
+        limit,
+        "list",
+        source.group(),
+        source.resource(),
+        None,
+    );
     let operators = async {
         open_shift
             && can_i(
@@ -227,19 +237,15 @@ pub async fn capabilities(client: &kube::Client, limit: Duration, d: &Discovered
     }
 }
 
-/// Имена проектов (`projects`, если есть группа `project.openshift.io`, иначе `namespaces`):
-/// первые 500 и признак «есть ещё».
+/// Имена проектов (`projects` группы `project.openshift.io`, иначе `projects.dropapp.ru`, иначе
+/// `namespaces`): первые 500 и признак «есть ещё».
 pub async fn list_project_names(
     client: &kube::Client,
     limit: Duration,
-    projects_api: bool,
+    source: ProjectSource,
 ) -> AppResult<(Vec<String>, bool)> {
     let params = ListParams::default().limit(500);
-    let list = if projects_api {
-        let ar = ApiResource::from_gvk_with_plural(
-            &GroupVersionKind::gvk("project.openshift.io", "v1", "Project"),
-            "projects",
-        );
+    let list = if let Some(ar) = crate::k8s::projects::project_resource(source) {
         let api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
         let l = timed(limit, api.list(&params)).await?;
         let more = l.metadata.continue_.is_some_and(|c| !c.is_empty());
@@ -367,6 +373,7 @@ mod tests {
                 api_groups: ApiGroups {
                     routes: true,
                     projects: true,
+                    dropapp_projects: false,
                     deployment_configs: true,
                     gateway_api: false,
                 },
@@ -426,6 +433,87 @@ mod tests {
         let d = discover(&client, LIMIT).await.unwrap();
         assert_eq!(d.platform.label, "OpenShift 4.18");
         assert_eq!(d.server_version, "v1.32.5");
+    }
+
+    /// Версия DropApp — `spec.dappVersion` первого ClusterMetadata; нет прав, объекта или поля —
+    /// подпись по версии Kubernetes, подключение не падает.
+    #[tokio::test]
+    async fn dropapp_version_comes_from_cluster_metadata() {
+        let metadata = |items: serde_json::Value| {
+            (
+                200,
+                serde_json::json!({"apiVersion": "config.dropapp.ru/v1alpha1",
+                    "kind": "ClusterMetadataList", "metadata": {}, "items": items}),
+            )
+        };
+        let cases = [
+            (
+                metadata(
+                    serde_json::json!([{"apiVersion": "config.dropapp.ru/v1alpha1",
+                    "kind": "ClusterMetadata", "metadata": {"name": "cluster-metadata"},
+                    "spec": {"clusterName": "prod", "dappVersion": "5.1.2"}}]),
+                ),
+                "DropApp 5.1.2",
+                Some("5.1.2"),
+            ),
+            (
+                metadata(serde_json::json!([])),
+                "DropApp (Kubernetes 1.32)",
+                Some("1.32"),
+            ),
+            (
+                metadata(
+                    serde_json::json!([{"apiVersion": "config.dropapp.ru/v1alpha1",
+                    "kind": "ClusterMetadata", "metadata": {"name": "cluster-metadata"},
+                    "spec": {"clusterName": "prod"}}]),
+                ),
+                "DropApp (Kubernetes 1.32)",
+                Some("1.32"),
+            ),
+            (
+                status(
+                    403,
+                    "Forbidden",
+                    r#"clustermetadatas.config.dropapp.ru is forbidden: User "dev1" cannot list resource "clustermetadatas" in API group "config.dropapp.ru" at the cluster scope"#,
+                ),
+                "DropApp (Kubernetes 1.32)",
+                Some("1.32"),
+            ),
+        ];
+        for (reply, label, version) in cases {
+            let (client, server) = mock_client(move |s| match s.path() {
+                "/apis" => (
+                    200,
+                    serde_json::json!({"kind": "APIGroupList", "apiVersion": "v1", "groups": [
+                        {"name": "apps", "versions": [{"groupVersion": "apps/v1", "version": "v1"}]},
+                        {"name": "config.dropapp.ru", "versions": [{"groupVersion": "config.dropapp.ru/v1alpha1", "version": "v1alpha1"}]},
+                        {"name": "nodes.dropapp.ru", "versions": [{"groupVersion": "nodes.dropapp.ru/v1alpha1", "version": "v1alpha1"}]}
+                    ]}),
+                ),
+                "/apis/config.dropapp.ru/v1alpha1/clustermetadatas" => reply.clone(),
+                _ => fixtures::openshift(s),
+            });
+            let d = discover(&client, LIMIT).await.unwrap();
+            assert_eq!(d.platform.kind, PlatformKind::Dropapp, "{label}");
+            assert_eq!(d.platform.label, label);
+            assert_eq!(d.platform.version.as_deref(), version, "{label}");
+            assert_eq!(d.platform.distribution, None, "{label}");
+            drop(client);
+            let seen = server.await.unwrap();
+            assert!(
+                seen.iter()
+                    .any(|s| s.path() == "/apis/config.dropapp.ru/v1alpha1/clustermetadatas"),
+                "{label}"
+            );
+            assert!(
+                !seen.iter().any(|s| s.path() == "/api/v1/nodes"),
+                "у DropApp ноды для определения дистрибутива не читаются"
+            );
+            assert!(
+                !seen.iter().any(|s| s.path().contains("clusterversions")),
+                "{label}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -496,8 +584,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn project_names_of_openshift_and_kubernetes() {
+    async fn project_names_of_openshift_dropapp_and_kubernetes() {
         let (client, server) = mock_client(|s| match s.path() {
+            "/apis/projects.dropapp.ru/v1alpha1/projects" => (
+                200,
+                serde_json::json!({"apiVersion": "projects.dropapp.ru/v1alpha1", "kind": "ProjectList",
+                "metadata": {}, "items": [
+                    {"apiVersion": "projects.dropapp.ru/v1alpha1", "kind": "Project", "metadata": {"name": "dev"}}
+                ]}),
+            ),
             "/api/v1/namespaces" => (
                 200,
                 serde_json::json!({"apiVersion": "v1", "kind": "NamespaceList",
@@ -506,16 +601,68 @@ mod tests {
             ),
             _ => fixtures::openshift(s),
         });
-        let (names, more) = list_project_names(&client, LIMIT, true).await.unwrap();
+        let (names, more) = list_project_names(&client, LIMIT, ProjectSource::Openshift)
+            .await
+            .unwrap();
         assert_eq!(
             (names, more),
             (vec!["team-a".to_string(), "team-b".to_string()], false)
         );
-        let (names, more) = list_project_names(&client, LIMIT, false).await.unwrap();
+        let (names, more) = list_project_names(&client, LIMIT, ProjectSource::Dropapp)
+            .await
+            .unwrap();
+        assert_eq!((names, more), (vec!["dev".to_string()], false));
+        let (names, more) = list_project_names(&client, LIMIT, ProjectSource::Namespaces)
+            .await
+            .unwrap();
         assert_eq!((names, more), (vec!["default".to_string()], true));
         drop(client);
         let seen = server.await.unwrap();
         assert!(seen.iter().all(|s| s.uri.contains("limit=500")));
+        assert!(
+            seen.iter()
+                .any(|s| s.path() == "/apis/projects.dropapp.ru/v1alpha1/projects")
+        );
+    }
+
+    /// Право на список проектов DropApp спрашивается в их группе; namespace — нет.
+    #[tokio::test]
+    async fn dropapp_projects_right_is_asked_in_their_group() {
+        let (client, server) = mock_client(|s| match s.path() {
+            "/apis" => (
+                200,
+                serde_json::json!({"kind": "APIGroupList", "apiVersion": "v1", "groups": [
+                    {"name": "apps", "versions": [{"groupVersion": "apps/v1", "version": "v1"}]},
+                    {"name": "config.dropapp.ru", "versions": [{"groupVersion": "config.dropapp.ru/v1alpha1", "version": "v1alpha1"}]},
+                    {"name": "projects.dropapp.ru", "versions": [{"groupVersion": "projects.dropapp.ru/v1alpha1", "version": "v1alpha1"}]}
+                ]}),
+            ),
+            _ => fixtures::openshift(s),
+        });
+        let info = probe(&client, LIMIT).await.unwrap();
+        assert_eq!(info.api_groups.project_source(), ProjectSource::Dropapp);
+        assert!(info.capabilities.list_projects);
+        drop(client);
+        let seen = server.await.unwrap();
+        let reviews: Vec<_> = seen
+            .iter()
+            .filter(|s| s.path().ends_with("selfsubjectaccessreviews"))
+            .map(|s| {
+                let a = &s.body["spec"]["resourceAttributes"];
+                (
+                    a["group"].as_str().unwrap_or_default().to_string(),
+                    a["resource"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect();
+        assert!(
+            reviews.contains(&("projects.dropapp.ru".into(), "projects".into())),
+            "{reviews:?}"
+        );
+        assert!(
+            !reviews.iter().any(|(_, r)| r == "namespaces"),
+            "{reviews:?}"
+        );
     }
 
     #[tokio::test(start_paused = true)]

@@ -52,7 +52,7 @@ describe("api client", () => {
     expect(invoke).toHaveBeenLastCalledWith("connect", { connectionId: "c1", fresh: true });
   });
 
-  it("applyKubeconfigImport: approveExec — отпечатки строк запуска, по умолчанию пустой", async () => {
+  it("applyKubeconfigImport: approveExec — отпечатки строк запуска, useExec — exec-плагин вместо OIDC, по умолчанию пустые", async () => {
     invoke.mockResolvedValue([]);
     await api.applyKubeconfigImport("/kube/config", ["ctx"], null);
     expect(invoke).toHaveBeenCalledWith("apply_kubeconfig_import", {
@@ -60,13 +60,15 @@ describe("api client", () => {
       contexts: ["ctx"],
       folderId: null,
       approveExec: [],
+      useExec: [],
     });
-    await api.applyKubeconfigImport("/kube/config", ["a", "b"], "f1", ["fp-b"]);
+    await api.applyKubeconfigImport("/kube/config", ["a", "b"], "f1", ["fp-b"], ["b"]);
     expect(invoke).toHaveBeenLastCalledWith("apply_kubeconfig_import", {
       path: "/kube/config",
       contexts: ["a", "b"],
       folderId: "f1",
       approveExec: ["fp-b"],
+      useExec: ["b"],
     });
   });
 

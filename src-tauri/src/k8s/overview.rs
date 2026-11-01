@@ -157,15 +157,11 @@ pub async fn cluster_overview(r: &ReadClient, info: &ConnectionInfo) -> ClusterO
         list_nodes(r).await.map(|l| summary(&l.items)).into()
     };
     let projects = async {
+        let source = info.api_groups.project_source();
         if !caps.list_projects {
-            let resource = if info.api_groups.projects {
-                "projects"
-            } else {
-                "namespaces"
-            };
-            return Part::err(not_allowed("list", resource, None));
+            return Part::err(not_allowed("list", source.resource(), None));
         }
-        r.project_names(info.api_groups.projects)
+        r.project_names(source)
             .await
             .map(|(names, more)| ProjectCount {
                 count: names.len(),
@@ -313,6 +309,34 @@ mod tests {
                 .iter()
                 .any(|s| s.path() == "/api/v1/nodes" || s.path() == "/api/v1/namespaces")
         );
+    }
+
+    /// Число проектов DropApp — из их группы; без права — отказ на `projects`, как у OpenShift.
+    #[tokio::test]
+    async fn overview_counts_dropapp_projects() {
+        let (client, server) = mock_raw(|s| match s.path() {
+            "/apis/projects.dropapp.ru/v1alpha1/projects" => json(serde_json::json!({
+                "apiVersion": "projects.dropapp.ru/v1alpha1", "kind": "ProjectList", "metadata": {},
+                "items": [{"metadata": {"name": "dev"}}, {"metadata": {"name": "test"}},
+                    {"metadata": {"name": "prod"}}]})),
+            _ => cluster(s),
+        });
+        let r = ReadClient::new(client, Duration::from_secs(5));
+        let groups = ApiGroups {
+            dropapp_projects: true,
+            ..Default::default()
+        };
+        let caps = Capabilities {
+            list_projects: true,
+            ..Default::default()
+        };
+        let o = cluster_overview(&r, &info(caps, groups)).await;
+        assert_eq!(o.projects.data.map(|p| p.count), Some(3));
+        let o = cluster_overview(&r, &info(Capabilities::default(), groups)).await;
+        assert_eq!(o.projects.error.unwrap().params["resource"], "projects");
+        drop(r);
+        let seen = server.await.unwrap();
+        assert!(!seen.iter().any(|s| s.path() == "/api/v1/namespaces"));
     }
 
     #[tokio::test]

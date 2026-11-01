@@ -223,7 +223,7 @@ impl AppBackend {
                 let l = Box::pin(st.read(&connection_id, |c| async move {
                     crate::k8s::projects::list_projects(
                         &c.reader(),
-                        c.info.api_groups.projects,
+                        c.info.api_groups.project_source(),
                         &profile,
                     )
                     .await
@@ -603,8 +603,12 @@ impl AppBackend {
         }
         let profile = self.allowed(connection_id)?;
         let l = Box::pin(self.state.read(connection_id, |c| async move {
-            crate::k8s::projects::list_projects(&c.reader(), c.info.api_groups.projects, &profile)
-                .await
+            crate::k8s::projects::list_projects(
+                &c.reader(),
+                c.info.api_groups.project_source(),
+                &profile,
+            )
+            .await
         }))
         .await
         .map_err(to_backend)?;

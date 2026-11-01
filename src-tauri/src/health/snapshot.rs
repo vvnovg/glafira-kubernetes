@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::k8s::dropapp::{ComponentRow, DropAppNodeRow, IngressTlsRow};
 use crate::k8s::pods::OwnerRef;
 use crate::k8s::workloads::WorkloadKind;
 use crate::platform::PlatformKind;
@@ -49,6 +50,19 @@ pub struct OpenShiftSnap {
     pub failing: Option<Option<Cond>>,
     /// Деградировавшие MachineConfigPools; `None` — не прочитаны.
     pub degraded_pools: Option<Vec<String>>,
+}
+
+/// Объекты DropApp (спека O5 §7.2). `None` у части — не прочитана (причина — в
+/// `Coverage::gaps`) или её CRD нет в кластере.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DropAppSnap {
+    /// `Component` и `Tool` в сбое (`ComponentRow::is_failed`) с последним событием `Warning`;
+    /// `None` — не прочитан ни один из двух видов.
+    pub components: Option<Vec<ComponentRow>>,
+    /// Все `DropAppNode`.
+    pub nodes: Option<Vec<DropAppNodeRow>>,
+    /// `IngressTLS`, у которых `Ready` не `True`.
+    pub ingress_tls: Option<Vec<IngressTlsRow>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -345,6 +359,8 @@ pub struct ClusterSnapshot {
     pub readyz: Option<Readyz>,
     /// Только у OpenShift.
     pub openshift: Option<OpenShiftSnap>,
+    /// Только у DropApp.
+    pub dropapp: Option<DropAppSnap>,
     /// `None` — нет прав на ноды.
     pub nodes: Option<Vec<NodeSnap>>,
     /// Requests подов по нодам; `None` — поды всех проектов не читаются.
@@ -362,6 +378,7 @@ impl ClusterSnapshot {
             platform,
             readyz: None,
             openshift: None,
+            dropapp: None,
             nodes: None,
             node_requests: None,
             ingress_classes: None,

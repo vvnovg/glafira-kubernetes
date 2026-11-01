@@ -1,4 +1,5 @@
-//! Проекты (спец. §5.1, §6.1): у OpenShift — объекты `Project`, у остальных — namespace. Если
+//! Проекты (спец. §5.1, §6.1): у OpenShift и DropApp 5.x — объекты `Project` своих групп, у
+//! остальных — namespace. Если
 //! кластер не отдаёт пользователю список, показываются проекты из профиля: ручной список и
 //! избранные.
 
@@ -9,7 +10,9 @@ use kube::api::{ApiResource, GroupVersionKind, ListParams};
 use serde::Serialize;
 
 use crate::error::{AppError, AppResult, ErrorCode};
+use crate::k8s::dropapp;
 use crate::k8s::read::ReadClient;
+use crate::platform::ProjectSource;
 use crate::storage::profile::ConnectionProfile;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -42,8 +45,17 @@ pub fn projects() -> ApiResource {
     )
 }
 
+/// Ресурс `Project` источника; у namespace — `None`.
+pub fn project_resource(source: ProjectSource) -> Option<ApiResource> {
+    match source {
+        ProjectSource::Openshift => Some(projects()),
+        ProjectSource::Dropapp => Some(dropapp::projects()),
+        ProjectSource::Namespaces => None,
+    }
+}
+
 /// Проекты кластера: имя, отображаемое имя и фаза.
-async fn listed(r: &ReadClient, projects_api: bool) -> AppResult<(Vec<ProjectRow>, bool)> {
+async fn listed(r: &ReadClient, source: ProjectSource) -> AppResult<(Vec<ProjectRow>, bool)> {
     let row = |name: String, display_name: Option<String>, phase: Option<String>| ProjectRow {
         name,
         display_name,
@@ -51,10 +63,8 @@ async fn listed(r: &ReadClient, projects_api: bool) -> AppResult<(Vec<ProjectRow
         favorite: false,
         from_profile: false,
     };
-    if projects_api {
-        let l = r
-            .list_dynamic(&projects(), None, &ListParams::default())
-            .await?;
+    if let Some(ar) = project_resource(source) {
+        let l = r.list_dynamic(&ar, None, &ListParams::default()).await?;
         let rows = l
             .items
             .into_iter()
@@ -88,7 +98,7 @@ async fn listed(r: &ReadClient, projects_api: bool) -> AppResult<(Vec<ProjectRow
 /// Список проектов для дерева; избранные отмечены. Нет прав на список — проекты из профиля.
 pub async fn list_projects(
     r: &ReadClient,
-    projects_api: bool,
+    source: ProjectSource,
     profile: &ConnectionProfile,
 ) -> AppResult<ProjectList> {
     let favorites: BTreeSet<&str> = profile
@@ -96,7 +106,7 @@ pub async fn list_projects(
         .iter()
         .map(String::as_str)
         .collect();
-    let (mut items, truncated, error) = match listed(r, projects_api).await {
+    let (mut items, truncated, error) = match listed(r, source).await {
         Ok((items, truncated)) => (items, truncated, None),
         Err(e) if e.code == ErrorCode::Forbidden => {
             let names: BTreeSet<&str> = profile
@@ -159,7 +169,9 @@ mod tests {
             )
         });
         let r = ReadClient::new(client, Duration::from_secs(5));
-        let l = list_projects(&r, true, &profile()).await.unwrap();
+        let l = list_projects(&r, ProjectSource::Openshift, &profile())
+            .await
+            .unwrap();
         assert!(l.error.is_none() && !l.truncated);
         let names: Vec<_> = l.items.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(
@@ -172,6 +184,49 @@ mod tests {
         assert!(!l.items[0].favorite && l.items[1].favorite);
     }
 
+    /// Проекты DropApp — из `projects.dropapp.ru`: имя проекта — имя namespace.
+    #[tokio::test]
+    async fn dropapp_projects() {
+        let (client, server) = mock_client(|_| {
+            (
+                200,
+                serde_json::json!({"apiVersion": "projects.dropapp.ru/v1alpha1", "kind": "ProjectList",
+                "metadata": {}, "items": [
+                    {"metadata": {"name": "team-b"}},
+                    {"metadata": {"name": "team-a"}, "status": {"phase": "Active"}}
+                ]}),
+            )
+        });
+        let r = ReadClient::new(client, Duration::from_secs(5));
+        let l = list_projects(&r, ProjectSource::Dropapp, &profile())
+            .await
+            .unwrap();
+        let rows: Vec<_> = l
+            .items
+            .iter()
+            .map(|p| {
+                (
+                    p.name.as_str(),
+                    p.phase.as_deref(),
+                    p.favorite,
+                    p.from_profile,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("team-a", Some("Active"), false, false),
+                ("team-b", None, true, false)
+            ]
+        );
+        drop(r);
+        assert_eq!(
+            server.await.unwrap()[0].path(),
+            "/apis/projects.dropapp.ru/v1alpha1/projects"
+        );
+    }
+
     #[tokio::test]
     async fn without_rights_the_projects_of_the_profile() {
         let (client, server) = mock_client(|_| {
@@ -182,7 +237,9 @@ mod tests {
             )
         });
         let r = ReadClient::new(client, Duration::from_secs(5));
-        let l = list_projects(&r, false, &profile()).await.unwrap();
+        let l = list_projects(&r, ProjectSource::Namespaces, &profile())
+            .await
+            .unwrap();
         assert_eq!(l.error.unwrap().key, "errors.k8s.forbiddenCluster");
         let names: Vec<_> = l
             .items
@@ -199,7 +256,9 @@ mod tests {
     async fn other_errors_are_errors() {
         let (client, _) = mock_client(|_| status(401, "Unauthorized", "Unauthorized"));
         let r = ReadClient::new(client, Duration::from_secs(5));
-        let e = list_projects(&r, false, &profile()).await.unwrap_err();
+        let e = list_projects(&r, ProjectSource::Namespaces, &profile())
+            .await
+            .unwrap_err();
         assert_eq!(e.code, ErrorCode::SessionExpired);
     }
 }

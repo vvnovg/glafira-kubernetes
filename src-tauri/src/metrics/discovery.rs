@@ -2,13 +2,14 @@
 //! маршрут `thanos-querier` в `openshift-monitoring`, иначе адрес из домена приложений
 //! (`ingresses.config.openshift.io/cluster`), иначе из хоста OAuth-сервера. У остальных —
 //! Prometheus через прокси API-сервера по списку известных сервисов, кандидаты дистрибутива
-//! первыми.
+//! первыми; у `dropapp` перед ними — vmselect VictoriaMetrics мониторинга DropApp.
 
 use futures::future::BoxFuture;
 use kube::api::{ApiResource, GroupVersionKind};
 
 use super::prometheus::{Failure, MetricsSource, PromApi, SourceInfo, SourceKind, SourceOrigin};
 use crate::k8s::read::{ReadClient, ServiceProxy};
+use crate::platform::PlatformKind;
 
 /// Известные сервисы Prometheus: проект, имя, порт и дистрибутив, у которого он стоит обычно.
 pub const PROMETHEUS_SERVICES: [(&str, &str, u16, Option<&str>); 4] = [
@@ -26,8 +27,27 @@ pub const PROMETHEUS_SERVICES: [(&str, &str, u16, Option<&str>); 4] = [
     ("observability", "prometheus-operated", 9090, None),
 ];
 
-/// Кандидаты по порядку проверки: сервисы дистрибутива, затем общие, затем чужих дистрибутивов.
-pub fn candidates(distribution: Option<&str>) -> Vec<ServiceProxy> {
+/// vmselect VictoriaMetrics мониторинга DropApp: проект, имя, порт и префикс API Prometheus.
+pub const DROPAPP_VMSELECT: (&str, &str, u16, &str) = (
+    "dapp-monitoring",
+    "vmselect-victoria-metrics-k8s-stack",
+    8481,
+    "/select/0/prometheus",
+);
+
+/// Кандидаты по порядку проверки: у `dropapp` — vmselect DropApp, затем, как у остальных,
+/// сервисы дистрибутива, общие и чужих дистрибутивов.
+pub fn candidates(platform: PlatformKind, distribution: Option<&str>) -> Vec<ServiceProxy> {
+    let mut out = Vec::new();
+    if platform == PlatformKind::Dropapp {
+        let (ns, name, port, prefix) = DROPAPP_VMSELECT;
+        out.push(ServiceProxy {
+            namespace: ns.into(),
+            name: name.into(),
+            port,
+            path_prefix: prefix.into(),
+        });
+    }
     let rank = |d: Option<&str>| match d {
         Some(x) if Some(x) == distribution => 0,
         None => 1,
@@ -35,13 +55,16 @@ pub fn candidates(distribution: Option<&str>) -> Vec<ServiceProxy> {
     };
     let mut list: Vec<_> = PROMETHEUS_SERVICES.iter().enumerate().collect();
     list.sort_by_key(|(i, (_, _, _, d))| (rank(*d), *i));
-    list.into_iter()
-        .map(|(_, (ns, name, port, _))| ServiceProxy {
-            namespace: (*ns).into(),
-            name: (*name).into(),
-            port: *port,
-        })
-        .collect()
+    out.extend(
+        list.into_iter()
+            .map(|(_, (ns, name, port, _))| ServiceProxy {
+                namespace: (*ns).into(),
+                name: (*name).into(),
+                port: *port,
+                path_prefix: String::new(),
+            }),
+    );
+    out
 }
 
 /// Prometheus за прокси API-сервера: запросы — `ReadClient::prometheus`.
@@ -158,6 +181,7 @@ mod tests {
     use super::*;
     use crate::k8s::testing::{mock_client, status};
     use crate::metrics::prometheus::{Reason, probe};
+    use crate::platform::PlatformKind;
 
     fn reader(
         handler: impl Fn(&crate::k8s::testing::Seen) -> (u16, serde_json::Value) + Send + 'static,
@@ -168,7 +192,7 @@ mod tests {
     #[test]
     fn distribution_candidates_go_first() {
         let names = |d| {
-            candidates(d)
+            candidates(PlatformKind::Kubernetes, d)
                 .iter()
                 .map(ServiceProxy::label)
                 .collect::<Vec<_>>()
@@ -189,6 +213,33 @@ mod tests {
         assert_eq!(names(Some("eks")), names(None));
     }
 
+    #[test]
+    fn dropapp_asks_victoria_metrics_first() {
+        let names = |p, d| {
+            candidates(p, d)
+                .iter()
+                .map(ServiceProxy::label)
+                .collect::<Vec<_>>()
+        };
+        for d in [None, Some("rancher")] {
+            let dropapp = names(PlatformKind::Dropapp, d);
+            assert_eq!(
+                dropapp[0],
+                "dapp-monitoring/vmselect-victoria-metrics-k8s-stack:8481"
+            );
+            assert_eq!(dropapp[1..], names(PlatformKind::Kubernetes, d), "{d:?}");
+        }
+        assert_eq!(
+            candidates(PlatformKind::Dropapp, None)[0].path_prefix,
+            "/select/0/prometheus"
+        );
+        assert!(
+            candidates(PlatformKind::Kubernetes, None)
+                .iter()
+                .all(|c| c.path_prefix.is_empty())
+        );
+    }
+
     #[tokio::test]
     async fn prometheus_is_asked_through_the_service_proxy() {
         let r = reader(|s| {
@@ -203,9 +254,30 @@ mod tests {
                     "result": [{"metric": {}, "value": [1, "1"]}]}}),
             )
         });
-        let src = ProxySource::new(r, candidates(None)[0].clone());
+        let src = ProxySource::new(r, candidates(PlatformKind::Kubernetes, None)[0].clone());
         probe(&src, 1).await.unwrap();
         assert_eq!(src.info().location, "monitoring/prometheus-k8s:9090");
+    }
+
+    #[tokio::test]
+    async fn victoria_metrics_is_asked_through_the_service_proxy_with_the_prefix() {
+        let r = reader(|s| {
+            assert_eq!(
+                s.path(),
+                "/api/v1/namespaces/dapp-monitoring/services/http:vmselect-victoria-metrics-k8s-stack:8481/proxy/select/0/prometheus/api/v1/query"
+            );
+            (
+                200,
+                serde_json::json!({"status": "success", "data": {"resultType": "vector",
+                    "result": [{"metric": {}, "value": [1, "1"]}]}}),
+            )
+        });
+        let src = ProxySource::new(r, candidates(PlatformKind::Dropapp, None)[0].clone());
+        probe(&src, 1).await.unwrap();
+        assert_eq!(
+            src.info().location,
+            "dapp-monitoring/vmselect-victoria-metrics-k8s-stack:8481"
+        );
     }
 
     #[tokio::test]
@@ -216,7 +288,7 @@ mod tests {
             (503, Reason::Unavailable),
         ] {
             let r = reader(move |_| status(code, "X", "no"));
-            let src = ProxySource::new(r, candidates(None)[0].clone());
+            let src = ProxySource::new(r, candidates(PlatformKind::Kubernetes, None)[0].clone());
             assert_eq!(probe(&src, 1).await.unwrap_err().reason, reason, "{code}");
         }
         // Ответ Prometheus с ошибкой запроса — не Status: «ответ не тот».
@@ -226,7 +298,7 @@ mod tests {
                 serde_json::json!({"status": "error", "errorType": "bad_data", "error": "parse error"}),
             )
         });
-        let src = ProxySource::new(r, candidates(None)[0].clone());
+        let src = ProxySource::new(r, candidates(PlatformKind::Kubernetes, None)[0].clone());
         assert_eq!(
             probe(&src, 1).await.unwrap_err().reason,
             Reason::BadResponse

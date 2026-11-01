@@ -1,0 +1,30 @@
+# Кластер kind имитации DropApp (метки в hostPath up.sh заменяет абсолютными путями каталогов вывода и стенда).
+# API-сервер принимает токены Dex (как у DropApp: client id dapp, имя пользователя — email, группы —
+# groups); CA Dex монтируется в каталог сертификатов API-сервера. Издатель dex.glafira-dropapp.localhost:5556:
+# на машине разработчика имя *.localhost разрешается в 127.0.0.1, а порт 5556 ведёт в ноду (Dex там с hostNetwork);
+# API-серверу (тоже hostNetwork) имя даёт hostAliases из patches/ — /etc/hosts ноды не меняется.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - { containerPort: 5556, hostPort: 5556, listenAddress: 127.0.0.1 }
+    extraMounts:
+      - { hostPath: __OUT__/dex-ca.crt, containerPath: /etc/kubernetes/pki/dex-ca.crt, readOnly: true }
+      - { hostPath: __HERE__/patches, containerPath: /kind/glafira-patches, readOnly: true }
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        patches:
+          directory: /kind/glafira-patches
+      - |
+        kind: ClusterConfiguration
+        apiServer:
+          extraArgs:
+            - { name: oidc-issuer-url, value: "https://dex.glafira-dropapp.localhost:5556" }
+            - { name: oidc-client-id, value: dapp }
+            - { name: oidc-username-claim, value: email }
+            - { name: oidc-groups-claim, value: groups }
+            - { name: oidc-ca-file, value: /etc/kubernetes/pki/dex-ca.crt }
+            # Событие Warning у Tool console пишет up.sh один раз: без этого оно пропало бы через час.
+            - { name: event-ttl, value: 720h }

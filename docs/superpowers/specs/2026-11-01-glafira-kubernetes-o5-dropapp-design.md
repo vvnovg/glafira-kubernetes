@@ -90,50 +90,89 @@
 | `clientId` | `dapp` | профиль |
 | `clientSecret` | — (может быть пустым у публичного клиента) | keychain, `glafira-kubernetes/<id>/oidcClientSecret` |
 | `scopes` | `openid email groups profile offline_access` | профиль |
+| `issuerCaPem` | — (CA сертификата издателя, PEM) | профиль |
 
 `id_token` и `refresh_token` — в keychain (`…/oidcIdToken`, `…/oidcRefreshToken`). Экспорт профиля пишет поля без
 секрета, как у токена.
 
+Токены выданы издателю и клиенту, которому доверяли по CA издателя: смена `issuerUrl` (без завершающего `/`),
+`clientId` или `issuerCaPem` (`oidc_identity_changed`) удаляет `id_token` и `refresh_token` при сохранении формы,
+а при импорте файла настроек — ещё и секрет клиента; нужно войти заново. Импорт файла настроек считает такую смену
+сменой направления, как адрес, прокси и CA: при сохранённых секретах подключения (токен, ключ, секрет клиента,
+`id_token` или `refresh_token`) — предупреждение `messages.import.oidcChanged`; секреты удаляются до записи
+хранилища, сбой keychain останавливает импорт. Импорт, который переводит подключение с OIDC на другой способ входа (или на OIDC),
+тоже предупреждает (`messages.import.oidcDropped`) и удаляет сохранённые токены и секрет клиента OIDC.
+
 ### 5.2 Поток
 
 1. `GET <issuerUrl>/.well-known/openid-configuration` → `authorization_endpoint`, `token_endpoint`; `issuer` ответа
-   должен совпасть с `issuerUrl` (без завершающего `/`), иначе `AUTH_FAILED` «адрес издателя не совпадает».
+   должен совпасть с `issuerUrl` (без завершающего `/`), иначе `AUTH_FAILED` «адрес издателя не совпадает». Оба
+   адреса — только `https`: http-адрес — `AUTH_FAILED` `errors.oidc.insecureEndpoint`. Исключение — локальный
+   http-издатель (`127.0.0.1`, `localhost`: тесты и имитация), и то лишь для адресов на `127.0.0.1` и `localhost`.
 2. Сервер возврата на фиксированном порте: Dex сверяет `redirect_uri` точно, вместе с портом. Сначала
    `127.0.0.1:8000` с `redirect_uri` `http://localhost:8000`, если порт занят — `127.0.0.1:18000` с
    `http://localhost:18000` (адреса kubelogin, они есть у клиента `dapp`). Сервер слушает и `[::1]` на том же порте,
-   если адрес IPv6 доступен: браузер может разрешить `localhost` в него. Оба порта заняты — `AUTH_FAILED` с
+   если адрес IPv6 доступен: браузер может разрешить `localhost` в него; порт, занятый на `[::1]`, тоже считается
+   занятым (иначе ответ мог бы уйти чужой программе). Оба порта заняты — `AUTH_FAILED` с
    подсказкой «освободите порт 8000 или 18000 (часто его держит kubelogin)». Путь возврата — `/`.
 3. Authorization Code + PKCE (S256), `state`, `nonce`; браузер — системный; ожидание до 5 минут, отмена —
    `cancel_oauth_login`, как у входа OpenShift.
 4. Обмен кода на токены: `client_secret_post` (у DropApp клиент конфиденциальный; пустой секрет — без него).
-   Проверяется `nonce` в `id_token`; подпись `id_token` проверяет API-сервер, Glafira читает только `exp`.
+   Проверяется `nonce` в `id_token`; подпись `id_token` проверяет API-сервер, Glafira читает только `exp`. Ответ
+   `token_endpoint` читается не больше 1 МиБ; больше — `AUTH_FAILED` `errors.oidc.badTokenResponse` без тела ответа.
 5. В API-сервер уходит `id_token` (`Authorization: Bearer`), как у kubelogin.
 
-Сеть: CA из профиля добавляется к системным корням для запросов к издателю, как для OAuth-сервера OpenShift; прокси
-и `allowInsecureTls` — как у остальных запросов подключения.
+Сеть: CA из профиля добавляется к системным корням для запросов к издателю, как для OAuth-сервера OpenShift, а к ним —
+`issuerCaPem` (сертификат Dex за ingress DropApp часто выпущен не CA API-сервера); прокси и `allowInsecureTls` — как у
+остальных запросов подключения. Переадресации издателя не выполняются: форма с кодом и секретом уходит только на
+`token_endpoint`.
 
 ### 5.3 Срок и обновление
 
 - Срок — `exp` из `id_token`; он показывается в обзоре подключения, с тем же предупреждением за 1 час и «Срок токена
   истёк», что у OpenShift. Строка «Срок токена» таблицы платформ касается способа `oidc` на любой платформе.
-- За минуту до `exp` или по ответу 401 Glafira один раз обновляет токены (`grant_type=refresh_token`) — одной
-  попыткой на всех ожидающих, как выдача учётных данных exec-плагина (§5.2 основной спеки); новый `refresh_token`
-  заменяет старый. Нет `refresh_token` или отказ — «Войти снова» (вход через браузер заново).
+- Токен обновляется по `exp`, отдельной обработки 401 нет: срок `exp` становится сроком учётных данных подключения,
+  и за минуту до него подключение открывается заново (как у exec-плагина, §5.2 основной спеки); при открытии
+  `id_token`, которому осталось больше минуты, берётся из keychain, иначе токены обновляются
+  (`grant_type=refresh_token`) — одной попыткой на всех ожидающих (`ClientPool::connect_lock`). Новый
+  `refresh_token` заменяет старый, без него остаётся прежний. Нет `refresh_token` или провайдер отказал в обновлении
+  — `SESSION_EXPIRED` «Войти снова» (`errors.connections.oidcLoginRequired`, кнопка «Войти через OIDC»); сеть и TLS
+  остаются своими ошибками.
+- `id_token` без `exp` считается действующим, срока в обзоре нет.
+- Новый вход без `refresh_token` стирает прежний `refresh_token`: он от другого входа.
 
 ### 5.4 Импорт kubeconfig
 
 Контекст с exec `kubectl oidc-login get-token` (или `kubelogin get-token`) и аргументами `--oidc-issuer-url`,
 `--oidc-client-id`, `--oidc-client-secret`, `--oidc-extra-scope` предлагается импортировать двумя способами: «Вход
-через браузер (OIDC)» — по умолчанию, поля берутся из аргументов (`--oidc-extra-scope` добавляется к `openid`), и
+через браузер (OIDC)» — по умолчанию, поля берутся из аргументов (`--oidc-extra-scope` добавляется к `openid`, а
+`offline_access` — всегда), и
 «Exec-плагин» — как сейчас. `apiVersion` exec, отличный от `client.authentication.k8s.io/v1` и `v1beta1` (в
 документации DropApp опечатка `client.authentication.io/v1beta1`), при выборе OIDC не мешает: exec не запускается.
 
+Предпросмотр отдаёт вариант `oidc` (издатель, клиент, scopes, CA издателя) с признаком секрета, без самого секрета:
+применение читает секрет из файла заново. CA издателя — из `--certificate-authority-data` или файла
+`--certificate-authority` (относительный путь — от каталога kubeconfig; `*-data` важнее); файл не прочитан, не
+PEM-сертификат, содержит приватный ключ, больше 1 МиБ или не обычный файл — предупреждение
+`errors.kubeconfig.issuerCaUnreadable` (ни ключ, ни его текст в предпросмотр не попадают), контекст импортируется
+без CA. Без `--oidc-extra-scope` —
+scopes DropApp; с ними — `openid`, они и `offline_access` (kubelogin обходится без refresh-токена, Glafira — нет).
+Exec-вариант, которому нельзя быть (команда не найдена, неизвестный `apiVersion`, запрет политикой), отдаётся
+недоступным с причиной; OIDC остаётся. Проверка подключения в форме для OIDC берёт только сохранённый `id_token`,
+которому осталось больше 60 с, без обновления (хранилище проверки — только чтение); его нет — «Войти через OIDC».
+Токен другой идентичности проверка не берёт: если в несохранённой форме издатель, client id или CA издателя не
+такие, как в сохранённом профиле, шаг входа сразу требует «Войти через OIDC», keychain за токенами не читается.
+
 ### 5.5 Ошибки
 
-Издатель недоступен или TLS — `CONNECTION_FAILED` с адресом издателя; Dex отклонил redirect, клиента или секрет
-(`error` в возврате или ответе токена) — `AUTH_FAILED` с текстом Dex; API-сервер ответил 401 на свежий токен —
-`AUTH_FAILED` «API-сервер не принял токен: проверьте client id и scope `groups`». Секрет и токены в ошибки и журнал
-не попадают.
+Издатель недоступен — сетевая ошибка (`CONNECTION_FAILED`, `TIMEOUT`) с адресом в деталях; недоверенный сертификат
+издателя — `TLS_ERROR` `errors.oidc.issuerCaUntrusted` «добавьте CA издателя (PEM)» (общий `errors.k8s.caUntrusted`
+советовал бы CA кластера). Отказ в redirect (`error=access_denied` и другие `error` возврата) — прежняя ошибка входа
+через браузер `errors.oauth.denied`; отказ token endpoint (обмен кода или обновление) — `AUTH_FAILED`
+`errors.oidc.providerError` с `error` и `error_description` провайдера; ответ больше 1 МиБ или не JSON —
+`errors.oidc.badTokenResponse`. http-адрес авторизации или токенов у не локального издателя —
+`errors.oidc.insecureEndpoint` (§5.2). Отдельного текста для 401 API-сервера нет — общий `errors.k8s.unauthorized`.
+Секрет и токены в ошибки и журнал не попадают.
 
 ## 6. Метрики
 
@@ -141,10 +180,13 @@
   `dapp-monitoring/vmselect-victoria-metrics-k8s-stack:8481` с префиксом пути `/select/0/prometheus`, за ним —
   кандидаты `kubernetes`. Подпись источника — `dapp-monitoring/vmselect-victoria-metrics-k8s-stack:8481`.
 - `ReadClient` пропускает через прокси GET к `<префикс>/api/v1/query` и `<префикс>/api/v1/query_range`, где префикс
-  — пустой или `/select/0/prometheus`.
-- 403 на прокси — «нет прав на прокси к VictoriaMetrics (`get services/proxy` в `dapp-monitoring`)»: у пользователя
-  namespace их обычно нет, и выбор идёт дальше (`metrics.k8s.io` или свой URL профиля). Руководство объясняет, какой
-  адрес вписать в профиль, если администратор включил ingress `metrics.<cluster>.<домен>` или `vmauth`.
+  — пустой или `/select/0/prometheus`; префикс проверяется так же, как пути API (`..`, `?`, `#` и путь без ведущего
+  `/` не проходят).
+- 403 на прокси — общий текст прокси `messages.metrics.proxyForbidden`: он уже называет источник
+  (`dapp-monitoring/vmselect-victoria-metrics-k8s-stack:8481`) и право `get services/proxy`, отдельного текста для
+  VictoriaMetrics нет. У пользователя namespace права обычно нет, и выбор идёт дальше (`metrics.k8s.io` или свой URL
+  профиля). Руководство объясняет, какой адрес вписать в профиль, если администратор включил ingress
+  `metrics.<cluster>.<домен>` или `vmauth`.
 
 ## 7. Обзор, правила, MCP
 
@@ -154,11 +196,13 @@
 `not_allowed`.
 
 - `metadata` — `clusterName` и `dappVersion` из `ClusterMetadata`;
-- `components` — `Component` и `Tool`: всего и проблемные (`failed`, `upgrading`), по каждому — вид, имя, namespace
-  (если есть), статус, RETRY и последнее событие `Warning` по объекту (`involvedObject.uid`); читаются по всем
-  namespace (область CRD документация не называет);
-- `nodes` — `DropAppNode` со статусом не `ready` и всего;
-- `ingressTls` — `IngressTLS` с условием `Ready` ≠ `True` и всего.
+- `components` — `Component` и `Tool`: всего и проблемные (`failed`, `error`, `upgrading`), по каждому — вид, имя,
+  namespace (если есть), статус, RETRY и последнее событие `Warning` по объекту (`involvedObject.uid`); список
+  проблемных полный, событие читается только у первых 20 (`MAX_EVENT_LOOKUPS`), ошибка чтения событий — события нет;
+  читаются по всем namespace (область CRD документация не называет);
+- `nodes` — `DropAppNode` со статусом не `ready` и всего; без статуса — не проблема;
+- `ingressTls` — `IngressTLS` с условием `Ready` ≠ `True` и всего; без условия `Ready` (объект ещё не обработан) — не
+  проблема.
 
 Поля статуса берутся из `status.phase`, а если его нет — из `status.status` (имя поля за колонкой STATUS документация
 не показывает); значения сравниваются без учёта регистра (в метриках `Ready`/`Error`, в колонке `success`/`failed`).
@@ -172,8 +216,11 @@
 | `cluster.dropappNodeNotReady` | cluster | `DropAppNode` не `ready`; список | П | П | И |
 | `cluster.ingressTlsNotReady` | cluster | у `IngressTLS` `Ready` ≠ `True`; список | П | П | И |
 
-Только у платформы `dropapp`; без прав — пометка в `check.partial`. Тексты находок на en и ru подсказывают, где
-причина: «события объекта, `kubectl describe tool <имя>`».
+Только у платформы `dropapp`; без прав — пометка в `check.partial`. `cluster.componentFailed` не срабатывает на
+`upgrading` (проблема обзора, но не сбой, §2); список находки — до 20, событие — у тех, у кого его прочитал сбор;
+текст события в params — не длиннее 1024 символов (обрезается по символу, с «…»): его пишет кто угодно с доступом к
+кластеру. Тексты находок на en и ru подсказывают, где причина: «события объекта, `kubectl describe tool NAME (or
+component NAME)`» (ru — `ИМЯ`).
 
 ### 7.3 MCP
 
@@ -182,23 +229,46 @@
 `IngressTLS`); новые правила приходят через `health_check`. В инструкции сервера — фраза: «On DropApp, Routes and
 DeploymentConfigs are not available: use Ingress and Deployment». Фрагменты компактного набора (O4b) не меняются.
 
+Объекты платформы DropApp — `ClusterMetadata`, `Component`/`Tool`, `DropAppNode`, `IngressTLS` и последние
+Warning-события компонентов — это сведения уровня кластера, как ClusterOperators в OpenShift: модель видит их в
+`get_cluster_overview` и `health_check` независимо от `llmNamespaces`, даже когда они лежат в namespaces `dapp-*`
+(здоровье платформы — не проект, а `dapp-*` пользователи редко разрешают). Тексты из кластера в них (события, сообщения
+условий) маскируются встроенными шаблонами, как прочие; чтение по-прежнему ограничено RBAC пользователя.
+
 ## 8. Имитация DropApp в kind
 
-`dev/kind/dropapp/`: скрипт `up.sh` / `down.sh`, кластер `glafira-dropapp`, KUBECONFIG — в каталоге вывода, не в
-`~/.kube/config`.
+`dev/kind/dropapp/` (`README.md`): скрипт `up.sh` / `down.sh`, кластер `glafira-dropapp`, KUBECONFIG — в
+`dev/kind/dropapp/out/` (вне git), не в `~/.kube/config`; `out/kubeconfig` — контексты `admin` (сертификат kind),
+`oidc-admin` и `oidc-dev` (`kubectl oidc-login get-token` с издателем, `--oidc-client-id=dapp`, секретом,
+`--oidc-extra-scope=email`, `--oidc-extra-scope=groups` и `--certificate-authority=<абсолютный путь>/out/dex-ca.crt`,
+как kubeconfig от Loginapp).
 
-- **Dex** в namespace `dapp-auth` по HTTPS с самоподписанным CA; клиент `dapp` с секретом и `redirectURIs` из §1;
-  `enablePasswordDB` со статическими пользователями: администратор и пользователь одного namespace (группы Dex со
-  статическими паролями не даёт — RBAC привязывается к `email`). API-сервер kind — с `--oidc-issuer-url`,
-  `--oidc-client-id=dapp`, `--oidc-username-claim=email`, `--oidc-groups-claim=groups`, `--oidc-ca-file` (CA через
-  `extraMounts`); имя издателя разрешается и с узла kind, и с машины разработчика.
-- **CRD** групп `config.dropapp.ru`, `nodes.dropapp.ru`, `tls.dropapp.ru` и `projects.dropapp.ru` (CRD вместо
-  агрегированного API: фильтрацию по RBAC имитация не проверяет); объекты `ClusterMetadata` (`dappVersion: 5.1.2`),
-  `Component` и `Tool` в разных статусах (один `Tool` в `failed` с событием `Warning`), `DropAppNode` (один не
-  `ready`), `IngressTLS` (один не `Ready`), `Project` по namespace.
-- **VictoriaMetrics** в `dapp-monitoring`: Service `vmselect-victoria-metrics-k8s-stack:8481`, отвечающий на
-  `/select/0/prometheus/api/v1/query*`, и сбор метрик kubelet и cAdvisor — чтобы «Ресурсы» строили графики.
-- Образы скачиваются только с согласия пользователя.
+- **Dex** (`ghcr.io/dexidp/dex:v2.45.1`) в `dapp-auth` по HTTPS с самоподписанным CA (CA, сертификат и ключ пишет
+  `up.sh`); издатель `https://dex.glafira-dropapp.localhost:5556`: под с `hostNetwork` слушает порт 5556 ноды,
+  `kind.yaml` пробрасывает его на `127.0.0.1:5556` машины разработчика, где `*.localhost` разрешается в `127.0.0.1`
+  сам (macOS; Linux — nss-myhostname или systemd-resolved); API-серверу имя даёт `hostAliases` из патча kubeadm
+  `patches/kube-apiserver+strategic.yaml`, `/etc/hosts` не меняются. Клиент `dapp` с секретом
+  `glafira-dropapp-secret` и `redirectURIs` DropApp, экран согласия пропускается; `enablePasswordDB` с пользователями
+  `admin@dropapp.test` (`cluster-admin`) и `dev@dropapp.test` (`admin` в `team-a`), RBAC — по `email`. API-сервер —
+  `--oidc-issuer-url`, `--oidc-client-id=dapp`, `--oidc-username-claim=email`, `--oidc-groups-claim=groups`,
+  `--oidc-ca-file` (CA через `extraMounts`), `--event-ttl=720h` (событие `Warning` стенда не пропадает через час).
+- **CRD** групп `config.dropapp.ru`, `nodes.dropapp.ru`, `tls.dropapp.ru` и `projects.dropapp.ru` с именами из
+  констант `k8s/dropapp.rs` (`ClusterMetadata`, `Component`, `Tool` — уровня кластера, `IngressTLS` — в namespace;
+  область выбрана стендом); CRD вместо агрегированного API: `dev@dropapp.test` получает 403 на список проектов.
+  Объекты: `ClusterMetadata` (`glafira-dropapp`, `5.1.2`), `Component` `auth`, `cni`, `monitoring` (`success`) и
+  `ingress-controller` (`upgrading`), `Tool` `dex`, `grafana` (`success`) и `console` (`failed`, `retry: 3`, событие
+  `Warning` `InstallFailed`), `DropAppNode` `glafira-dropapp-control-plane` (`ready`) и `worker-2` (`provisioning`),
+  `IngressTLS` `default-cert` и `apps-cert` (`Ready=False`) в `dapp-ingress`, `Project` и namespace `team-a` с
+  Deployment `web`. Статусы — те поля, что разбирает приложение (`status.phase`, `status.retry`, `status.status`,
+  условие `Ready`).
+- **VictoriaMetrics** (`v1.148.0`) в `dapp-monitoring`: `vmstorage`, `vminsert`, `vmselect` за Service
+  `vmselect-victoria-metrics-k8s-stack:8481` (`/select/0/prometheus`) и `vmagent`, собирающий kubelet и cAdvisor
+  через прокси API-сервера; kube-state-metrics нет.
+- Образы скрипт не скачивает: они должны быть у Docker заранее (`kind load docker-image`, а для многоплатформенных —
+  `docker save --platform` и `ctr images import`).
+- Интеграционный тест `tests/it_dropapp.rs` запускается вручную с `GO_IT_DROPAPP_KUBECONFIG`; CI его не запускает
+  (второй кластер с OIDC в CI не поднимается), без переменной тест пропускается. Вход через браузер он не проверяет —
+  это смоук (`docs/smoke/o5.md`, часть A).
 
 ## 9. Интерфейс и документация
 

@@ -35,7 +35,7 @@ const INFO: ConnectionInfo = {
   groups: ["system:authenticated", "team-a"],
   serverVersion: "v1.32.5",
   platform: { kind: "openshift", distribution: null, version: "4.18", label: "OpenShift 4.18" },
-  apiGroups: { routes: true, projects: true, deploymentConfigs: true, gatewayApi: false },
+  apiGroups: { routes: true, projects: true, dropappProjects: false, deploymentConfigs: true, gatewayApi: false },
   capabilities: { listProjects: true, listNodes: false, listAllPods: false, readClusterOperators: true, readClusterVersion: false },
   tokenExpiresAt: null,
 };
@@ -59,6 +59,15 @@ const EXEC: ConnectionProfile["auth"] = {
   provideClusterInfo: false,
   approved: "fp",
 };
+
+const OIDC: ConnectionProfile["auth"] = {
+  method: "oidc",
+  issuerUrl: "https://auth.c1.example.com",
+  clientId: "dapp",
+  scopes: ["openid", "email", "groups", "profile", "offline_access"],
+};
+
+const OIDC_LOGIN_REQUIRED = { code: "SESSION_EXPIRED", key: "errors.connections.oidcLoginRequired", message: "x", retryable: false };
 
 const EXEC_FAILED = { code: "AUTH_FAILED", key: "errors.exec.failed", params: { command: "kubelogin", code: "1" }, message: "x", retryable: false };
 
@@ -138,12 +147,24 @@ describe("ConnectionPanel", () => {
     vi.mocked(api.connect).mockResolvedValue({
       ...INFO,
       platform: { kind: "kubernetes", distribution: "eks", version: "1.31", label: "Kubernetes 1.31 (EKS)" },
-      apiGroups: { routes: false, projects: false, deploymentConfigs: false, gatewayApi: true },
+      apiGroups: { routes: false, projects: false, dropappProjects: false, deploymentConfigs: false, gatewayApi: true },
     });
     renderWithClient(<ConnectionPanel connectionId="c1" />);
     expect(await screen.findByText("Kubernetes 1.31 (EKS)")).toBeInTheDocument();
     expect(screen.getByText("Gateway API")).toBeInTheDocument();
     expect(screen.queryByText(/Операторы кластера/)).toBeNull();
+  });
+
+  it("DropApp: проекты из projects.dropapp.ru — тот же вид Project", async () => {
+    vi.mocked(api.listConnections).mockResolvedValue([profile({ method: "token" })]);
+    vi.mocked(api.connect).mockResolvedValue({
+      ...INFO,
+      platform: { kind: "dropapp", distribution: null, version: "5.1.2", label: "DropApp 5.1.2" },
+      apiGroups: { routes: false, projects: false, dropappProjects: true, deploymentConfigs: false, gatewayApi: false },
+    });
+    renderWithClient(<ConnectionPanel connectionId="c1" />);
+    expect(await screen.findByText("DropApp 5.1.2")).toBeInTheDocument();
+    expect(screen.getByText("Project")).toBeInTheDocument();
   });
 
   it("exec-плагин: ожидание с отменой, ошибка плагина и запуск снова", async () => {
@@ -255,6 +276,23 @@ describe("ConnectionPanel", () => {
     expect(screen.getByRole("button", { name: "Подключиться заново" })).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "Отменить" }));
     expect(api.cancelOauthLogin).toHaveBeenCalledWith("c1");
+    finish(INFO);
+    expect(await screen.findByText("dev1")).toBeInTheDocument();
+  });
+
+  it("OIDC: нужен вход — «Войти через OIDC» той же командой, без вставки токена и страницы токена", async () => {
+    vi.mocked(api.listConnections).mockResolvedValue([profile(OIDC)]);
+    vi.mocked(api.connect).mockRejectedValue(OIDC_LOGIN_REQUIRED);
+    let finish: (i: ConnectionInfo) => void = () => {};
+    vi.mocked(api.startOauthLogin).mockReturnValue(new Promise((r) => (finish = r)));
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionPanel connectionId="c1" />);
+    expect(await screen.findByText("Войдите в кластер: кнопка «Войти через OIDC»")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Токен")).not.toBeInTheDocument();
+    expect(api.oauthTokenPage).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Войти через OIDC" }));
+    expect(api.startOauthLogin).toHaveBeenCalledWith("c1");
+    expect(screen.getByText("Ожидание входа в браузере…")).toBeInTheDocument();
     finish(INFO);
     expect(await screen.findByText("dev1")).toBeInTheDocument();
   });
@@ -473,6 +511,24 @@ describe("срок токена со временем", () => {
     await user.click(within(status).getByRole("button", { name: "Подключиться заново" }));
     expect(api.connect).toHaveBeenCalledWith("c1", true);
     await waitFor(() => expect(within(screen.getByRole("status")).getByRole("button", { name: "Подключиться заново" })).toBeDisabled());
+    finish({ ...INFO, tokenExpiresAt: inSeconds(8 * 3600) });
+    await waitFor(() => expect(screen.queryByText(GONE)).not.toBeInTheDocument());
+  });
+
+  it("OIDC: срок токена виден, рядом с «истёк» — «Войти через OIDC», вход заново через OIDC", async () => {
+    vi.mocked(api.listConnections).mockResolvedValue([profile(OIDC)]);
+    vi.mocked(api.connect).mockResolvedValue({ ...INFO, platform: { kind: "dropapp", distribution: null, version: "5.1.2", label: "DropApp 5.1.2" }, tokenExpiresAt: inSeconds(-5) });
+    let finish: (i: ConnectionInfo) => void = () => {};
+    vi.mocked(api.startOauthLogin).mockReturnValue(new Promise((r) => (finish = r)));
+    const user = userEvent.setup();
+    renderWithClient(<ConnectionPanel connectionId="c1" />);
+    await settled();
+    expect(screen.getByText("Токен действует до")).toBeInTheDocument();
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent(GONE);
+    expect(within(status).queryByLabelText("Токен")).not.toBeInTheDocument();
+    await user.click(within(status).getByRole("button", { name: "Войти через OIDC" }));
+    expect(api.startOauthLogin).toHaveBeenCalledWith("c1");
     finish({ ...INFO, tokenExpiresAt: inSeconds(8 * 3600) });
     await waitFor(() => expect(screen.queryByText(GONE)).not.toBeInTheDocument());
   });

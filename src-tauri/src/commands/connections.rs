@@ -8,9 +8,14 @@ use super::blocking;
 use crate::error::{AppError, AppResult};
 use crate::k8s::cluster::ConnectionInfo;
 use crate::k8s::connectivity::{TestReport, ensure_allowed};
-use crate::secrets::{CLIENT_KEY, METRICS_TOKEN, OverlayStore, SecretStore, TOKEN, secret_key};
+use crate::secrets::{
+    CLIENT_KEY, METRICS_TOKEN, OIDC_CLIENT_SECRET, OIDC_ID_TOKEN, OIDC_REFRESH_TOKEN, OverlayStore,
+    SecretStore, TOKEN, secret_key,
+};
 use crate::state::AppState;
-use crate::storage::profile::{AuthConfig, ConnectionProfile, MetricsAuth, REDACTED};
+use crate::storage::profile::{
+    AuthConfig, ConnectionProfile, MetricsAuth, REDACTED, oidc_identity_changed,
+};
 
 /// Секреты из формы. Для каждого: нет или `null` — оставить сохранённый, `""` — удалить,
 /// иное — сохранить. `Debug` печатает вместо значений `***`.
@@ -24,6 +29,9 @@ pub struct SecretsInput {
     /// Bearer-токен своего источника метрик.
     #[serde(default)]
     pub metrics_token: Option<String>,
+    /// Секрет клиента OIDC.
+    #[serde(default)]
+    pub oidc_client_secret: Option<String>,
 }
 
 /// Токен и приватный ключ не печатаются: структура может попасть в лог или сообщение об ошибке.
@@ -34,6 +42,7 @@ impl std::fmt::Debug for SecretsInput {
             .field("token", &hide(&self.token))
             .field("client_key", &hide(&self.client_key))
             .field("metrics_token", &hide(&self.metrics_token))
+            .field("oidc_client_secret", &hide(&self.oidc_client_secret))
             .finish()
     }
 }
@@ -92,14 +101,16 @@ enum SecretOp {
     Delete,
 }
 
-/// Используемые профилем секреты — по данным формы, неиспользуемые — удаляются.
-fn secret_ops(profile: &ConnectionProfile, s: &SecretsInput) -> [(&'static str, SecretOp); 3] {
+/// Используемые профилем секреты — по данным формы, неиспользуемые — удаляются. Токены входа
+/// через OIDC форма не передаёт: они остаются, пока способ входа — OIDC.
+fn secret_ops(profile: &ConnectionProfile, s: &SecretsInput) -> [(&'static str, SecretOp); 6] {
     let op = |used: bool, v: Option<&String>| match (used, v.map(|x| x.trim())) {
         (false, _) => SecretOp::Delete,
         (true, None) => SecretOp::Keep,
         (true, Some("")) => SecretOp::Delete,
         (true, Some(v)) => SecretOp::Set(v.to_string()),
     };
+    let oidc = matches!(profile.auth, AuthConfig::Oidc(_));
     [
         (TOKEN, op(profile.auth.uses_token(), s.token.as_ref())),
         (
@@ -119,6 +130,9 @@ fn secret_ops(profile: &ConnectionProfile, s: &SecretsInput) -> [(&'static str, 
                 s.metrics_token.as_ref(),
             ),
         ),
+        (OIDC_CLIENT_SECRET, op(oidc, s.oidc_client_secret.as_ref())),
+        (OIDC_ID_TOKEN, op(oidc, None)),
+        (OIDC_REFRESH_TOKEN, op(oidc, None)),
     ]
 }
 
@@ -158,6 +172,18 @@ pub fn save_connection_blocking(
     // Сначала `Set`, потом `Delete`: если keychain не примет новый секрет после смены способа
     // входа, прежний ещё на месте, и откат профиля не оставляет его без секрета.
     let mut ops = secret_ops(&saved, &secrets);
+    // Токены выданы прежним издателем и клиенту: при смене издателя, клиента или CA издателя
+    // они не годятся.
+    if previous
+        .as_ref()
+        .is_some_and(|p| oidc_identity_changed(&p.auth, &saved.auth))
+    {
+        for (field, op) in &mut ops {
+            if matches!(*field, OIDC_ID_TOKEN | OIDC_REFRESH_TOKEN) {
+                *op = SecretOp::Delete;
+            }
+        }
+    }
     ops.sort_by_key(|(_, op)| *op == SecretOp::Delete);
     let result = ops.into_iter().try_for_each(|(field, op)| {
         let key = secret_key(&saved.id, field);
@@ -192,6 +218,33 @@ pub async fn delete_connection(state: State<'_, AppState>, id: String) -> AppRes
     blocking(move || st.delete_connection_full(&id)).await
 }
 
+/// Секреты формы поверх keychain для проверки подключения.
+/// Сохранённый профиль с другой идентичностью OIDC (`oidc_identity_changed`): токены прежнего
+/// издателя проверке не достаются — шаг входа требует войти заново, keychain за ними не читается.
+fn test_overrides(
+    input: &ConnectionInput,
+    previous: Option<&ConnectionProfile>,
+) -> HashMap<String, String> {
+    let id = &input.profile.id;
+    let mut overrides = HashMap::new();
+    for (field, v) in [
+        (TOKEN, &input.secrets.token),
+        (CLIENT_KEY, &input.secrets.client_key),
+        (METRICS_TOKEN, &input.secrets.metrics_token),
+        (OIDC_CLIENT_SECRET, &input.secrets.oidc_client_secret),
+    ] {
+        if let Some(v) = v {
+            overrides.insert(secret_key(id, field), v.trim().to_string());
+        }
+    }
+    if previous.is_some_and(|p| oidc_identity_changed(&p.auth, &input.profile.auth)) {
+        for field in [OIDC_ID_TOKEN, OIDC_REFRESH_TOKEN] {
+            overrides.insert(secret_key(id, field), String::new());
+        }
+    }
+    overrides
+}
+
 /// Проверяет и несохранённый профиль: секреты из формы накладываются поверх keychain
 /// (с той же семантикой, что и при сохранении). Ожидание exec-плагина отменяет
 /// `cancel_connection_test`: у проверки свой ключ в `Logins`, и она не отменяет подключение
@@ -205,19 +258,9 @@ pub async fn test_connection(
     let previous = state.connections.get(&input.profile.id).ok();
     set_exec_approval(&mut input.profile, previous.as_ref(), input.confirm_exec);
     let id = input.profile.id.clone();
-    let mut overrides = HashMap::new();
-    for (field, v) in [
-        (TOKEN, &input.secrets.token),
-        (CLIENT_KEY, &input.secrets.client_key),
-        (METRICS_TOKEN, &input.secrets.metrics_token),
-    ] {
-        if let Some(v) = v {
-            overrides.insert(secret_key(&id, field), v.trim().to_string());
-        }
-    }
     let secrets: Arc<dyn SecretStore> = Arc::new(OverlayStore {
         base: state.secrets.clone(),
-        overrides,
+        overrides: test_overrides(&input, previous.as_ref()),
     });
     let exec = matches!(input.profile.auth, AuthConfig::Exec(_));
     let key = crate::auth::test_key(&id);
@@ -323,6 +366,7 @@ mod tests {
                 token: token.map(String::from),
                 client_key: key.map(String::from),
                 metrics_token: None,
+                oidc_client_secret: None,
             },
             confirm_exec: false,
         }
@@ -339,13 +383,17 @@ mod tests {
             token: t.map(String::from),
             client_key: k.map(String::from),
             metrics_token: Some("m".into()),
+            oidc_client_secret: Some("cs".into()),
         };
         assert_eq!(
             secret_ops(&token, &s(None, Some("k"))),
             [
                 (TOKEN, SecretOp::Keep),
                 (CLIENT_KEY, SecretOp::Delete),
-                (METRICS_TOKEN, SecretOp::Delete)
+                (METRICS_TOKEN, SecretOp::Delete),
+                (OIDC_CLIENT_SECRET, SecretOp::Delete),
+                (OIDC_ID_TOKEN, SecretOp::Delete),
+                (OIDC_REFRESH_TOKEN, SecretOp::Delete)
             ]
         );
         assert_eq!(
@@ -365,8 +413,29 @@ mod tests {
             [
                 (TOKEN, SecretOp::Delete),
                 (CLIENT_KEY, SecretOp::Set("KEY".into())),
-                (METRICS_TOKEN, SecretOp::Delete)
+                (METRICS_TOKEN, SecretOp::Delete),
+                (OIDC_CLIENT_SECRET, SecretOp::Delete),
+                (OIDC_ID_TOKEN, SecretOp::Delete),
+                (OIDC_REFRESH_TOKEN, SecretOp::Delete)
             ]
+        );
+        // Вход через OIDC: секрет клиента — из формы, токены входа форма не трогает.
+        let mut oidc = sample_profile("a");
+        oidc.auth = AuthConfig::Oidc(crate::storage::profile::sample_oidc());
+        assert_eq!(
+            secret_ops(&oidc, &s(Some("t"), None)),
+            [
+                (TOKEN, SecretOp::Delete),
+                (CLIENT_KEY, SecretOp::Delete),
+                (METRICS_TOKEN, SecretOp::Delete),
+                (OIDC_CLIENT_SECRET, SecretOp::Set("cs".into())),
+                (OIDC_ID_TOKEN, SecretOp::Keep),
+                (OIDC_REFRESH_TOKEN, SecretOp::Keep)
+            ]
+        );
+        assert_eq!(
+            secret_ops(&oidc, &SecretsInput::default())[3],
+            (OIDC_CLIENT_SECRET, SecretOp::Keep)
         );
         // Токен метрик хранится, только пока у профиля свой источник с авторизацией bearer.
         let mut bearer = sample_profile("a");
@@ -383,6 +452,103 @@ mod tests {
             secret_ops(&bearer, &SecretsInput::default())[2],
             (METRICS_TOKEN, SecretOp::Keep)
         );
+    }
+
+    /// Сохраняет OIDC-подключение с токенами входа, затем сохраняет его же с правкой `edit`.
+    fn oidc_tokens_after_edit(
+        edit: impl FnOnce(&mut crate::storage::profile::OidcAuth),
+    ) -> [Option<String>; 2] {
+        let dir = tempfile::tempdir().unwrap();
+        let st = state(dir.path());
+        let mut p = sample_profile("");
+        p.id = String::new();
+        p.auth = AuthConfig::Oidc(crate::storage::profile::sample_oidc());
+        let saved = save_connection_blocking(&st, input(p, None, None)).unwrap();
+        st.secrets
+            .set(&secret_key(&saved.id, OIDC_ID_TOKEN), "idt")
+            .unwrap();
+        st.secrets
+            .set(&secret_key(&saved.id, OIDC_REFRESH_TOKEN), "rt")
+            .unwrap();
+        let mut next = saved.clone();
+        if let AuthConfig::Oidc(o) = &mut next.auth {
+            edit(o);
+        }
+        save_connection_blocking(&st, input(next, None, None)).unwrap();
+        [
+            secret(&st, &saved.id, OIDC_ID_TOKEN),
+            secret(&st, &saved.id, OIDC_REFRESH_TOKEN),
+        ]
+    }
+
+    #[test]
+    fn oidc_tokens_are_dropped_when_issuer_or_client_changes() {
+        // Другой издатель: токены прежнего нельзя отправлять новому.
+        assert_eq!(
+            oidc_tokens_after_edit(|o| o.issuer_url = "https://other.example.com".into()),
+            [None, None]
+        );
+        // Другой client id: refresh_token выдан прежнему клиенту.
+        assert_eq!(
+            oidc_tokens_after_edit(|o| o.client_id = "other-client".into()),
+            [None, None]
+        );
+        // Другой CA издателя: токены получены от издателя, которому доверяли по прежнему CA.
+        assert_eq!(
+            oidc_tokens_after_edit(|o| {
+                o.issuer_ca_pem = Some(crate::storage::profile::TEST_CERT_PEM.into())
+            }),
+            [None, None]
+        );
+        // Ничего не изменилось (завершающий «/» адреса — та же нормализация): токены остаются.
+        assert_eq!(
+            oidc_tokens_after_edit(|o| o.issuer_url.push('/')),
+            [Some("idt".into()), Some("rt".into())]
+        );
+        assert_eq!(
+            oidc_tokens_after_edit(|_| ()),
+            [Some("idt".into()), Some("rt".into())]
+        );
+    }
+
+    /// Проверка несохранённой формы с другим издателем, client id или CA издателя не берёт
+    /// токен прежнего: шаг входа требует войти заново, keychain за токенами не читается.
+    #[tokio::test]
+    async fn connection_test_ignores_tokens_of_another_oidc_identity() {
+        use crate::storage::profile::{OidcAuth, TEST_CERT_PEM, sample_oidc};
+        let base = Arc::new(MemoryStore::default());
+        let jwt = "e30.eyJleHAiOjQxMDI0NDQ4MDB9.c2ln";
+        base.set(&secret_key("a", OIDC_ID_TOKEN), jwt).unwrap();
+        base.set(&secret_key("a", OIDC_REFRESH_TOKEN), "rt")
+            .unwrap();
+        let mut previous = sample_profile("a");
+        previous.auth = AuthConfig::Oidc(sample_oidc());
+        let run = |edit: fn(&mut OidcAuth)| {
+            let base = base.clone();
+            let previous = previous.clone();
+            async move {
+                let mut form = previous.clone();
+                if let AuthConfig::Oidc(o) = &mut form.auth {
+                    edit(o);
+                }
+                let input = input(form.clone(), None, None);
+                let secrets: Arc<dyn SecretStore> = Arc::new(OverlayStore {
+                    base,
+                    overrides: test_overrides(&input, Some(&previous)),
+                });
+                crate::auth::oidc::stored_credential(&form, &secrets).await
+            }
+        };
+        for edit in [
+            (|o: &mut OidcAuth| o.issuer_url = "https://other.example.com".into()) as fn(&mut _),
+            |o| o.client_id = "other".into(),
+            |o| o.issuer_ca_pem = Some(TEST_CERT_PEM.into()),
+        ] {
+            let e = run(edit).await.unwrap_err();
+            assert_eq!(e.key, "errors.connections.oidcLoginRequired");
+        }
+        // Та же идентичность: сохранённый токен годится.
+        assert_eq!(run(|_| ()).await.unwrap().id_token, jwt);
     }
 
     #[test]
@@ -616,6 +782,7 @@ mod tests {
             token: Some("sha256~tok-123".into()),
             client_key: Some("KEY-456".into()),
             metrics_token: Some("METRICS-789".into()),
+            oidc_client_secret: Some("OIDC-012".into()),
         };
         let connection = ConnectionInput {
             profile: sample_profile("a"),
@@ -631,7 +798,8 @@ mod tests {
             assert!(
                 !text.contains("tok-123")
                     && !text.contains("KEY-456")
-                    && !text.contains("METRICS-789"),
+                    && !text.contains("METRICS-789")
+                    && !text.contains("OIDC-012"),
                 "{text}"
             );
             assert!(text.contains("***"), "{text}");

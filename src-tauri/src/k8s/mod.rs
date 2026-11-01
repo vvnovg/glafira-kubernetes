@@ -6,6 +6,7 @@ pub mod config;
 pub mod configs;
 pub mod connectivity;
 pub mod containers;
+pub mod dropapp;
 pub mod errors;
 pub mod events;
 pub mod kubeconfig;

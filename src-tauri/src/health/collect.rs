@@ -22,6 +22,10 @@ use super::model::TargetKind;
 use super::snapshot::*;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::k8s::cluster::ConnectionInfo;
+use crate::k8s::dropapp::{
+    self, ComponentKind, ComponentRow, MAX_EVENT_LOOKUPS, component_row, dropapp_node_row,
+    ingress_tls_problem, last_warning,
+};
 use crate::k8s::network::{
     endpoints_by_service, gateway_route_row, gateways, grpc_routes, http_routes, ingress_row,
     route_row, routes,
@@ -488,7 +492,11 @@ async fn projects(
                 .read_required(
                     "projects",
                     None,
-                    crate::k8s::projects::list_projects(rd.r, info.api_groups.projects, profile),
+                    crate::k8s::projects::list_projects(
+                        rd.r,
+                        info.api_groups.project_source(),
+                        profile,
+                    ),
                 )
                 .await;
             let Some(list) = list else {
@@ -717,8 +725,43 @@ async fn project(
     }
 }
 
+/// `Component` и `Tool` в сбое с последним событием `Warning` у первых `MAX_EVENT_LOOKUPS`.
+/// События — не через `dropapp::component_problems`: каждое читается под слотом и дедлайном
+/// проверки, а обновляющиеся (`upgrading`) правилу не нужны.
+async fn failed_components(
+    rd: &Reader<'_>,
+    objects: &[(ComponentKind, DynamicObject)],
+) -> Vec<ComponentRow> {
+    let failed: Vec<_> = objects
+        .iter()
+        .map(|(kind, o)| (component_row(*kind, o), o.metadata.uid.as_deref()))
+        .filter(|(row, _)| row.is_failed())
+        .collect();
+    let events = futures::future::join_all(failed.iter().take(MAX_EVENT_LOOKUPS).map(
+        |(row, uid)| async move {
+            let uid = (*uid)?;
+            let ns = row.namespace.as_deref();
+            rd.read("events", ns, async move {
+                Ok(last_warning(rd.r, ns, uid).await)
+            })
+            .await
+            .flatten()
+        },
+    ))
+    .await;
+    let mut events = events.into_iter();
+    failed
+        .into_iter()
+        .map(|(mut row, _)| {
+            row.event = events.next().flatten();
+            row
+        })
+        .collect()
+}
+
 /// Уровень кластера: `/readyz`, ноды и requests подов на них, классы Ingress, у OpenShift —
-/// операторы, версия и пулы машин. Без прав — разрыв без запроса.
+/// операторы, версия и пулы машин, у DropApp — компоненты, узлы и `IngressTLS`. Без прав — разрыв
+/// без запроса; права на объекты DropApp заранее не проверяются — разрыв по ответу.
 async fn cluster(rd: &Reader<'_>, info: &ConnectionInfo, s: &mut ClusterSnapshot) {
     let caps = &info.capabilities;
     let lp = ListParams::default();
@@ -826,8 +869,57 @@ async fn cluster(rd: &Reader<'_>, info: &ConnectionInfo, s: &mut ClusterSnapshot
             }),
         })
     };
-    let (readyz, nodes, all_pods, classes, openshift) =
-        tokio::join!(readyz, nodes, all_pods, classes, openshift);
+    let dropapp = async {
+        if info.platform.kind != PlatformKind::Dropapp {
+            return None;
+        }
+        let (components_ar, tools_ar) = (dropapp::components(), dropapp::tools());
+        let (nodes_ar, tls_ar) = (dropapp::dropapp_nodes(), dropapp::ingress_tlses());
+        let (components, tools, nodes, tls) = tokio::join!(
+            rd.list(
+                dropapp::COMPONENTS,
+                None,
+                rd.r.list_dynamic(&components_ar, None, &lp)
+            ),
+            rd.list(
+                dropapp::TOOLS,
+                None,
+                rd.r.list_dynamic(&tools_ar, None, &lp)
+            ),
+            rd.list(
+                dropapp::DROPAPP_NODES,
+                None,
+                rd.r.list_dynamic(&nodes_ar, None, &lp)
+            ),
+            rd.list(
+                dropapp::INGRESS_TLSES,
+                None,
+                rd.r.list_dynamic(&tls_ar, None, &lp)
+            ),
+        );
+        // Прочитан хотя бы один из видов — проверяется он, непрочитанный уже в разрывах.
+        let objects: Option<Vec<_>> = match (components, tools) {
+            (None, None) => None,
+            (c, t) => Some(
+                c.into_iter()
+                    .flatten()
+                    .map(|o| (ComponentKind::Component, o))
+                    .chain(t.into_iter().flatten().map(|o| (ComponentKind::Tool, o)))
+                    .collect(),
+            ),
+        };
+        let components = match &objects {
+            Some(o) => Some(failed_components(rd, o).await),
+            None => None,
+        };
+        Some(DropAppSnap {
+            components,
+            nodes: nodes.map(|v| v.iter().map(dropapp_node_row).collect()),
+            ingress_tls: tls.map(|v| v.iter().filter_map(ingress_tls_problem).collect()),
+        })
+    };
+    let (readyz, nodes, all_pods, classes, openshift, dropapp) =
+        tokio::join!(readyz, nodes, all_pods, classes, openshift, dropapp);
     s.readyz = readyz;
     s.nodes = nodes.map(|v| v.iter().map(node_snap).collect());
     s.node_requests = all_pods.map(|p| requests_by_node(&p));
@@ -836,6 +928,7 @@ async fn cluster(rd: &Reader<'_>, info: &ConnectionInfo, s: &mut ClusterSnapshot
         has_default: rows.iter().any(|c| c.default),
     });
     s.openshift = openshift;
+    s.dropapp = dropapp;
 }
 
 /// Снимок кластера и проектов. `requested` — проекты проверки (`None` — все доступные);
@@ -1626,5 +1719,111 @@ mod tests {
             }
         );
         assert_eq!(m["w2"].cpu_milli, 600);
+    }
+
+    /// Мок DropApp: объекты из `k8s::dropapp::fixtures`, событие `Warning` — только у
+    /// `cert-manager`; остальное — пустые списки.
+    fn dropapp(s: &Seen) -> (u16, Vec<u8>) {
+        use crate::k8s::dropapp::fixtures::*;
+        let ok = |v: Value| (200, serde_json::to_vec(&v).unwrap());
+        match s.path() {
+            "/apis/config.dropapp.ru/v1alpha1/components" => ok(component_list()),
+            "/apis/config.dropapp.ru/v1alpha1/tools" => ok(tool_list()),
+            "/apis/nodes.dropapp.ru/v1alpha1/dropappnodes" => ok(node_list()),
+            "/apis/tls.dropapp.ru/v1alpha1/ingresstlses" => ok(ingress_tls_list()),
+            "/api/v1/namespaces/dapp-system/events" if s.uri.contains("uid-cert-manager") => {
+                ok(events(vec![warning(
+                    "uid-cert-manager",
+                    "InstallFailed",
+                    "helm install failed: timed out",
+                    "2026-10-31T11:00:00Z",
+                )]))
+            }
+            _ => list("List", vec![]),
+        }
+    }
+
+    async fn collect_on(
+        kind: PlatformKind,
+        handler: impl Fn(&Seen) -> (u16, Vec<u8>) + Send + 'static,
+    ) -> (ClusterSnapshot, Vec<Seen>) {
+        let (client, server) = mock_raw(handler);
+        let r = ReadClient::new(client, Duration::from_secs(5));
+        let mut i = info(admin());
+        i.platform.kind = kind;
+        let metrics = FakeSource::new(|_, _| Ok(vector(&[])));
+        let s = collect(
+            &r,
+            &i,
+            &sample_profile("c1"),
+            Some(&["a".to_string()]),
+            LIMITS,
+            NOW,
+            Some(&metrics),
+        )
+        .await;
+        drop(r);
+        (s, server.await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn dropapp_part_with_failed_components_and_their_events() {
+        let (s, seen) = collect_on(PlatformKind::Dropapp, dropapp).await;
+        assert_eq!(gap_lines(&s), Vec::<String>::new());
+        let d = s.dropapp.expect("часть DropApp");
+        let components: Vec<_> = d
+            .components
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.name, c.status, c.event))
+            .collect();
+        // `dex` обновляется — это проблема обзора, но не правила: события по нему не читаются.
+        assert_eq!(
+            components,
+            [
+                (
+                    "cert-manager".to_string(),
+                    Some("Failed".to_string()),
+                    Some("InstallFailed: helm install failed: timed out".to_string())
+                ),
+                ("grafana".to_string(), Some("failed".to_string()), None),
+            ]
+        );
+        let nodes: Vec<_> = d.nodes.unwrap().into_iter().map(|n| n.name).collect();
+        assert_eq!(nodes, ["master-1", "worker-2", "worker-3"]);
+        let tls: Vec<_> = d.ingress_tls.unwrap().into_iter().map(|t| t.name).collect();
+        assert_eq!(tls, ["apps"], "только те, у кого Ready не True");
+        let lookups = seen
+            .iter()
+            .filter(|s| s.uri.contains("involvedObject.uid"))
+            .count();
+        assert_eq!(lookups, 2, "события — только у failed и error");
+    }
+
+    #[tokio::test]
+    async fn dropapp_part_is_only_read_on_dropapp() {
+        let (s, seen) = collect_on(PlatformKind::Kubernetes, dropapp).await;
+        assert!(s.dropapp.is_none());
+        assert!(seen.iter().all(|s| !s.path().contains("dropapp.ru")));
+    }
+
+    #[tokio::test]
+    async fn unread_dropapp_parts_are_gaps_and_absent_crds_are_not() {
+        let (s, _) = collect_on(PlatformKind::Dropapp, |s| match s.path() {
+            "/apis/config.dropapp.ru/v1alpha1/components"
+            | "/apis/tls.dropapp.ru/v1alpha1/ingresstlses" => forbidden(),
+            "/apis/nodes.dropapp.ru/v1alpha1/dropappnodes" => not_found(),
+            _ => dropapp(s),
+        })
+        .await;
+        assert_eq!(
+            gap_lines(&s),
+            ["- components FORBIDDEN", "- ingresstlses FORBIDDEN"]
+        );
+        let d = s.dropapp.unwrap();
+        let components: Vec<_> = d.components.unwrap().into_iter().map(|c| c.name).collect();
+        assert_eq!(components, ["grafana"], "Tool прочитаны — проверяются они");
+        assert_eq!(d.nodes, None, "нет CRD — пусто, без пометки");
+        assert_eq!(d.ingress_tls, None);
     }
 }

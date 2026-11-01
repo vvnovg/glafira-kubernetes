@@ -1,7 +1,12 @@
 import type { AppError, ConnectionProfile } from "../api/types";
 
 /** Ошибки, которые лечатся входом заново или новым токеном. */
-export const SIGN_IN_KEYS = new Set(["errors.connections.tokenMissing", "errors.connections.loginRequired", "errors.connections.clientKeyMissing"]);
+export const SIGN_IN_KEYS = new Set([
+  "errors.connections.tokenMissing",
+  "errors.connections.loginRequired",
+  "errors.connections.oidcLoginRequired",
+  "errors.connections.clientKeyMissing",
+]);
 
 /**
  * Помогает ли войти заново: истёкшая сессия, нет токена или ключа, ошибка exec-плагина (если

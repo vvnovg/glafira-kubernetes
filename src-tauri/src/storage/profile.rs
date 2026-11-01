@@ -30,6 +30,29 @@ pub enum AuthConfig {
     /// Exec-плагин kubeconfig из списка разрешённых (спец. §5.2); учётные данные выдаёт плагин,
     /// в keychain ничего не хранится.
     Exec(ExecAuth),
+    /// Вход через браузер в OIDC-провайдер API-сервера (спека O5 §5): секрет клиента, `id_token`
+    /// и `refresh_token` — в keychain (`secrets::OIDC_*`).
+    Oidc(OidcAuth),
+}
+
+/// Client id DropApp (Dex) — значение по умолчанию для формы и импорта.
+pub const DEFAULT_OIDC_CLIENT_ID: &str = "dapp";
+/// Scopes DropApp: `groups` нужен для прав в кластере, `offline_access` — для `refresh_token`.
+pub const DEFAULT_OIDC_SCOPES: [&str; 5] =
+    ["openid", "email", "groups", "profile", "offline_access"];
+
+/// Вход через OIDC: издатель, клиент и scopes; секрет клиента в профиле не хранится.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OidcAuth {
+    pub issuer_url: String,
+    pub client_id: String,
+    pub scopes: Vec<String>,
+    /// CA сертификата издателя (PEM), если его выпустил не CA API-сервера (у DropApp — CA
+    /// ingress): добавляется к системным корням и CA подключения. Не секрет, как сертификат
+    /// клиента.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer_ca_pem: Option<String>,
 }
 
 /// Exec-плагин: что и как запускать. Секретные значения (переменные окружения вроде
@@ -320,6 +343,16 @@ pub fn normalize_profile(p: &mut ConnectionProfile) {
     if let MetricsConfig::Thanos(e) | MetricsConfig::Prometheus(e) = &mut p.metrics {
         e.url = e.url.trim().trim_end_matches('/').to_string();
     }
+    if let AuthConfig::Oidc(o) = &mut p.auth {
+        o.issuer_url = o.issuer_url.trim().trim_end_matches('/').to_string();
+        o.client_id = o.client_id.trim().to_string();
+        let mut seen = std::collections::HashSet::new();
+        o.scopes.retain_mut(|s| {
+            *s = s.trim().to_string();
+            !s.is_empty() && seen.insert(s.clone())
+        });
+        o.issuer_ca_pem = o.issuer_ca_pem.take().filter(|pem| !pem.trim().is_empty());
+    }
     p.tls_server_name = p
         .tls_server_name
         .take()
@@ -552,6 +585,9 @@ pub fn validate_profile(p: &ConnectionProfile) -> AppResult<()> {
     if let AuthConfig::Exec(e) = &p.auth {
         validate_exec(e)?;
     }
+    if let AuthConfig::Oidc(o) = &p.auth {
+        validate_oidc(o)?;
+    }
     // Проекты для LLM сверяются с namespace запросов MCP: имя, которое не может быть namespace,
     // никогда бы не совпало.
     if let Some(bad) = p
@@ -655,6 +691,58 @@ fn validate_metrics(e: &MetricsEndpoint) -> AppResult<()> {
     Ok(())
 }
 
+/// Вход через OIDC: адрес издателя https (http — только для 127.0.0.1 и localhost: тесты и
+/// имитация) без имени и пароля и без запроса, client id, scope `openid` и CA издателя в PEM без
+/// приватного ключа.
+fn validate_oidc(o: &OidcAuth) -> AppResult<()> {
+    let bad = || {
+        invalid(ltext!(
+            "errors.oidc.badIssuerUrl",
+            "Invalid OIDC issuer address “{{url}}”: use https://host[/path]",
+            url = redact_url(&o.issuer_url)
+        ))
+    };
+    let u = url::Url::parse(o.issuer_url.trim()).map_err(|_| bad())?;
+    let local = matches!(u.host_str(), Some("127.0.0.1" | "localhost"));
+    if !(u.scheme() == "https" || u.scheme() == "http" && local)
+        || u.host_str().is_none_or(str::is_empty)
+        || u.query().is_some()
+        || u.fragment().is_some()
+    {
+        return Err(bad());
+    }
+    if has_userinfo(&u) {
+        return Err(credentials_in_url(&u));
+    }
+    if o.client_id.trim().is_empty() {
+        return Err(invalid(ltext!(
+            "errors.oidc.clientIdMissing",
+            "Specify the OIDC client ID"
+        )));
+    }
+    if !o.scopes.iter().any(|s| s.trim() == "openid") {
+        return Err(invalid(ltext!(
+            "errors.oidc.openidScopeMissing",
+            "The OIDC scopes must include openid"
+        )));
+    }
+    if let Some(pem) = &o.issuer_ca_pem {
+        if pem_has_private_key(pem) {
+            return Err(invalid(ltext!(
+                "errors.connections.pemContainsKey",
+                "A certificate field contains a private key — put the key into the key field"
+            )));
+        }
+        if pem_certificates(pem).is_err() {
+            return Err(invalid(ltext!(
+                "errors.oidc.issuerCaInvalid",
+                "The OIDC issuer CA certificate must be in PEM format (-----BEGIN CERTIFICATE-----)"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Exec-плагин: абсолютный путь, команда из списка разрешённых, известная версия API,
 /// корректные имена переменных окружения и ни одной запрещённой (`auth::exec::is_forbidden_env`).
 fn validate_exec(e: &ExecAuth) -> AppResult<()> {
@@ -691,6 +779,27 @@ fn validate_exec(e: &ExecAuth) -> AppResult<()> {
     Ok(())
 }
 
+/// Прежний способ входа — OIDC, а издатель, client id или CA издателя другие (адреса
+/// сравниваются без завершающего «/», PEM — без пробелов по краям, пустой CA — как его
+/// отсутствие). Токены и секрет клиента выданы прежнему издателю и клиенту, которому доверяли по
+/// прежнему CA: при такой смене они не годятся.
+pub fn oidc_identity_changed(before: &AuthConfig, after: &AuthConfig) -> bool {
+    match (before, after) {
+        (AuthConfig::Oidc(a), AuthConfig::Oidc(b)) => {
+            let issuer = |o: &OidcAuth| o.issuer_url.trim().trim_end_matches('/').to_string();
+            let ca = |o: &OidcAuth| {
+                o.issuer_ca_pem
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string)
+            };
+            issuer(a) != issuer(b) || a.client_id.trim() != b.client_id.trim() || ca(a) != ca(b)
+        }
+        _ => false,
+    }
+}
+
 /// Exec-плагин для тестов: `kubectl oidc-login get-token` по абсолютному пути.
 #[cfg(test)]
 pub fn sample_exec() -> ExecAuth {
@@ -712,6 +821,17 @@ pub fn sample_exec() -> ExecAuth {
         api_version: EXEC_API_V1.into(),
         provide_cluster_info: false,
         approved: None,
+    }
+}
+
+/// Вход через OIDC для тестов: издатель DropApp и значения по умолчанию.
+#[cfg(test)]
+pub fn sample_oidc() -> OidcAuth {
+    OidcAuth {
+        issuer_url: "https://auth.c1.example.com".into(),
+        client_id: DEFAULT_OIDC_CLIENT_ID.into(),
+        scopes: DEFAULT_OIDC_SCOPES.map(String::from).to_vec(),
+        issuer_ca_pem: None,
     }
 }
 
@@ -1046,6 +1166,128 @@ mod tests {
             panic!("exec")
         };
         assert_eq!((e.api_version.as_str(), e.args.len()), (EXEC_API_V1, 0));
+    }
+
+    #[test]
+    fn oidc_json_shape() {
+        let mut p = sample_profile("x");
+        p.auth = AuthConfig::Oidc(sample_oidc());
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            v["auth"],
+            serde_json::json!({
+                "method": "oidc",
+                "issuerUrl": "https://auth.c1.example.com",
+                "clientId": "dapp",
+                "scopes": ["openid", "email", "groups", "profile", "offline_access"],
+            })
+        );
+        assert!(!p.auth.uses_token(), "токены OIDC хранятся отдельно");
+        let back: ConnectionProfile = serde_json::from_value(v).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn oidc_validation_and_normalization() {
+        let with = |change: &dyn Fn(&mut OidcAuth)| {
+            let mut p = sample_profile("a");
+            let mut o = sample_oidc();
+            change(&mut o);
+            p.auth = AuthConfig::Oidc(o);
+            p
+        };
+        assert!(validate_profile(&with(&|_| {})).is_ok());
+        // http — только для локального издателя (тесты, имитация).
+        for ok in ["http://127.0.0.1:5556/dex", "http://localhost:5556"] {
+            assert!(
+                validate_profile(&with(&|o| o.issuer_url = ok.into())).is_ok(),
+                "{ok}"
+            );
+        }
+        for (key, change) in [
+            (
+                "errors.oidc.badIssuerUrl",
+                &(|o: &mut OidcAuth| o.issuer_url = "http://auth.c1.example.com".into())
+                    as &dyn Fn(&mut OidcAuth),
+            ),
+            ("errors.oidc.badIssuerUrl", &|o| {
+                o.issuer_url = "auth".into()
+            }),
+            ("errors.oidc.badIssuerUrl", &|o| {
+                o.issuer_url = "https://auth.c1/?x=1".into()
+            }),
+            ("errors.connections.credentialsInUrl", &|o| {
+                o.issuer_url = "https://u:p@auth.c1".into()
+            }),
+            ("errors.oidc.clientIdMissing", &|o| o.client_id = " ".into()),
+            ("errors.oidc.openidScopeMissing", &|o| {
+                o.scopes = vec!["email".into()]
+            }),
+        ] {
+            let e = validate_profile(&with(change)).unwrap_err();
+            assert_eq!((e.code, e.key.as_str()), (ErrorCode::InvalidInput, key));
+            assert!(!e.message.contains("u:p"), "{}", e.message);
+        }
+        let mut p = with(&|o| {
+            o.issuer_url = " https://auth.c1/dex/ ".into();
+            o.client_id = " dapp ".into();
+            o.scopes = vec![
+                " openid".into(),
+                "".into(),
+                "groups".into(),
+                "openid".into(),
+            ];
+        });
+        normalize_profile(&mut p);
+        let AuthConfig::Oidc(o) = &p.auth else {
+            panic!("oidc")
+        };
+        assert_eq!(o.issuer_url, "https://auth.c1/dex");
+        assert_eq!(o.client_id, "dapp");
+        assert_eq!(o.scopes, ["openid", "groups"]);
+    }
+
+    /// CA издателя — PEM в профиле, как CA подключения: без него поле в JSON не пишется, пустое
+    /// убирается при нормализации, не PEM и приватный ключ — ошибки ввода.
+    #[test]
+    fn oidc_issuer_ca_is_a_pem_in_the_profile() {
+        let with = |pem: &str| {
+            let mut p = sample_profile("a");
+            p.auth = AuthConfig::Oidc(OidcAuth {
+                issuer_ca_pem: Some(pem.into()),
+                ..sample_oidc()
+            });
+            p
+        };
+        let p = with(TEST_CERT_PEM);
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["auth"]["issuerCaPem"], TEST_CERT_PEM);
+        let back: ConnectionProfile = serde_json::from_value(v).unwrap();
+        assert_eq!(back, p);
+        assert!(validate_profile(&p).is_ok());
+        for (pem, key) in [
+            ("nope", "errors.oidc.issuerCaInvalid"),
+            (
+                "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n",
+                "errors.connections.pemContainsKey",
+            ),
+        ] {
+            let e = validate_profile(&with(pem)).unwrap_err();
+            assert_eq!((e.code, e.key.as_str()), (ErrorCode::InvalidInput, key));
+        }
+        let with_key = format!("{TEST_CERT_PEM}{}", include_str!("testdata/test-key.pem"));
+        assert_eq!(
+            validate_profile(&with(&with_key)).unwrap_err().key,
+            "errors.connections.pemContainsKey"
+        );
+        let mut p = with(" \n ");
+        normalize_profile(&mut p);
+        assert_eq!(
+            p.auth,
+            AuthConfig::Oidc(sample_oidc()),
+            "пустой CA — нет CA"
+        );
+        assert!(validate_profile(&p).is_ok());
     }
 
     /// `{:?}` не печатает секретные значения: ни в переменных окружения, ни в аргументах; на диск

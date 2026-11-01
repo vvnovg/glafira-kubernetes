@@ -23,7 +23,7 @@ pub struct OAuthMetadata {
     pub token_endpoint: String,
 }
 
-fn from_reqwest(e: &reqwest::Error) -> AppError {
+pub(crate) fn from_reqwest(e: &reqwest::Error) -> AppError {
     if e.is_timeout() {
         timeout().with_details(chain_text(e))
     } else {
@@ -128,7 +128,7 @@ pub async fn fetch_metadata(http: &reqwest::Client, api_url: &str) -> AppResult<
 }
 
 /// Абсолютный адрес `http://` или `https://` с именем хоста.
-fn is_http_url(value: &str) -> bool {
+pub(crate) fn is_http_url(value: &str) -> bool {
     url::Url::parse(value)
         .is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.host_str().is_some())
 }
@@ -279,7 +279,7 @@ pub async fn login(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -289,20 +289,20 @@ mod tests {
     use crate::storage::profile::sample_profile;
 
     /// Профиль для тестов: без системного прокси, чтобы запросы к 127.0.0.1 не зависели от машины.
-    fn test_profile() -> ConnectionProfile {
+    pub(crate) fn test_profile() -> ConnectionProfile {
         let mut p = sample_profile("a");
         p.proxy = ProxyConfig::None;
         p
     }
 
     /// Клиент «браузера» в тестах: тоже без системного прокси.
-    fn plain_client() -> reqwest::Client {
+    pub(crate) fn plain_client() -> reqwest::Client {
         crate::tls::ensure_crypto_provider();
         reqwest::Client::builder().no_proxy().build().unwrap()
     }
 
     /// Простой HTTP-сервер для тестов: отвечает `routes(метод, путь, тело)`; записывает запросы.
-    async fn fake_server(
+    pub(crate) async fn fake_server(
         routes: impl Fn(&str, &str, &str) -> (u16, String) + Send + Sync + 'static,
     ) -> (String, Arc<Mutex<Vec<String>>>) {
         fake_server_delayed(Duration::ZERO, routes).await

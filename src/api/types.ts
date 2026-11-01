@@ -52,11 +52,21 @@ export interface ExecAuth {
   approved?: string | null;
 }
 
+/** Вход через OIDC (спека O5 §5): издатель, клиент и scopes; секрет клиента — в keychain. */
+export interface OidcAuth {
+  issuerUrl: string;
+  clientId: string;
+  scopes: string[];
+  /** CA сертификата издателя (PEM), если его выпустил не CA API-сервера (у DropApp — CA ingress). */
+  issuerCaPem?: string | null;
+}
+
 export type AuthConfig =
   | { method: "token" }
   | { method: "browser" }
   | { method: "clientCert"; certificatePem: string }
-  | ({ method: "exec" } & ExecAuth);
+  | ({ method: "exec" } & ExecAuth)
+  | ({ method: "oidc" } & OidcAuth);
 export type AuthMethod = AuthConfig["method"];
 
 export type CaConfig = { mode: "system" } | { mode: "pem"; pem: string } | { mode: "insecure" };
@@ -115,6 +125,7 @@ export interface SecretsInput {
   token?: string | null;
   clientKey?: string | null;
   metricsToken?: string | null;
+  oidcClientSecret?: string | null;
 }
 
 export interface ConnectionFolder {
@@ -185,10 +196,10 @@ export interface Capabilities {
   readClusterVersion: boolean;
 }
 
-export type PlatformKind = "openshift" | "kubernetes";
+export type PlatformKind = "openshift" | "dropapp" | "kubernetes";
 export type Distribution = "eks" | "gke" | "aks" | "rancher" | "deckhouse" | "k3s" | "rke2";
 
-/** Платформа кластера (спец. §4.3); `label` — «OpenShift 4.18», «Kubernetes 1.31 (EKS)». */
+/** Платформа кластера (спец. §4.3); `label` — «OpenShift 4.18», «DropApp 5.1.2», «Kubernetes 1.31 (EKS)». */
 export interface PlatformInfo {
   kind: PlatformKind;
   distribution: Distribution | null;
@@ -200,6 +211,8 @@ export interface PlatformInfo {
 export interface ApiGroups {
   routes: boolean;
   projects: boolean;
+  /** `projects.dropapp.ru`: проекты DropApp 5.x, если нет проектов OpenShift. */
+  dropappProjects: boolean;
   deploymentConfigs: boolean;
   gatewayApi: boolean;
 }
@@ -211,11 +224,11 @@ export interface ConnectionInfo {
   platform: PlatformInfo;
   apiGroups: ApiGroups;
   capabilities: Capabilities;
-  /** Когда истекает токен входа (секунды Unix), если платформа это сообщает (OpenShift). */
+  /** Когда истекает токен входа (секунды Unix), если платформа это сообщает (OpenShift) или это вход через OIDC. */
   tokenExpiresAt: number | null;
 }
 
-export type ImportAuth = "token" | "clientCert" | "browser" | "exec";
+export type ImportAuth = "token" | "clientCert" | "browser" | "exec" | "oidc";
 
 export interface KubeContext {
   name: string;
@@ -238,6 +251,10 @@ export interface KubeContext {
    * ничего не подтверждает. Есть только у контекста с `exec`.
    */
   launchFingerprint?: string;
+  /** Вход через OIDC из аргументов exec-плагина (`auth: "oidc"`); секрета клиента нет — только признак. */
+  oidc: (OidcAuth & { hasClientSecret: boolean; issuerCaWarning: LocalizedText | null }) | null;
+  /** Почему у контекста с входом через OIDC нельзя выбрать exec-плагин; null — можно. */
+  execUnsupported: LocalizedText | null;
   /** Почему контекст нельзя импортировать; null — можно. */
   unsupported: LocalizedText | null;
   /** Подключение с тем же адресом и именем: импорт обновит его. */
@@ -459,6 +476,40 @@ export interface OpenShiftOverview {
   machineConfigPools: Part<MachineConfigPoolRow[]>;
 }
 
+/** `Component` или `Tool` DropApp в сбое или обновлении. */
+export interface ComponentRow {
+  kind: "Component" | "Tool";
+  name: string;
+  namespace: string | null;
+  status: string | null;
+  /** RETRY: сколько раз установка повторялась. */
+  retry: number | null;
+  /** `причина: сообщение` последнего события Warning по объекту. */
+  event: string | null;
+}
+
+export interface DropAppNodeRow {
+  name: string;
+  status: string | null;
+}
+
+/** `IngressTLS`, у которого условие `Ready` не `True`. */
+export interface IngressTlsRow {
+  name: string;
+  namespace: string | null;
+  reason: string | null;
+  message: string | null;
+}
+
+/** Часть обзора DropApp; нет CRD — пустые значения (`total: 0`). */
+export interface DropAppOverview {
+  kind: "dropapp";
+  metadata: Part<{ clusterName: string | null; version: string | null }>;
+  components: Part<{ total: number; problems: ComponentRow[] }>;
+  nodes: Part<{ total: number; problems: DropAppNodeRow[] }>;
+  ingressTls: Part<{ total: number; problems: IngressTlsRow[] }>;
+}
+
 export interface ClusterOverview {
   platform: PlatformInfo;
   serverVersion: string;
@@ -468,7 +519,7 @@ export interface ClusterOverview {
   /** null — в кластере нет Gateway API. */
   gatewayClasses: Part<GatewayClassRow[]> | null;
   projects: Part<ProjectCount>;
-  platformDetails: OpenShiftOverview | null;
+  platformDetails: OpenShiftOverview | DropAppOverview | null;
 }
 
 export interface NodeRow {

@@ -298,6 +298,7 @@ impl<T> Part<T> {
 #[serde(rename_all = "lowercase")]
 pub enum PlatformKind {
     Openshift,
+    Dropapp,
     Kubernetes,
 }
 
@@ -305,7 +306,7 @@ pub enum PlatformKind {
 #[serde(rename_all = "camelCase")]
 pub struct Platform {
     pub kind: PlatformKind,
-    /// «OpenShift 4.18», «Kubernetes 1.31 (EKS)».
+    /// «OpenShift 4.18», «DropApp 5.1.2», «Kubernetes 1.31 (EKS)».
     pub label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
@@ -448,6 +449,83 @@ pub struct OpenShift {
     pub machine_config_pools_not_ok: Part<Vec<MachineConfigPool>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DropAppMetadata {
+    pub cluster_name: Option<String>,
+    pub version: Option<String>,
+}
+
+/// `Component` или `Tool` DropApp в сбое или обновлении.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DropAppComponent {
+    /// `Component` или `Tool`.
+    pub kind: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry: Option<i64>,
+    /// `причина: сообщение` последнего события `Warning` по объекту.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_warning: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DropAppComponents {
+    pub total: usize,
+    /// В статусе `failed`, `error` или `upgrading`.
+    pub not_ok: Vec<DropAppComponent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DropAppNode {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DropAppNodes {
+    pub total: usize,
+    pub not_ready: Vec<DropAppNode>,
+}
+
+/// `IngressTLS`, у которого условие `Ready` не `True`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DropAppIngressTls {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DropAppIngressTlsList {
+    pub total: usize,
+    pub not_ready: Vec<DropAppIngressTls>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DropApp {
+    pub metadata: Part<DropAppMetadata>,
+    pub components: Part<DropAppComponents>,
+    pub nodes: Part<DropAppNodes>,
+    pub ingress_tls: Part<DropAppIngressTlsList>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClusterOverview {
@@ -460,6 +538,8 @@ pub struct ClusterOverview {
     pub gateway_classes: Option<Part<Vec<GatewayClass>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub openshift: Option<OpenShift>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dropapp: Option<DropApp>,
     /// Что пользователю разрешено читать на уровне кластера.
     pub capabilities: Capabilities,
 }

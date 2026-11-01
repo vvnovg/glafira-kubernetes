@@ -13,8 +13,9 @@ use crate::error::{AppError, AppResult, ErrorCode};
 use crate::i18n::LocalizedText;
 use crate::policy::PolicyStatus;
 use crate::storage::profile::{
-    AuthConfig, CaConfig, ConnectionProfile, EXEC_API_V1, EXEC_API_V1BETA1, Environment, ExecAuth,
-    ExecEnv, ProxyConfig, REDACTED, is_valid_namespace, normalize_profile, pem_certificates,
+    AuthConfig, CaConfig, ConnectionProfile, DEFAULT_OIDC_CLIENT_ID, DEFAULT_OIDC_SCOPES,
+    EXEC_API_V1, EXEC_API_V1BETA1, Environment, ExecAuth, ExecEnv, OidcAuth, ProxyConfig, REDACTED,
+    is_valid_namespace, normalize_profile, pem_certificates, pem_has_private_key,
 };
 
 /// Поиск команды exec-плагина: имя из kubeconfig и каталог файла → абсолютный путь.
@@ -30,6 +31,39 @@ pub enum ImportAuth {
     Browser,
     /// Exec-плагин из списка разрешённых (спец. §5.2).
     Exec,
+    /// Exec-плагин входа через OIDC (`kubectl oidc-login`, `kubelogin`): по умолчанию вход через
+    /// браузер в OIDC-провайдер (спека O5 §5.4), exec-плагин — второй вариант.
+    Oidc,
+}
+
+/// Вход через OIDC из аргументов exec-плагина. Секрета клиента здесь нет — только признак:
+/// предпросмотр уходит в webview, а применение берёт секрет из файла заново.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OidcImport {
+    #[serde(flatten)]
+    pub auth: OidcAuth,
+    pub has_client_secret: bool,
+    /// CA издателя из `--certificate-authority` не прочитан: вход через OIDC остаётся, но без CA.
+    pub issuer_ca_warning: Option<LocalizedText>,
+}
+
+/// Вход через OIDC из аргументов kubelogin: издатель, клиент и scopes, секрет клиента и источник
+/// CA издателя (файл читает предпросмотр). Секрет не печатается: `Debug` нет.
+#[derive(Clone)]
+pub struct OidcLogin {
+    pub auth: OidcAuth,
+    pub client_secret: Option<String>,
+    pub issuer_ca: Option<IssuerCa>,
+}
+
+/// CA издателя в аргументах kubelogin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssuerCa {
+    /// `--certificate-authority-data=<base64>`.
+    Data(String),
+    /// `--certificate-authority=<путь>`; относительный — от каталога kubeconfig.
+    File(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -51,6 +85,10 @@ pub struct KubeContext {
     /// принимает отпечаток, а не имя контекста.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launch_fingerprint: Option<String>,
+    /// Вход через OIDC (`auth == Oidc`).
+    pub oidc: Option<OidcImport>,
+    /// Почему у контекста с входом через OIDC нельзя выбрать exec-плагин; `None` — можно.
+    pub exec_unsupported: Option<LocalizedText>,
     /// Почему контекст нельзя импортировать; `None` — можно.
     pub unsupported: Option<LocalizedText>,
     /// Подключение с тем же адресом и именем: импорт обновит его.
@@ -70,10 +108,12 @@ pub struct ImportedContext {
     pub profile: ConnectionProfile,
     pub token: Option<String>,
     pub client_key: Option<String>,
+    /// Секрет клиента OIDC (`--oidc-client-secret`).
+    pub oidc_client_secret: Option<String>,
 }
 
-/// Токен и приватный ключ не печатаются: структура может попасть в лог, `assert!` или сообщение
-/// об ошибке. Профиль секретов не содержит и печатается целиком.
+/// Токен, приватный ключ и секрет клиента не печатаются: структура может попасть в лог,
+/// `assert!` или сообщение об ошибке. Профиль секретов не содержит и печатается целиком.
 impl std::fmt::Debug for ImportedContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let hide = |secret: &Option<String>| secret.as_ref().map(|_| REDACTED);
@@ -81,6 +121,7 @@ impl std::fmt::Debug for ImportedContext {
             .field("profile", &self.profile)
             .field("token", &hide(&self.token))
             .field("client_key", &hide(&self.client_key))
+            .field("oidc_client_secret", &hide(&self.oidc_client_secret))
             .finish()
     }
 }
@@ -176,6 +217,166 @@ fn exec_auth(
     })
 }
 
+/// Вход через OIDC из exec-плагина int128/kubelogin (`kubelogin get-token …` или
+/// `kubectl oidc-login get-token …`) с `--oidc-issuer-url` (спека O5 §5.4): издатель, client id
+/// (нет — `dapp`), scopes (`openid`, `--oidc-extra-scope` и `offline_access`; нет ни одного — scopes DropApp) и
+/// секрет клиента, CA издателя (`--certificate-authority-data` важнее `--certificate-authority`,
+/// как `*-data` в kubeconfig). Ключ и значение — `--k=v` или `--k v`, у повторённого ключа —
+/// последнее значение. Azure kubelogin (`--login`, `--server-id`) — не вход через OIDC.
+pub fn oidc_login(command: &str, args: &[String]) -> Option<OidcLogin> {
+    let start = match crate::auth::exec::command_name(command).as_str() {
+        "kubelogin" => args.iter().position(|a| a == "get-token")? + 1,
+        "kubectl" if args.len() >= 2 && args[0] == "oidc-login" && args[1] == "get-token" => 2,
+        _ => return None,
+    };
+    let mut values: Vec<(&str, &str)> = Vec::new();
+    let mut rest = args[start..].iter();
+    while let Some(a) = rest.next() {
+        let Some(option) = a.strip_prefix("--") else {
+            continue;
+        };
+        let (key, inline) = match option.split_once('=') {
+            Some((k, v)) => (k, Some(v)),
+            None => (option, None),
+        };
+        if matches!(key, "login" | "server-id") {
+            return None;
+        }
+        if !matches!(
+            key,
+            "oidc-issuer-url"
+                | "oidc-client-id"
+                | "oidc-client-secret"
+                | "oidc-extra-scope"
+                | "certificate-authority"
+                | "certificate-authority-data"
+        ) {
+            continue;
+        }
+        match inline.or_else(|| rest.next().map(String::as_str)) {
+            Some(value) => values.push((key, value.trim())),
+            None => break,
+        }
+    }
+    let last = |key: &str| {
+        values
+            .iter()
+            .rev()
+            .find(|(k, v)| *k == key && !v.is_empty())
+            .map(|(_, v)| v.to_string())
+    };
+    let issuer_url = last("oidc-issuer-url")?;
+    let extra: Vec<String> = values
+        .iter()
+        .filter(|(k, _)| *k == "oidc-extra-scope")
+        .flat_map(|(_, v)| v.split(','))
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "openid")
+        .map(String::from)
+        .collect();
+    let mut scopes: Vec<String> = if extra.is_empty() {
+        DEFAULT_OIDC_SCOPES.map(String::from).to_vec()
+    } else {
+        std::iter::once("openid".to_string()).chain(extra).collect()
+    };
+    // Без `offline_access` Dex не выдаёт refresh-токен, и вход пришлось бы повторять, когда истечёт
+    // `id_token`; kubelogin обходится без него, Glafira — обновляет токен сама (спека O5 §5.3).
+    if !scopes.iter().any(|s| s == "offline_access") {
+        scopes.push("offline_access".to_string());
+    }
+    let auth = OidcAuth {
+        issuer_url,
+        client_id: last("oidc-client-id").unwrap_or_else(|| DEFAULT_OIDC_CLIENT_ID.to_string()),
+        scopes,
+        issuer_ca_pem: None,
+    };
+    let issuer_ca = last("certificate-authority-data")
+        .map(IssuerCa::Data)
+        .or_else(|| last("certificate-authority").map(IssuerCa::File));
+    Some(OidcLogin {
+        auth,
+        client_secret: last("oidc-client-secret"),
+        issuer_ca,
+    })
+}
+
+/// Предел размера файла CA издателя.
+const MAX_ISSUER_CA_BYTES: u64 = 1024 * 1024;
+
+/// Читает файл CA: только обычный файл не больше 1 МиБ. Читается не больше предела + 1 байт
+/// (файл мог вырасти после проверки размера); тип проверяется и до открытия — открытие FIFO
+/// ждало бы писателя, — и у открытого файла (путь могли подменить между проверкой и открытием).
+fn read_ca_file(path: &Path) -> Result<String, String> {
+    use std::io::Read;
+    let regular = |m: std::fs::Metadata| {
+        if m.is_file() {
+            Ok(())
+        } else {
+            Err("not a regular file".to_string())
+        }
+    };
+    regular(std::fs::metadata(path).map_err(|e| e.to_string())?)?;
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    regular(file.metadata().map_err(|e| e.to_string())?)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_ISSUER_CA_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_ISSUER_CA_BYTES {
+        return Err("the file is larger than 1 MiB".to_string());
+    }
+    String::from_utf8(bytes).map_err(|_| "not valid UTF-8".to_string())
+}
+
+/// PEM CA издателя: данные декодируются, файл читается (относительный путь — от каталога
+/// kubeconfig `base`). Ошибка — предупреждение с путём (у данных — именем аргумента).
+fn issuer_ca_pem(ca: &IssuerCa, base: Option<&Path>) -> Result<String, LocalizedText> {
+    let (path, text) = match ca {
+        IssuerCa::Data(data) => (
+            "--certificate-authority-data".to_string(),
+            STANDARD
+                .decode(data.trim())
+                .ok()
+                .and_then(|b| String::from_utf8(b).ok())
+                .ok_or_else(|| "not valid base64".to_string()),
+        ),
+        IssuerCa::File(file) => {
+            let path = match base {
+                Some(dir) if Path::new(file).is_relative() => dir.join(file),
+                _ => PathBuf::from(file),
+            };
+            let text = read_ca_file(&path);
+            (path.display().to_string(), text)
+        }
+    };
+    text.and_then(|pem| {
+        // Общий файл с приватным ключом в предпросмотр не попадает: ни ключ, ни его текст.
+        if pem_has_private_key(&pem) {
+            return Err("the file also contains a private key".to_string());
+        }
+        pem_certificates(&pem)
+            .map(|_| pem)
+            .map_err(|_| "not a PEM certificate".to_string())
+    })
+    .map_err(|error| {
+        ltext!(
+            "errors.kubeconfig.issuerCaUnreadable",
+            "Cannot read the OIDC issuer CA {{path}}: {{error}} — the connection is imported without it; add it in the connection form",
+            path = path,
+            error = error
+        )
+    })
+}
+
+/// Вход через OIDC пользователя kubeconfig (его exec-плагин), если он есть.
+fn oidc_of(u: Option<&AuthInfo>) -> Option<OidcLogin> {
+    let exec = u?.exec.as_ref()?;
+    oidc_login(
+        exec.command.as_deref().unwrap_or_default(),
+        exec.args.as_deref().unwrap_or_default(),
+    )
+}
+
 /// Способ входа, строка запуска exec-плагина и причина, по которой контекст не импортируется.
 fn classify(
     u: Option<&AuthInfo>,
@@ -233,7 +434,36 @@ pub fn preview(
                 .trim_end_matches('/')
                 .to_string();
             let insecure = cl.and_then(|c| c.insecure_skip_tls_verify).unwrap_or(false);
-            let (auth, exec, mut unsupported) = classify(user(kc, &user_name), path.parent(), resolve);
+            let u = user(kc, &user_name);
+            let (mut auth, mut exec, mut unsupported) = classify(u, path.parent(), resolve);
+            let oidc = oidc_of(u).map(|login| {
+                let mut auth = login.auth;
+                let mut issuer_ca_warning = None;
+                match login.issuer_ca.map(|ca| issuer_ca_pem(&ca, path.parent())) {
+                    Some(Ok(pem)) => auth.issuer_ca_pem = Some(pem),
+                    Some(Err(warning)) => issuer_ca_warning = Some(warning),
+                    None => {}
+                }
+                OidcImport {
+                    auth,
+                    has_client_secret: login.client_secret.is_some(),
+                    issuer_ca_warning,
+                }
+            });
+            // Exec-плагин входа через OIDC — второй вариант: его отказ (команды нет на машине,
+            // неизвестный `apiVersion`, запрет политикой) входу через OIDC не мешает.
+            let mut exec_unsupported = None;
+            if oidc.is_some() {
+                auth = ImportAuth::Oidc;
+                exec_unsupported = unsupported.take();
+                if exec_unsupported.is_none() && !policy.allow_exec_auth {
+                    exec_unsupported = Some(ltext!(
+                        "errors.connections.execForbidden",
+                        "Connections with exec plugins are forbidden by your organization"
+                    ));
+                    exec = None;
+                }
+            }
             if cl.is_none() {
                 unsupported = Some(ltext!(
                     "errors.kubeconfig.noCluster",
@@ -266,6 +496,8 @@ pub fn preview(
                 current: kc.current_context.as_deref() == Some(nc.name.as_str()),
                 launch_fingerprint: exec.as_ref().map(crate::auth::exec::fingerprint),
                 exec,
+                oidc,
+                exec_unsupported,
                 unsupported,
             }
         })
@@ -318,6 +550,24 @@ fn mismatch(name: &str, what: &str) -> AppError {
     ))
 }
 
+/// Контекст с входом через OIDC, для которого выбран exec-плагин: импортируется как exec. Строки
+/// запуска нет — ошибка с её причиной.
+pub fn with_exec(ctx: &KubeContext) -> AppResult<KubeContext> {
+    if ctx.auth != ImportAuth::Oidc {
+        return Ok(ctx.clone());
+    }
+    if ctx.exec.is_none() {
+        return Err(match &ctx.exec_unsupported {
+            Some(reason) => AppError::localized(ErrorCode::InvalidInput, reason.clone()),
+            None => mismatch(&ctx.name, "OIDC without a launch line"),
+        });
+    }
+    Ok(KubeContext {
+        auth: ImportAuth::Exec,
+        ..ctx.clone()
+    })
+}
+
 /// Подключение из контекста `name`. Ошибка — если контекст не поддерживается или данные
 /// не читаются.
 pub fn import_context(
@@ -362,6 +612,7 @@ pub fn import_context(
     };
     let mut token = None;
     let mut client_key = None;
+    let mut oidc_client_secret = None;
     let auth = match preview.auth {
         ImportAuth::Token => {
             let u = u.ok_or_else(|| mismatch(name, "token without a user"))?;
@@ -394,6 +645,19 @@ pub fn import_context(
                 .clone()
                 .ok_or_else(|| mismatch(name, "exec without a launch line"))?,
         ),
+        ImportAuth::Oidc => {
+            let login =
+                oidc_of(u).ok_or_else(|| mismatch(name, "OIDC without kubelogin arguments"))?;
+            oidc_client_secret = login.client_secret;
+            // CA издателя прочитан предпросмотром: у `import_context` нет пути к kubeconfig.
+            AuthConfig::Oidc(OidcAuth {
+                issuer_ca_pem: preview
+                    .oidc
+                    .as_ref()
+                    .and_then(|o| o.auth.issuer_ca_pem.clone()),
+                ..login.auth
+            })
+        }
     };
     let mut profile = ConnectionProfile {
         id: preview
@@ -435,6 +699,7 @@ pub fn import_context(
         profile,
         token,
         client_key,
+        oidc_client_secret,
     })
 }
 
@@ -627,9 +892,15 @@ contexts:
         assert_eq!(by("kind-admin").auth, ImportAuth::ClientCert);
         let oidc = by("corp-oidc");
         assert_eq!(
-            (oidc.auth, oidc.unsupported.clone()),
-            (ImportAuth::Exec, None)
+            (
+                oidc.auth,
+                oidc.unsupported.clone(),
+                oidc.exec_unsupported.clone()
+            ),
+            (ImportAuth::Oidc, None, None),
+            "OIDC по умолчанию, exec-плагин — второй вариант"
         );
+        assert_eq!(oidc.oidc.as_ref().unwrap().auth.client_id, "k8s");
         let exec = oidc.exec.unwrap();
         assert_eq!(
             exec.command,
@@ -684,7 +955,25 @@ contexts:
             c.unsupported.as_ref().unwrap().key.clone()
         };
         assert_eq!(key("lab"), "errors.connections.insecureForbidden");
-        assert_eq!(key("corp-oidc"), "errors.connections.execForbidden");
+        assert_eq!(key("eks-prod"), "errors.connections.execForbidden");
+        // Запрет exec-плагинов не мешает входу через OIDC: пропадает только второй вариант.
+        let oidc = strict
+            .contexts
+            .iter()
+            .find(|c| c.name == "corp-oidc")
+            .unwrap();
+        assert_eq!(
+            (oidc.auth, oidc.unsupported.clone()),
+            (ImportAuth::Oidc, None)
+        );
+        assert_eq!(
+            oidc.exec_unsupported.as_ref().unwrap().key,
+            "errors.connections.execForbidden"
+        );
+        assert_eq!(
+            (oidc.exec.clone(), oidc.launch_fingerprint.clone()),
+            (None, None)
+        );
     }
 
     #[test]
@@ -743,11 +1032,24 @@ contexts:
 
         assert_eq!(get("no-user").unwrap().profile.auth, AuthConfig::Browser);
         let oidc = get("corp-oidc").unwrap();
-        let AuthConfig::Exec(e) = &oidc.profile.auth else {
+        assert_eq!(
+            oidc.profile.auth,
+            AuthConfig::Oidc(OidcAuth {
+                issuer_url: "https://sso.corp/realms/k8s".into(),
+                client_id: "k8s".into(),
+                scopes: DEFAULT_OIDC_SCOPES.map(String::from).to_vec(),
+                issuer_ca_pem: None,
+            })
+        );
+        assert!(oidc.token.is_none() && oidc.client_key.is_none());
+        assert!(oidc.oidc_client_secret.is_none());
+        // Выбран exec-плагин: строка запуска, как без варианта OIDC.
+        let c = p.contexts.iter().find(|c| c.name == "corp-oidc").unwrap();
+        let exec = import_context(&k, "corp-oidc", &with_exec(c).unwrap()).unwrap();
+        let AuthConfig::Exec(e) = &exec.profile.auth else {
             panic!("exec")
         };
         assert!(e.command.ends_with("kubelogin"));
-        assert!(oidc.token.is_none() && oidc.client_key.is_none());
         assert_eq!(get("evil").unwrap_err().key, "errors.exec.notAllowed");
         assert_eq!(get("preload").unwrap_err().key, "errors.exec.envForbidden");
     }
@@ -866,9 +1168,336 @@ contexts:
         }
         // Предпросмотр говорит «exec», а строки запуска в нём нет.
         let mut c = ctx("corp-oidc");
+        c.auth = ImportAuth::Exec;
         c.exec = None;
         let e = import_context(&k, "corp-oidc", &c).unwrap_err();
         assert_eq!(e.key, "errors.internal");
+    }
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn oidc_login_reads_kubelogin_arguments() {
+        // `--k=v` и `--k v`, scope повторяемый и через запятую, секрет клиента, CA издателя.
+        let OidcLogin {
+            auth,
+            client_secret: secret,
+            issuer_ca,
+        } = oidc_login(
+            "/usr/local/bin/kubectl",
+            &args(&[
+                "oidc-login",
+                "get-token",
+                "--oidc-issuer-url",
+                "https://auth.c1.example.com/",
+                "--oidc-client-id=dapp",
+                "--oidc-client-secret",
+                "s3cr3t",
+                "--oidc-extra-scope=email,groups",
+                "--oidc-extra-scope",
+                "profile",
+                "--oidc-extra-scope=offline_access",
+                "--certificate-authority=/x/ca.pem",
+            ]),
+        )
+        .unwrap();
+        assert_eq!(auth.issuer_url, "https://auth.c1.example.com/");
+        assert_eq!(auth.client_id, "dapp");
+        assert_eq!(
+            auth.scopes,
+            ["openid", "email", "groups", "profile", "offline_access"]
+        );
+        assert_eq!(secret.as_deref(), Some("s3cr3t"));
+        assert_eq!(issuer_ca, Some(IssuerCa::File("/x/ca.pem".into())));
+        assert_eq!(auth.issuer_ca_pem, None, "файл читает предпросмотр");
+
+        // Без client id и scope — значения DropApp; секрета и CA нет.
+        let login = oidc_login(
+            "kubelogin",
+            &args(&["-v", "4", "get-token", "--oidc-issuer-url=https://sso.corp"]),
+        )
+        .unwrap();
+        assert_eq!(login.auth.client_id, DEFAULT_OIDC_CLIENT_ID);
+        assert_eq!(login.auth.scopes, DEFAULT_OIDC_SCOPES);
+        assert_eq!((login.client_secret, login.issuer_ca), (None, None));
+
+        // Без `offline_access` в аргументах он добавляется: иначе Dex не выдаёт refresh-токен.
+        let login = oidc_login(
+            "kubelogin",
+            &args(&[
+                "get-token",
+                "--oidc-issuer-url=https://sso.corp",
+                "--oidc-extra-scope=email",
+                "--oidc-extra-scope=groups",
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            login.auth.scopes,
+            ["openid", "email", "groups", "offline_access"]
+        );
+
+        // CA данными важнее CA файлом, как `certificate-authority-data` в kubeconfig.
+        let login = oidc_login(
+            "kubelogin",
+            &args(&[
+                "get-token",
+                "--oidc-issuer-url=https://sso.corp",
+                "--certificate-authority",
+                "ca.pem",
+                "--certificate-authority-data=QUJD",
+            ]),
+        )
+        .unwrap();
+        assert_eq!(login.issuer_ca, Some(IssuerCa::Data("QUJD".into())));
+
+        // Не OIDC: без издателя, Azure kubelogin, другая команда или подкоманда.
+        for (command, list) in [
+            ("kubelogin", &["get-token", "--oidc-client-id=dapp"][..]),
+            (
+                "kubelogin",
+                &[
+                    "get-token",
+                    "--login",
+                    "devicecode",
+                    "--server-id",
+                    "6dae42f8",
+                    "--oidc-issuer-url=https://sso.corp",
+                ][..],
+            ),
+            (
+                "kubelogin",
+                &[
+                    "get-token",
+                    "--login=azurecli",
+                    "--oidc-issuer-url=https://sso.corp",
+                ][..],
+            ),
+            (
+                "kubectl",
+                &["oidc-login", "setup", "--oidc-issuer-url=https://sso.corp"][..],
+            ),
+            (
+                "aws",
+                &["eks", "get-token", "--oidc-issuer-url=https://sso.corp"][..],
+            ),
+        ] {
+            assert!(
+                oidc_login(command, &args(list)).is_none(),
+                "{command} {list:?}"
+            );
+        }
+    }
+
+    /// Kubeconfig от Loginapp DropApp: `kubectl oidc-login`, опечатка в `apiVersion`, kubectl на
+    /// машине нет — вход через OIDC всё равно доступен; секрет клиента в предпросмотр не попадает.
+    #[test]
+    fn dropapp_kubeconfig_imports_as_oidc_without_the_plugin() {
+        let k = kc(r#"
+clusters:
+- name: c1
+  cluster: {server: "https://api.c1.example.com:6443"}
+users:
+- name: oidc
+  user:
+    exec:
+      apiVersion: client.authentication.io/v1beta1
+      command: kubectl
+      args:
+      - oidc-login
+      - get-token
+      - --oidc-issuer-url=https://auth.c1.example.com
+      - --oidc-client-id=dapp
+      - --oidc-client-secret=Zm9vYmFy-s3cr3t
+      - --oidc-extra-scope=groups
+- name: aks
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: kubelogin
+      args: [get-token, --login, devicecode, --server-id, 6dae42f8, --oidc-issuer-url=https://sso.corp]
+contexts:
+- name: dropapp
+  context: {cluster: c1, user: oidc}
+- name: aks
+  context: {cluster: c1, user: aks}
+"#);
+        let dir = tempfile::tempdir().unwrap();
+        let p = preview(&k, dir.path(), &[], &open(), &installed);
+        let c = &p.contexts[0];
+        assert_eq!((c.auth, c.unsupported.clone()), (ImportAuth::Oidc, None));
+        let oidc = c.oidc.as_ref().unwrap();
+        assert_eq!(oidc.auth.issuer_url, "https://auth.c1.example.com");
+        assert_eq!(oidc.auth.scopes, ["openid", "groups", "offline_access"]);
+        assert!(oidc.has_client_secret);
+        assert_eq!(c.exec, None);
+        assert_eq!(
+            c.exec_unsupported.as_ref().unwrap().key,
+            "errors.exec.badApiVersion"
+        );
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(!json.contains("s3cr3t"), "{json}");
+        assert!(json.contains(r#""hasClientSecret":true"#), "{json}");
+
+        let imported = import_context(&k, "dropapp", c).unwrap();
+        assert_eq!(
+            imported.profile.auth,
+            AuthConfig::Oidc(OidcAuth {
+                issuer_url: "https://auth.c1.example.com".into(),
+                client_id: "dapp".into(),
+                scopes: vec!["openid".into(), "groups".into(), "offline_access".into()],
+                issuer_ca_pem: None,
+            })
+        );
+        assert_eq!(
+            imported.oidc_client_secret.as_deref(),
+            Some("Zm9vYmFy-s3cr3t")
+        );
+        assert!(!format!("{imported:?}").contains("s3cr3t"));
+        // Exec-плагин выбрать нельзя: причина — его собственная.
+        let e = with_exec(c).unwrap_err();
+        assert_eq!(e.key, "errors.exec.badApiVersion");
+
+        // Azure kubelogin варианта OIDC не даёт.
+        let aks = &p.contexts[1];
+        assert_eq!((aks.auth, aks.oidc.clone()), (ImportAuth::Exec, None));
+    }
+
+    /// Kubeconfig с `--certificate-authority` у `oidc-login`: относительный путь — от каталога
+    /// kubeconfig, данные — base64; нечитаемый CA вход через OIDC не отменяет — предупреждение с
+    /// путём, а подключение импортируется без CA издателя.
+    #[test]
+    fn issuer_ca_comes_from_the_oidc_login_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("dex-ca.crt"), TEST_CERT_PEM).unwrap();
+        // Общий файл с сертификатом и приватным ключом: ключ не должен попасть в предпросмотр.
+        let bundle = format!(
+            "{TEST_CERT_PEM}\n-----BEGIN PRIVATE KEY-----\nc2VjcmV0\n-----END PRIVATE KEY-----\n"
+        );
+        std::fs::write(dir.path().join("bundle.pem"), &bundle).unwrap();
+        let user = |name: &str, ca: &str| {
+            format!(
+                r#"
+- name: {name}
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1
+      command: kubectl
+      args: [oidc-login, get-token, --oidc-issuer-url=https://dex.c1.example.com, "{ca}"]"#
+            )
+        };
+        let k = kc(&format!(
+            r#"
+clusters:
+- name: c1
+  cluster: {{server: "https://api.c1.example.com:6443"}}
+users:{}{}{}{}{}{}
+contexts:
+- name: file
+  context: {{cluster: c1, user: file}}
+- name: data
+  context: {{cluster: c1, user: data}}
+- name: missing
+  context: {{cluster: c1, user: missing}}
+- name: not-pem
+  context: {{cluster: c1, user: not-pem}}
+- name: key-file
+  context: {{cluster: c1, user: key-file}}
+- name: key-data
+  context: {{cluster: c1, user: key-data}}
+"#,
+            user("file", "--certificate-authority=dex-ca.crt"),
+            user(
+                "data",
+                &format!("--certificate-authority-data={}", b64(TEST_CERT_PEM))
+            ),
+            user("missing", "--certificate-authority=missing.crt"),
+            user(
+                "not-pem",
+                &format!("--certificate-authority-data={}", b64("nope"))
+            ),
+            user("key-file", "--certificate-authority=bundle.pem"),
+            user(
+                "key-data",
+                &format!("--certificate-authority-data={}", b64(&bundle))
+            ),
+        ));
+        let path = dir.path().join("config");
+        let p = preview(&k, &path, &[], &open(), &installed);
+        let ctx = |n: &str| p.contexts.iter().find(|c| c.name == n).unwrap();
+        for name in ["file", "data"] {
+            let c = ctx(name);
+            let oidc = c.oidc.as_ref().unwrap();
+            assert_eq!(
+                oidc.auth.issuer_ca_pem.as_deref(),
+                Some(TEST_CERT_PEM),
+                "{name}"
+            );
+            assert_eq!(oidc.issuer_ca_warning, None, "{name}");
+            let imported = import_context(&k, name, c).unwrap();
+            let AuthConfig::Oidc(auth) = &imported.profile.auth else {
+                panic!("oidc")
+            };
+            assert_eq!(auth.issuer_ca_pem.as_deref(), Some(TEST_CERT_PEM), "{name}");
+        }
+        let missing = dir.path().join("missing.crt").display().to_string();
+        let bundle_path = dir.path().join("bundle.pem").display().to_string();
+        for (name, shown) in [
+            ("missing", missing.as_str()),
+            ("not-pem", "--certificate-authority-data"),
+            ("key-file", bundle_path.as_str()),
+            ("key-data", "--certificate-authority-data"),
+        ] {
+            let c = ctx(name);
+            assert_eq!(
+                (c.auth, c.unsupported.clone()),
+                (ImportAuth::Oidc, None),
+                "{name}"
+            );
+            let oidc = c.oidc.as_ref().unwrap();
+            assert_eq!(oidc.auth.issuer_ca_pem, None, "{name}");
+            let warning = oidc.issuer_ca_warning.as_ref().unwrap();
+            assert_eq!(
+                warning.key, "errors.kubeconfig.issuerCaUnreadable",
+                "{name}"
+            );
+            assert_eq!(warning.params["path"], shown, "{name}");
+            let imported = import_context(&k, name, c).unwrap();
+            let AuthConfig::Oidc(auth) = &imported.profile.auth else {
+                panic!("oidc")
+            };
+            assert_eq!(auth.issuer_ca_pem, None, "{name}");
+        }
+        let json = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            json["contexts"][2]["oidc"]["issuerCaWarning"]["key"],
+            "errors.kubeconfig.issuerCaUnreadable"
+        );
+        // Ни ключ, ни его текст не попадают в предпросмотр (в том числе в предупреждение).
+        let text = json.to_string();
+        assert!(
+            !text.contains("PRIVATE KEY") && !text.contains("c2VjcmV0"),
+            "{text}"
+        );
+    }
+
+    /// Файл CA больше 1 МиБ или не обычный файл (каталог) — то же предупреждение, без чтения.
+    #[test]
+    fn oversized_or_irregular_issuer_ca_file_is_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        // Корректный PEM-сертификат, дополненный пустыми строками сверх 1 МиБ: разбор его принял
+        // бы, отклоняет именно предел размера.
+        let big = format!("{TEST_CERT_PEM}{}", "\n".repeat(1024 * 1024));
+        assert!(pem_certificates(&big).is_ok());
+        std::fs::write(dir.path().join("big.pem"), big).unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        for file in ["big.pem", "sub"] {
+            let ca = IssuerCa::File(file.to_string());
+            let e = issuer_ca_pem(&ca, Some(dir.path())).unwrap_err();
+            assert_eq!(e.key, "errors.kubeconfig.issuerCaUnreadable", "{file}");
+        }
     }
 
     #[test]

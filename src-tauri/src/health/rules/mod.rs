@@ -48,6 +48,9 @@ pub const RULES: &[RuleDef] = &[
     rule("cluster.operatorDegraded", C, C, W),
     rule("cluster.updateFailing", C, C, W),
     rule("cluster.mcpDegraded", C, C, W),
+    rule("cluster.componentFailed", C, C, W),
+    rule("cluster.dropappNodeNotReady", W, W, I),
+    rule("cluster.ingressTlsNotReady", W, W, I),
     rule("node.notReady", C, C, W),
     rule("node.pressure", C, W, W),
     rule("node.requestsHigh", W, W, I),
@@ -194,7 +197,7 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), n);
-        assert_eq!(n, 37, "все правила §8.2");
+        assert_eq!(n, 40, "все правила §8.2");
     }
 
     #[test]
@@ -205,6 +208,9 @@ mod tests {
             ("cluster.operatorDegraded", "ККП"),
             ("cluster.updateFailing", "ККП"),
             ("cluster.mcpDegraded", "ККП"),
+            ("cluster.componentFailed", "ККП"),
+            ("cluster.dropappNodeNotReady", "ППИ"),
+            ("cluster.ingressTlsNotReady", "ППИ"),
             ("node.notReady", "ККП"),
             ("node.pressure", "КПП"),
             ("node.requestsHigh", "ППИ"),

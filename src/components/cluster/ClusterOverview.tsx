@@ -3,7 +3,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
-import type { ClusterOverview, OpenShiftOverview, OperatorRow, Part } from "../../api/types";
+import type { ClusterOverview, ComponentRow, DropAppOverview, OpenShiftOverview, OperatorRow, Part } from "../../api/types";
 import { useRefetchInterval } from "../../lib/tabActive";
 import { Hint } from "../common/Hint";
 import { CheckBar } from "../health/CheckBar";
@@ -16,8 +16,9 @@ import { RefreshControls, useRefreshInterval } from "../common/RefreshControls";
 /** Какие части обзора скрыты правами (у них ошибка FORBIDDEN). */
 function hiddenByRights(o: ClusterOverview): boolean {
   const parts: (Part<unknown> | null | undefined)[] = [o.readyz, o.nodes, o.ingressClasses, o.gatewayClasses, o.projects];
-  const os = o.platformDetails;
-  if (os) parts.push(os.clusterVersion, os.infrastructure, os.consoleUrl, os.operators, os.machineConfigPools);
+  const d = o.platformDetails;
+  if (d?.kind === "openshift") parts.push(d.clusterVersion, d.infrastructure, d.consoleUrl, d.operators, d.machineConfigPools);
+  if (d?.kind === "dropapp") parts.push(d.metadata, d.components, d.nodes, d.ingressTls);
   return parts.some((p) => p?.error?.code === "FORBIDDEN");
 }
 
@@ -45,7 +46,10 @@ async function openConsole(url: string): Promise<void> {
 
 const flag = (v: boolean | null) => (v === true ? "✅" : v === false ? "⚠" : "—");
 
-/** Обзор кластера (спец. §6.2): API-сервер, ноды, проекты, классы Ingress и Gateway, у OpenShift — обновления, операторы, пулы машин. */
+/**
+ * Обзор кластера (спец. §6.2): API-сервер, ноды, проекты, классы Ingress и Gateway, у OpenShift — обновления, операторы,
+ * пулы машин, у DropApp — версия, компоненты, узлы DropApp и сертификаты ingress.
+ */
 export function ClusterOverviewView({ connectionId }: { connectionId: string }) {
   const { t } = useTranslation();
   const [interval, setRefreshInterval] = useRefreshInterval();
@@ -140,7 +144,8 @@ export function ClusterOverviewView({ connectionId }: { connectionId: string }) 
               </PartView>
             </>
           )}
-          {o.platformDetails && <OpenShiftSection connectionId={connectionId} os={o.platformDetails} />}
+          {o.platformDetails?.kind === "openshift" && <OpenShiftSection connectionId={connectionId} os={o.platformDetails} />}
+          {o.platformDetails?.kind === "dropapp" && <DropAppSection d={o.platformDetails} />}
           {hiddenByRights(o) && <p className="muted">{t("cluster.overview.hiddenByRights")}</p>}
         </>
       )}
@@ -274,6 +279,119 @@ function OpenShiftSection({ connectionId, os }: { connectionId: string; os: Open
                 </li>
               ))}
             </ul>
+          )
+        }
+      </PartView>
+    </>
+  );
+}
+
+function ComponentList({ rows }: { rows: ComponentRow[] }) {
+  const { t } = useTranslation();
+  return (
+    <table>
+      <thead>
+        <tr>
+          <th>{t("cluster.dropapp.kind")}</th>
+          <th>{t("cluster.dropapp.name")}</th>
+          <th>{t("cluster.dropapp.status")}</th>
+          <th>{t("cluster.dropapp.retry")}</th>
+          <th>{t("cluster.dropapp.event")}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r) => (
+          <tr key={`${r.kind}/${r.namespace ?? ""}/${r.name}`}>
+            <td>{r.kind}</td>
+            <td>
+              <code>{r.name}</code> <span className="muted">{r.namespace ?? ""}</span>
+            </td>
+            <td className="problem">{r.status ?? "—"}</td>
+            <td>{r.retry ?? "—"}</td>
+            <td>{r.event ?? ""}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+/** Часть обзора DropApp: версия и имя кластера, компоненты и инструменты, узлы DropApp и сертификаты ingress не в норме. Нет CRD — «—». */
+function DropAppSection({ d }: { d: DropAppOverview }) {
+  const { t } = useTranslation();
+  return (
+    <>
+      <h4>DropApp</h4>
+      <PartView part={d.metadata}>
+        {(m) => (
+          <dl className="facts">
+            <dt>{t("cluster.overview.version")}</dt>
+            <dd>{m.version ?? "—"}</dd>
+            <dt>{t("cluster.dropapp.clusterName")}</dt>
+            <dd>{m.clusterName ?? "—"}</dd>
+          </dl>
+        )}
+      </PartView>
+      <h4>{t("cluster.dropapp.components")}</h4>
+      <PartView part={d.components}>
+        {(c) =>
+          c.total === 0 ? (
+            <p className="muted">—</p>
+          ) : (
+            <>
+              <p>
+                {c.problems.length === 0
+                  ? t("cluster.dropapp.componentsOk", { total: c.total })
+                  : t("cluster.dropapp.problems", { bad: c.problems.length, total: c.total })}
+              </p>
+              {c.problems.length > 0 && <ComponentList rows={c.problems} />}
+            </>
+          )
+        }
+      </PartView>
+      <h4>{t("cluster.dropapp.nodes")}</h4>
+      <PartView part={d.nodes}>
+        {(n) =>
+          n.total === 0 ? (
+            <p className="muted">—</p>
+          ) : (
+            <>
+              <p>{n.problems.length === 0 ? t("cluster.dropapp.nodesOk", { total: n.total }) : t("cluster.dropapp.notReady", { bad: n.problems.length, total: n.total })}</p>
+              {n.problems.length > 0 && (
+                <ul>
+                  {n.problems.map((p) => (
+                    <li key={p.name} className="problem">
+                      <code>{p.name}</code> {p.status ?? ""}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
+          )
+        }
+      </PartView>
+      <h4>{t("cluster.dropapp.ingressTls")}</h4>
+      <PartView part={d.ingressTls}>
+        {(tls) =>
+          tls.total === 0 ? (
+            <p className="muted">—</p>
+          ) : (
+            <>
+              <p>
+                {tls.problems.length === 0
+                  ? t("cluster.dropapp.ingressTlsOk", { total: tls.total })
+                  : t("cluster.dropapp.notReady", { bad: tls.problems.length, total: tls.total })}
+              </p>
+              {tls.problems.length > 0 && (
+                <ul>
+                  {tls.problems.map((p) => (
+                    <li key={`${p.namespace ?? ""}/${p.name}`} className="problem">
+                      <code>{p.namespace ? `${p.namespace}/${p.name}` : p.name}</code> {[p.reason, p.message].filter(Boolean).join(": ")}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
           )
         }
       </PartView>

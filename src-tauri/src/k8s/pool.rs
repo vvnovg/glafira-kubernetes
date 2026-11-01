@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+use kube::config::AuthInfo;
 use secrecy::{ExposeSecret, SecretString};
 use tokio::sync::oneshot;
 
@@ -23,9 +24,10 @@ pub struct Connected {
     pub info: ConnectionInfo,
     /// Таймаут одного запроса (из профиля).
     pub timeout: Duration,
-    /// Когда истекают учётные данные exec-плагина (`expirationTimestamp`).
+    /// Когда истекают учётные данные exec-плагина (`expirationTimestamp`) или `id_token` входа
+    /// через OIDC (`exp`).
     pub expires_at: Option<SystemTime>,
-    /// Токен подключения (вход по токену, через браузер или токен exec-плагина): его получают
+    /// Токен подключения (вход по токену, через браузер или OIDC, токен exec-плагина): его получают
     /// Thanos Querier OpenShift и свой источник метрик с авторизацией «токен подключения».
     bearer: Option<SecretString>,
     /// Выбранный источник метрик (спец. §7.1): живёт, пока живёт клиент.
@@ -200,16 +202,17 @@ impl ClientPool {
 }
 
 /// Новое подключение: клиент из профиля (keychain — на blocking-потоке), учётные данные
-/// exec-плагина (`cancel` прерывает его ожидание) и `probe`.
+/// exec-плагина (`cancel` прерывает его ожидание) или токен OIDC (обновляется, если истекает)
+/// и `probe`.
 pub async fn open(
     profile: ConnectionProfile,
     secrets: Arc<dyn SecretStore>,
     cancel: oneshot::Receiver<()>,
 ) -> AppResult<Connected> {
     let timeout = request_timeout(&profile);
-    let p = profile.clone();
+    let (p, store) = (profile.clone(), secrets.clone());
     let mut config =
-        tokio::task::spawn_blocking(move || build_kube_config(&p, secrets.as_ref(), &process_env))
+        tokio::task::spawn_blocking(move || build_kube_config(&p, store.as_ref(), &process_env))
             .await
             .map_err(|e| AppError::internal_with(e.to_string()))??;
     // Токен нужен адаптеру платформы, чтобы узнать срок (OpenShift: `useroauthaccesstokens`).
@@ -226,6 +229,20 @@ pub async fn open(
         expires_at = cred.expires_at;
         apply_exec_credential(&mut config, &cred);
     }
+    // Срок токена OIDC — `exp` из него самого: адаптеру платформы спрашивать не нужно.
+    let mut oidc_expires_at = None;
+    if matches!(profile.auth, AuthConfig::Oidc(_)) {
+        let tokens = crate::auth::oidc::credential_for(&profile, secrets).await?;
+        oidc_expires_at = tokens.expires_at;
+        expires_at = tokens
+            .expires_at
+            .and_then(|t| u64::try_from(t).ok())
+            .map(|t| SystemTime::UNIX_EPOCH + Duration::from_secs(t));
+        config.auth_info = AuthInfo {
+            token: Some(SecretString::from(tokens.id_token)),
+            ..Default::default()
+        };
+    }
     // Токен для источника метрик — после учётных данных exec-плагина: у плагина он свой.
     let bearer = config.auth_info.token.clone();
     let client = kube::Client::try_from(config).map_err(|e| from_kube(&e))?;
@@ -237,6 +254,9 @@ pub async fn open(
                 token.expose_secret(),
             )
             .await;
+    }
+    if oidc_expires_at.is_some() {
+        info.token_expires_at = oidc_expires_at;
     }
     Ok(Connected::new(client, info, timeout, expires_at).with_bearer(bearer))
 }
@@ -341,6 +361,24 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(e.key, "errors.connections.tokenMissing");
+    }
+
+    #[tokio::test]
+    async fn oidc_without_tokens_asks_to_sign_in_without_network() {
+        let mut p = crate::storage::profile::sample_profile("a");
+        p.auth = AuthConfig::Oidc(crate::storage::profile::sample_oidc());
+        let (_keep, cancel) = oneshot::channel();
+        let e = open(p, Arc::new(crate::secrets::MemoryStore::default()), cancel)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (
+                crate::error::ErrorCode::SessionExpired,
+                "errors.connections.oidcLoginRequired"
+            )
+        );
     }
 
     #[tokio::test]

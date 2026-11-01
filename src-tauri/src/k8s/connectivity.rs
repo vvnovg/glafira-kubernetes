@@ -127,13 +127,13 @@ pub async fn tcp_probe(host: &str, port: u16, limit: Duration) -> AppResult<Stri
     .with_details(last.unwrap_or_else(|| format!("{host}: no addresses"))))
 }
 
-/// Платформа, версия API-сервера и найденные группы API OpenShift и Gateway API
+/// Платформа, версия API-сервера и найденные группы API OpenShift, DropApp и Gateway API
 /// (названия видов не переводятся).
 fn discovery_message(d: &Discovered) -> LocalizedText {
     let g = &d.api_groups;
     let found: Vec<&str> = [
         (g.routes, "Route"),
-        (g.projects, "Project"),
+        (g.projects || g.dropapp_projects, "Project"),
         (g.deployment_configs, "DeploymentConfig"),
         (g.gateway_api, "Gateway API"),
     ]
@@ -246,7 +246,7 @@ pub async fn check_cluster(
             return None;
         }
     };
-    match list_project_names(client, limit, discovered.api_groups.projects).await {
+    match list_project_names(client, limit, discovered.api_groups.project_source()).await {
         Ok((names, more)) => {
             let count = if more {
                 format!("{}+", names.len())
@@ -360,6 +360,7 @@ fn exec_message(
 
 /// Проверяет и несохранённый профиль: секреты берутся из `secrets` (поверх keychain — форма).
 /// У exec-плагина после TCP идёт шаг `exec` — запуск плагина; `cancel` прерывает его ожидание.
+/// Вход через OIDC берёт действующий сохранённый `id_token`; его нет — не пройден шаг «Вход».
 pub async fn test_connection(
     p: &ConnectionProfile,
     secrets: Arc<dyn SecretStore>,
@@ -426,6 +427,21 @@ pub async fn test_connection(
         }
     }
 
+    if matches!(p.auth, AuthConfig::Oidc(_)) {
+        match crate::auth::oidc::stored_credential(p, &secrets).await {
+            Ok(tokens) => {
+                config.auth_info = kube::config::AuthInfo {
+                    token: Some(secrecy::SecretString::from(tokens.id_token)),
+                    ..Default::default()
+                };
+            }
+            Err(e) => {
+                steps.push(failed_step("auth", e));
+                return report(steps);
+            }
+        }
+    }
+
     let connection_token = config.auth_info.token.clone();
     let client = match kube::Client::try_from(config) {
         Ok(c) => c,
@@ -442,6 +458,7 @@ pub async fn test_connection(
         reader: crate::k8s::read::ReadClient::new(client, request_timeout(p)),
         profile: p.clone(),
         platform: discovered.platform,
+        api_groups: discovered.api_groups,
         connection_token,
         metrics_token,
     };
@@ -616,6 +633,106 @@ mod tests {
             steps[3].message.key,
             "messages.connectionTest.projectsManual"
         );
+    }
+
+    /// Группы API в ответе `/apis`: обычный Kubernetes и заданные группы версии `v1alpha1`/`v1`.
+    fn groups_reply(extra: &[&str]) -> (u16, serde_json::Value) {
+        let mut groups = vec![
+            serde_json::json!({"name": "apps", "versions": [{"groupVersion": "apps/v1", "version": "v1"}]}),
+        ];
+        groups.extend(extra.iter().map(|gv| {
+            let (name, version) = gv.split_once('/').unwrap();
+            serde_json::json!({"name": name,
+                "versions": [{"groupVersion": gv, "version": version}]})
+        }));
+        (
+            200,
+            serde_json::json!({"kind": "APIGroupList", "apiVersion": "v1", "groups": groups}),
+        )
+    }
+
+    /// Шаг «Проекты» читает проекты OpenShift, иначе DropApp, иначе namespace.
+    #[tokio::test]
+    async fn projects_step_takes_openshift_then_dropapp_then_namespaces() {
+        const OPENSHIFT: &str = "/apis/project.openshift.io/v1/projects";
+        const DROPAPP: &str = "/apis/projects.dropapp.ru/v1alpha1/projects";
+        const NAMESPACES: &str = "/api/v1/namespaces";
+        let cases: [(&[&str], &str); 3] = [
+            (
+                &["config.dropapp.ru/v1alpha1", "projects.dropapp.ru/v1alpha1"],
+                DROPAPP,
+            ),
+            (
+                &["project.openshift.io/v1", "projects.dropapp.ru/v1alpha1"],
+                OPENSHIFT,
+            ),
+            (&[], NAMESPACES),
+        ];
+        for (extra, expected) in cases {
+            let reply = groups_reply(extra);
+            let (client, server) = mock_client(move |s| match s.path() {
+                "/apis" => reply.clone(),
+                DROPAPP => (
+                    200,
+                    serde_json::json!({"apiVersion": "projects.dropapp.ru/v1alpha1",
+                    "kind": "ProjectList", "metadata": {}, "items": [
+                        {"metadata": {"name": "dev"}}, {"metadata": {"name": "test"}},
+                        {"metadata": {"name": "prod"}}
+                    ]}),
+                ),
+                NAMESPACES => (
+                    200,
+                    serde_json::json!({"apiVersion": "v1", "kind": "NamespaceList", "metadata": {},
+                        "items": [{"metadata": {"name": "default"}}]}),
+                ),
+                _ => fixtures::openshift(s),
+            });
+            let mut steps = Vec::new();
+            assert!(
+                check_cluster(&mut steps, &client, &sample_profile("a"))
+                    .await
+                    .is_some(),
+                "{expected}"
+            );
+            let count = match expected {
+                OPENSHIFT => "2",
+                DROPAPP => "3",
+                _ => "1",
+            };
+            assert_eq!(steps[3].message.params["count"], count, "{expected}");
+            drop(client);
+            let seen = server.await.unwrap();
+            let listed: Vec<_> = [OPENSHIFT, DROPAPP, NAMESPACES]
+                .into_iter()
+                .filter(|p| seen.iter().any(|s| s.path() == *p))
+                .collect();
+            assert_eq!(listed, [expected]);
+        }
+    }
+
+    /// Без права на список проектов DropApp — та же причина, что у OpenShift.
+    #[tokio::test]
+    async fn forbidden_dropapp_projects_fail_like_openshift() {
+        let reply = groups_reply(&["config.dropapp.ru/v1alpha1", "projects.dropapp.ru/v1alpha1"]);
+        let (client, _server) = mock_client(move |s| match s.path() {
+            "/apis" => reply.clone(),
+            "/apis/projects.dropapp.ru/v1alpha1/projects" => status(
+                403,
+                "Forbidden",
+                r#"projects.projects.dropapp.ru is forbidden: User "u" cannot list resource "projects" in API group "projects.dropapp.ru" at the cluster scope"#,
+            ),
+            _ => fixtures::openshift(s),
+        });
+        let mut steps = Vec::new();
+        assert!(
+            check_cluster(&mut steps, &client, &sample_profile("a"))
+                .await
+                .is_none()
+        );
+        let e = steps[3].error.as_ref().unwrap();
+        assert_eq!(e.key, "errors.k8s.forbiddenCluster");
+        assert_eq!(e.params["verb"], "list");
+        assert_eq!(e.params["resource"], "projects");
     }
 
     /// Шаги проверки, когда сервер отвечает `answer` на любой запрос.
@@ -894,6 +1011,7 @@ mod tests {
             reader: crate::k8s::read::ReadClient::new(client, Duration::from_secs(5)),
             profile: sample_profile("a"),
             platform: crate::platform::detect(&Default::default()),
+            api_groups: Default::default(),
             connection_token: None,
             metrics_token: None,
         }
@@ -970,6 +1088,95 @@ mod tests {
         let (_keep, cancel) = oneshot::channel();
         let r = test_connection(&p, Arc::new(secrets), &PolicyStatus::default(), cancel).await;
         assert_eq!(names(&r.steps), [("config", true), ("tcp", false)]);
+    }
+
+    /// Вход через OIDC при проверке: сохранённый `id_token`, если он действует ещё больше минуты;
+    /// иначе шаг «Вход» не пройден с просьбой войти — без обновления, без записи в keychain и без
+    /// анонимного запроса.
+    #[tokio::test]
+    async fn oidc_uses_a_valid_stored_token_or_asks_to_sign_in() {
+        use crate::secrets::{OIDC_ID_TOKEN, OIDC_REFRESH_TOKEN};
+        use base64::Engine;
+        let jwt = |exp: i64| {
+            let b64 = |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s);
+            format!(
+                "{}.{}.sig",
+                b64(r#"{"alg":"RS256"}"#),
+                b64(&format!(r#"{{"exp":{exp}}}"#))
+            )
+        };
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Сервер принимает соединения и сразу закрывает их: TLS дальше не пройдёт.
+        tokio::spawn(async move {
+            while let Ok((s, _)) = listener.accept().await {
+                drop(s);
+            }
+        });
+        let mut p = sample_profile("a");
+        p.api_url = format!("https://127.0.0.1:{port}");
+        p.proxy = crate::storage::profile::ProxyConfig::None;
+        p.auth = AuthConfig::Oidc(crate::storage::profile::sample_oidc());
+        let run = |store: Arc<MemoryStore>| {
+            let p = p.clone();
+            async move {
+                let (_keep, cancel) = oneshot::channel();
+                test_connection(&p, store, &PolicyStatus::default(), cancel).await
+            }
+        };
+
+        // Действующий токен: дальше TCP — к TLS.
+        let store = Arc::new(MemoryStore::default());
+        store
+            .set(&secret_key("a", OIDC_ID_TOKEN), &jwt(now + 600))
+            .unwrap();
+        let r = run(store).await;
+        assert_eq!(
+            names(&r.steps),
+            [("config", true), ("tcp", true), ("tls", false)]
+        );
+
+        // Истекает в ближайшую минуту, есть refresh_token: проверка его не тратит.
+        let store = Arc::new(MemoryStore::default());
+        let expiring = jwt(now + 30);
+        store
+            .set(&secret_key("a", OIDC_ID_TOKEN), &expiring)
+            .unwrap();
+        store
+            .set(&secret_key("a", OIDC_REFRESH_TOKEN), "r1")
+            .unwrap();
+        let r = run(store.clone()).await;
+        assert_eq!(
+            names(&r.steps),
+            [("config", true), ("tcp", true), ("auth", false)]
+        );
+        assert_eq!(
+            r.steps[2].error.as_ref().unwrap().key,
+            "errors.connections.oidcLoginRequired"
+        );
+        assert_eq!(
+            store
+                .get(&secret_key("a", OIDC_ID_TOKEN))
+                .unwrap()
+                .as_deref(),
+            Some(expiring.as_str())
+        );
+        assert_eq!(
+            store
+                .get(&secret_key("a", OIDC_REFRESH_TOKEN))
+                .unwrap()
+                .as_deref(),
+            Some("r1")
+        );
+
+        // Токена нет.
+        let r = run(Arc::new(MemoryStore::default())).await;
+        assert_eq!(names(&r.steps)[2], ("auth", false));
+        assert_eq!(
+            r.steps[2].error.as_ref().unwrap().key,
+            "errors.connections.oidcLoginRequired"
+        );
     }
 
     /// Шаг `exec` идёт после TCP: плагин — скрипт `sh` с именем `kubectl`.

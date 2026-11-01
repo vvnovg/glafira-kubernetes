@@ -288,7 +288,7 @@ https://habr.com/ru/articles/905816). Knative, своих объектов servi
 |---|---|---|
 | **Токен** | `sha256~…` (OAuth OpenShift) или токен ServiceAccount | заголовок `Authorization: Bearer`; в логах маскируется |
 | **Вход через браузер** | — | discovery `GET <api>/.well-known/oauth-authorization-server` → Authorization Code + PKCE (S256) с OAuthClient `openshift-cli-client` и loopback-redirect `http://127.0.0.1:<случайный порт>/callback` (как `oc login --web`); ожидание до 5 мин, отмена — `cancel_oauth_login`. Если клиента нет или он отклоняет redirect — фолбэк: открыть `/oauth/token/request` в системном браузере, пользователь вставляет токен |
-| **Вход через OIDC** | издатель, client id (по умолчанию `dapp`), секрет клиента (keychain), scopes | `<издатель>/.well-known/openid-configuration` → Authorization Code + PKCE (S256) с redirect на фиксированный порт `http://localhost:8000`, если занят — `:18000` (адреса kubelogin, Dex сверяет порт); в API-сервер уходит `id_token`, обновление — по `refresh_token` (оба в keychain); параметры — из аргументов `oidc-login` при импорте kubeconfig или вручную; спека O5 §5 |
+| **Вход через OIDC** | издатель, client id (по умолчанию `dapp`), секрет клиента (keychain), scopes, CA издателя (PEM, если сертификат издателя выпущен не CA подключения) | `<издатель>/.well-known/openid-configuration` → Authorization Code + PKCE (S256) с redirect на фиксированный порт `http://localhost:8000`, если занят — `:18000` (адреса kubelogin, Dex сверяет порт); в API-сервер уходит `id_token`, обновление — по `refresh_token` за минуту до `exp` (оба в keychain); параметры — из аргументов `oidc-login` при импорте kubeconfig или вручную; спека O5 §5 |
 | **Клиентский сертификат** | сертификат + ключ PEM (например, kubeconfig установщика) | ключ — в keychain |
 | **Exec-плагин** | команда, аргументы и переменные окружения (обычно из kubeconfig) | только из списка разрешённых (ниже); Glafira запускает команду напрямую, без оболочки, с таймаутом и отменой, и держит учётные данные до `expirationTimestamp` (не через `kube`: там запуск блокирующий, без таймаута, а текст ошибки содержит переменные окружения) |
 | **Импорт kubeconfig** | файл (по умолчанию `~/.kube/config` и `$KUBECONFIG`), выбор контекстов | §5.5 |
@@ -447,9 +447,9 @@ oc. В тексте отказа — только имя ключа: значе�
   ClusterOperators: список `Degraded` / `Unavailable` / `Progressing`; MachineConfigPools: деградировавшие и
   обновляющиеся. Чего у кластера нет (404: на ROSA HCP нет группы `machineconfiguration.openshift.io`, у выключенной
   консоли нет её объекта), то «—», а не ошибка; запросы к ним пока не гейтятся по группам API.
-- `dropapp`: версия и имя кластера (`ClusterMetadata`), `Component` и `Tool` (всего и проблемные: `failed`,
-  `upgrading`, с последним событием `Warning`), `DropAppNode` не `ready`, `IngressTLS` с `Ready` ≠ `True`; чего нет
-  (404) — пустая часть (спека O5 §7.1).
+- `dropapp`: версия и имя кластера (`ClusterMetadata`), `Component` и `Tool` (всего и проблемные: `failed`, `error`,
+  `upgrading`, с последним событием `Warning` у первых 20), `DropAppNode` не `ready`, `IngressTLS` с `Ready` ≠ `True`
+  (без условия `Ready` — не проблема); чего нет (404) — пустая часть (спека O5 §7.1).
 - Без прав — то, что доступно (`/version`, число проектов), и пояснение «Остальное скрыто правами».
 - Кнопка «Проверить» и строка последней проверки (§8).
 
@@ -583,8 +583,8 @@ workloads, событий, PVC, нод, обзора проекта и дере�
    - `dropapp` — сначала VictoriaMetrics через прокси API-сервера:
      `dapp-monitoring/vmselect-victoria-metrics-k8s-stack:8481` с префиксом пути `/select/0/prometheus` (его
      `ReadClient` тоже пропускает), затем кандидаты `kubernetes`. Изоляции по namespace у VictoriaMetrics нет: 403 —
-     «нет прав на прокси к VictoriaMetrics», дальше — свой URL профиля (ingress `metrics.<cluster>.<домен>` или
-     `vmauth`, если их включил администратор).
+     общий текст прокси с адресом vmselect и правом `get services/proxy`, дальше — свой URL профиля (ingress
+     `metrics.<cluster>.<домен>` или `vmauth`, если их включил администратор).
 2. **Свой URL Thanos или Prometheus** из профиля (например, tenancy-endpoint, открытый администраторами) с выбранной
    авторизацией. Tenancy-endpoint без `namespace` отвечает 400, поэтому свой Thanos проверяется с `namespace` проекта
    пользователя: первого избранного, иначе первого из заданных вручную, иначе первого проекта кластера (без проектов —
@@ -859,7 +859,12 @@ request и limit, пометки и нарушения ограничений; �
 Подключение или проект, которых нет, и подключение или проект без доступа дают одинаковую ошибку `not_allowed`.
 Изменение флагов, отзыв клиента и выключение действуют сразу. Крейт сверяет подключение и проект с
 `Backend::scope` до каждого чтения, бэкенд приложения — ещё раз по профилю; кластер и ноды видны модели, если их может
-читать пользователь, а проекты и всё в них — только из `llmNamespaces`.
+читать пользователь, а проекты и всё в них — только из `llmNamespaces`. Исключение — объекты платформы: ClusterOperators,
+ClusterVersion и MachineConfigPools OpenShift (они и так cluster-scoped) и объекты платформы DropApp (`ClusterMetadata`,
+`Component`/`Tool`, `DropAppNode`, `IngressTLS`, последние Warning-события компонентов, в том числе из namespaces
+`dapp-*`) видны в `get_cluster_overview` и `health_check` независимо от `llmNamespaces`: здоровье платформы — не проект,
+а `dapp-*` пользователи редко разрешают. Тексты из кластера в них маскируются встроенными шаблонами, как прочие; чтение
+по-прежнему ограничено RBAC пользователя.
 
 | Уровень | Что видит модель |
 |---|---|

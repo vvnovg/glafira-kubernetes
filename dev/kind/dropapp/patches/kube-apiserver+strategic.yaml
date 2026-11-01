@@ -1,0 +1,6 @@
+# Патч kubeadm для статического пода API-сервера: имя издателя Dex разрешается в адрес ноды (Dex слушает на ней
+# порт 5556 с hostNetwork). kubelet дописывает hostAliases в /etc/hosts пода с hostNetwork.
+spec:
+  hostAliases:
+    - ip: 127.0.0.1
+      hostnames: [dex.glafira-dropapp.localhost]

@@ -12,7 +12,7 @@ vi.mock("../../api/client", async (importOriginal) => {
 
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api } from "../../api/client";
-import type { AppError, ClusterOverview, ConnectionInfo, OpenShiftOverview, OperatorRow } from "../../api/types";
+import type { AppError, ClusterOverview, ConnectionInfo, DropAppOverview, OpenShiftOverview, OperatorRow } from "../../api/types";
 import { ClusterOverviewView } from "./ClusterOverview";
 
 const forbidden = (resource: string): AppError => ({
@@ -68,12 +68,37 @@ const OPENSHIFT: ClusterOverview = {
 /** Обзор OpenShift с изменёнными частями блока OpenShift. */
 const withDetails = (patch: Partial<OpenShiftOverview>): ClusterOverview => ({ ...OPENSHIFT, platformDetails: { ...DETAILS, ...patch } });
 
+/** Блок DropApp обзора; тесты меняют его части через `withDropApp`. */
+const DROPAPP_DETAILS: DropAppOverview = {
+  kind: "dropapp",
+  metadata: { data: { clusterName: "prod-msk", version: "5.1.2" } },
+  components: {
+    data: {
+      total: 12,
+      problems: [
+        { kind: "Tool", name: "grafana", namespace: null, status: "failed", retry: 2, event: "InstallFailed: helm install failed" },
+        { kind: "Component", name: "cert-manager", namespace: "dapp-system", status: "upgrading", retry: null, event: null },
+      ],
+    },
+  },
+  nodes: { data: { total: 3, problems: [{ name: "worker-2", status: "NotReady" }] } },
+  ingressTls: { data: { total: 2, problems: [{ name: "apps", namespace: "dapp-system", reason: "CertificateExpired", message: "certificate expired on 2026-10-30" }] } },
+};
+
+/** Обзор DropApp с изменёнными частями блока DropApp. */
+const withDropApp = (patch: Partial<DropAppOverview>): ClusterOverview => ({
+  ...OPENSHIFT,
+  platform: { kind: "dropapp", distribution: null, version: "5.1.2", label: "DropApp 5.1.2" },
+  ingressClasses: { data: [{ name: "nginx", controller: "k8s.io/ingress-nginx", default: true }] },
+  platformDetails: { ...DROPAPP_DETAILS, ...patch },
+});
+
 const INFO: ConnectionInfo = {
   user: "dev1",
   groups: [],
   serverVersion: "v1.31.6",
   platform: OPENSHIFT.platform,
-  apiGroups: { routes: true, projects: true, deploymentConfigs: true, gatewayApi: false },
+  apiGroups: { routes: true, projects: true, dropappProjects: false, deploymentConfigs: true, gatewayApi: false },
   capabilities: { listProjects: true, listNodes: true, listAllPods: false, readClusterOperators: true, readClusterVersion: true },
   tokenExpiresAt: null,
 };
@@ -159,6 +184,80 @@ describe("ClusterOverviewView", () => {
     expect(fact("Инфраструктура")).toHaveTextContent("Infrastructure is broken");
     expect(within(fact("Веб-консоль")).getByRole("button")).toBeInTheDocument();
     expect(screen.queryByText("Остальное скрыто правами.")).not.toBeInTheDocument();
+  });
+
+  describe("DropApp", () => {
+    /** Строка списка под заголовком `heading`. */
+    const after = (heading: string) => screen.getByRole("heading", { name: heading }).nextElementSibling as HTMLElement;
+
+    it("версия и имя кластера, проблемные компоненты с RETRY и событием, узлы и сертификаты ingress", async () => {
+      vi.mocked(api.getClusterOverview).mockResolvedValue(withDropApp({}));
+      renderWithClient(<ClusterOverviewView connectionId="c1" />);
+      expect(await screen.findByRole("heading", { name: "DropApp" })).toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "OpenShift" })).not.toBeInTheDocument();
+      expect(fact("Версия")).toHaveTextContent("5.1.2");
+      expect(fact("Имя кластера")).toHaveTextContent("prod-msk");
+      expect(after("Компоненты и инструменты")).toHaveTextContent("Не в норме: 2 из 12.");
+      const grafana = screen.getByText("grafana").closest("tr") as HTMLElement;
+      expect(grafana).toHaveTextContent("Tool");
+      expect(grafana).toHaveTextContent("failed");
+      expect(within(grafana).getByText("2")).toBeInTheDocument();
+      expect(grafana).toHaveTextContent("InstallFailed: helm install failed");
+      const cm = screen.getByText("cert-manager").closest("tr") as HTMLElement;
+      expect(cm).toHaveTextContent("dapp-system");
+      expect(cm).toHaveTextContent("upgrading");
+      expect(after("Узлы DropApp")).toHaveTextContent("Не готовы: 1 из 3.");
+      expect(screen.getByText("worker-2").closest("li")).toHaveTextContent("worker-2 NotReady");
+      expect(after("Сертификаты ingress (IngressTLS)")).toHaveTextContent("Не готовы: 1 из 2.");
+      expect(screen.getByText("dapp-system/apps").closest("li")).toHaveTextContent("CertificateExpired: certificate expired on 2026-10-30");
+      expect(screen.queryByText("Остальное скрыто правами.")).not.toBeInTheDocument();
+    });
+
+    it("всё в норме — итог без списков", async () => {
+      vi.mocked(api.getClusterOverview).mockResolvedValue(
+        withDropApp({
+          components: { data: { total: 12, problems: [] } },
+          nodes: { data: { total: 3, problems: [] } },
+          ingressTls: { data: { total: 2, problems: [] } },
+        }),
+      );
+      renderWithClient(<ClusterOverviewView connectionId="c1" />);
+      await screen.findByRole("heading", { name: "DropApp" });
+      expect(after("Компоненты и инструменты")).toHaveTextContent("Компонентов и инструментов: 12, все в норме.");
+      expect(after("Узлы DropApp")).toHaveTextContent("Узлов: 3, все готовы.");
+      expect(after("Сертификаты ingress (IngressTLS)")).toHaveTextContent("Сертификатов: 2, все готовы.");
+      expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    });
+
+    it("без CRD (пустые части) — «—», не ошибка", async () => {
+      vi.mocked(api.getClusterOverview).mockResolvedValue(
+        withDropApp({
+          metadata: { data: { clusterName: null, version: null } },
+          components: { data: { total: 0, problems: [] } },
+          nodes: { data: { total: 0, problems: [] } },
+          ingressTls: { data: { total: 0, problems: [] } },
+        }),
+      );
+      renderWithClient(<ClusterOverviewView connectionId="c1" />);
+      await screen.findByRole("heading", { name: "DropApp" });
+      expect(fact("Версия")).toHaveTextContent(/^—$/);
+      expect(fact("Имя кластера")).toHaveTextContent(/^—$/);
+      for (const heading of ["Компоненты и инструменты", "Узлы DropApp", "Сертификаты ingress (IngressTLS)"]) {
+        expect(after(heading)).toHaveTextContent(/^—$/);
+      }
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+
+    it("без прав — «—» с причиной и пояснение, остальные части видны", async () => {
+      vi.mocked(api.getClusterOverview).mockResolvedValue(withDropApp({ components: { error: forbidden("components") }, ingressTls: { error: forbidden("ingresstlses") } }));
+      renderWithClient(<ClusterOverviewView connectionId="c1" />);
+      await screen.findByRole("heading", { name: "DropApp" });
+      expect(screen.getByText("— Нет прав: list components на уровне кластера")).toBeInTheDocument();
+      expect(screen.getByText("— Нет прав: list ingresstlses на уровне кластера")).toBeInTheDocument();
+      expect(fact("Версия")).toHaveTextContent("5.1.2");
+      expect(screen.getByText("worker-2")).toBeInTheDocument();
+      expect(screen.getByText("Остальное скрыто правами.")).toBeInTheDocument();
+    });
   });
 
   describe("адрес консоли", () => {

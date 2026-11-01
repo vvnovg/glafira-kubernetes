@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, toAppError } from "../../api/client";
-import type { AppError, AuthConfig, AuthMethod, CaMode, ConnectionProfile, Environment, ExecAuth, LlmAccess, MetricsAuth, MetricsConfig, MetricsMode, ProxyMode, SecretsInput, TestReport } from "../../api/types";
+import type { AppError, AuthConfig, AuthMethod, CaMode, ConnectionProfile, Environment, ExecAuth, LlmAccess, MetricsAuth, MetricsConfig, MetricsMode, OidcAuth, ProxyMode, SecretsInput, TestReport } from "../../api/types";
 import { tr } from "../../i18n/text";
 import { restartSessions } from "../../lib/afterSignIn";
 import { useWorkspace } from "../../state/workspace";
@@ -10,12 +10,12 @@ import { ErrorBanner } from "../common/ErrorBanner";
 import { Hint } from "../common/Hint";
 import { formatArgs, formatEnv, hasSecretValues, launchKey, launchLine, maskArgs, maskEnv, needsExecConfirmation, newExec, parseArgs, parseEnv } from "./exec";
 import { STANDARD_MASK_FIELDS } from "./maskFields";
-import { formatNamespaces, newMetricsEndpoint, parseNamespaces, withAuthMethod, withCaMode, withMetricsMode, withProxyMode } from "./profile";
+import { formatNamespaces, newMetricsEndpoint, newOidc, parseNamespaces, withAuthMethod, withCaMode, withMetricsMode, withProxyMode } from "./profile";
 import { ProjectListInput } from "./ProjectListInput";
 import { folderPaths } from "./tree/folderTree";
 
 const ENVIRONMENTS: Environment[] = ["local", "dev", "test", "stage", "prod"];
-const AUTH_METHODS: AuthMethod[] = ["browser", "token", "clientCert", "exec"];
+const AUTH_METHODS: AuthMethod[] = ["browser", "oidc", "token", "clientCert", "exec"];
 const CA_MODES: CaMode[] = ["system", "pem", "insecure"];
 const PROXY_MODES: ProxyMode[] = ["system", "none", "url"];
 const LLM_ACCESS: LlmAccess[] = ["off", "metadata", "logs"];
@@ -52,6 +52,12 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
   const [execEnv, setExecEnv] = useState(formatEnv(initialExec.env));
   // Значения секретных аргументов и переменных скрыты (поля только для чтения), пока не нажата «Показать».
   const [secretsShown, setSecretsShown] = useState(() => !hasSecretValues(initialExec));
+  // Вход через OIDC: scopes редактируются строкой через пробел; секрет клиента скрыт, пока не нажата «Показать».
+  const initialOidc: OidcAuth = initial.auth.method === "oidc" ? initial.auth : newOidc();
+  const [lastOidc, setLastOidc] = useState(initialOidc);
+  const [oidcScopes, setOidcScopes] = useState(initialOidc.scopes.join(" "));
+  const [oidcSecret, setOidcSecret] = useState("");
+  const [oidcSecretShown, setOidcSecretShown] = useState(false);
   // Подтверждение привязано к строке: хранится ключ подтверждённой строки. Правка строки не обнуляет ключ, а делает производный флаг ложным (ключ не совпадает); обнуляет его только смена способа входа.
   const [confirmedExec, setConfirmedExec] = useState<string | null>(null);
   const [report, setReport] = useState<TestReport | null>(null);
@@ -88,8 +94,15 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
   const keepPlaceholder = isNew ? "" : t("connections.form.secretKeep");
 
   const update = (patch: Partial<ConnectionProfile>) => setProfile((p) => ({ ...p, ...patch }));
-  const currentAuth = (): AuthConfig =>
-    profile.auth.method === "exec" ? { ...profile.auth, args: parseArgs(execArgs), env: parseEnv(execEnv) } : profile.auth;
+  const currentAuth = (): AuthConfig => {
+    if (profile.auth.method === "exec") return { ...profile.auth, args: parseArgs(execArgs), env: parseEnv(execEnv) };
+    if (profile.auth.method === "oidc") {
+      // Пустой CA издателя не отправляется: его нет.
+      const { issuerCaPem, ...oidc } = profile.auth;
+      return { ...oidc, scopes: oidcScopes.split(/\s+/).filter(Boolean), ...(issuerCaPem?.trim() && { issuerCaPem }) };
+    }
+    return profile.auth;
+  };
   const current = (): ConnectionProfile => ({
     ...profile,
     auth: currentAuth(),
@@ -105,6 +118,8 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
     clientKey: profile.auth.method === "clientCert" && clientKey.trim() ? clientKey : null,
     // Без своего источника токена метрик нет: Rust удаляет сохранённый сам.
     ...(metrics.mode !== "auto" && { metricsToken: metrics.auth === "bearer" && metricsToken.trim() ? metricsToken : null }),
+    // Другой способ входа секрета клиента не использует: Rust удаляет сохранённый сам.
+    ...(profile.auth.method === "oidc" && { oidcClientSecret: oidcSecret.trim() ? oidcSecret : null }),
   });
   // Строку запуска подтверждает человек: новая, изменённая или неподтверждённая требует галочки.
   const execKey = profile.auth.method === "exec" ? launchKey(currentAuth() as ExecAuth) : null;
@@ -257,8 +272,9 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
           onChange={(e) => {
             if (auth.method === "clientCert") setLastCert(auth.certificatePem);
             if (auth.method === "exec") setLastExec(currentAuth() as ExecAuth);
+            if (auth.method === "oidc") setLastOidc(currentAuth() as OidcAuth);
             setConfirmedExec(null);
-            update({ auth: withAuthMethod(auth, e.target.value as AuthMethod, lastCert, lastExec) });
+            update({ auth: withAuthMethod(auth, e.target.value as AuthMethod, lastCert, lastExec, lastOidc) });
           }}
         >
           {AUTH_METHODS.map((m) => (
@@ -269,6 +285,49 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
         </select>
 
         {auth.method === "browser" && <p className="muted full">{t("connections.form.browserNote")}</p>}
+
+        {auth.method === "oidc" && (
+          <>
+            <label htmlFor="cf-oidc-issuer">{t("connections.form.oidc.issuerUrl")}</label>
+            <input
+              id="cf-oidc-issuer"
+              placeholder="https://auth.cluster.example.com"
+              value={auth.issuerUrl}
+              onChange={(e) => update({ auth: { ...auth, issuerUrl: e.target.value } })}
+            />
+            <label htmlFor="cf-oidc-client">{t("connections.form.oidc.clientId")}</label>
+            <input id="cf-oidc-client" value={auth.clientId} onChange={(e) => update({ auth: { ...auth, clientId: e.target.value } })} />
+            <label htmlFor="cf-oidc-secret">{t("connections.form.oidc.clientSecret")}</label>
+            <span className="toolbar">
+              <input
+                id="cf-oidc-secret"
+                type={oidcSecretShown ? "text" : "password"}
+                autoComplete="off"
+                placeholder={keepPlaceholder}
+                value={oidcSecret}
+                onChange={(e) => setOidcSecret(e.target.value)}
+              />
+              {!oidcSecretShown && (
+                <button type="button" className="link" onClick={() => setOidcSecretShown(true)}>
+                  {t("connections.form.oidc.showSecret")}
+                </button>
+              )}
+            </span>
+            <label htmlFor="cf-oidc-scopes">{t("connections.form.oidc.scopes")}</label>
+            <input id="cf-oidc-scopes" value={oidcScopes} onChange={(e) => setOidcScopes(e.target.value)} />
+            <label htmlFor="cf-oidc-ca">{t("connections.form.oidc.issuerCaPem")}</label>
+            <textarea
+              id="cf-oidc-ca"
+              rows={4}
+              placeholder="-----BEGIN CERTIFICATE-----"
+              value={auth.issuerCaPem ?? ""}
+              onChange={(e) => update({ auth: { ...auth, issuerCaPem: e.target.value } })}
+            />
+            <p className="muted full">{t("connections.form.oidc.issuerCaHint")}</p>
+            <p className="muted full">{t("connections.form.oidc.hint")}</p>
+            <p className="muted full">{t("connections.form.oidcNote")}</p>
+          </>
+        )}
 
         {auth.method === "token" && (
           <>

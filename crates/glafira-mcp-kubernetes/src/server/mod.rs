@@ -29,6 +29,7 @@ pub const INSTRUCTIONS: &str = "\
 Glafira is a gateway to Kubernetes clusters (including OpenShift and Platform V DropApp) that the \
 user explicitly allowed. It reads metadata: the cluster overview, nodes, projects (namespaces), \
 workloads, pods, events, quotas, network objects and the resource usage from the cluster metrics. \
+On DropApp, Routes and DeploymentConfigs are not available: use Ingress and Deployment. \
 Nothing in the clusters can be changed through it: propose a change with propose_change — the user \
 sees it next to the object in Glafira, opens it as a pre-filled form and applies or rejects it \
 themselves. Do not wait for the result in the same call; check the user's decision later with \

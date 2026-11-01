@@ -1,8 +1,9 @@
 //! Платформа кластера (спец. §4.3) — то, что у вендоров устроено по-разному и из групп API
-//! не выводится. Определяется чистой функцией `detect` по discovery при подключении; ручного выбора
-//! в профиле нет. Какие объекты читать и показывать, решают группы API (`ApiGroups`), а не
-//! платформа. Поведение, которое зависит от платформы, — в её адаптере (`adapters`): обзор кластера
-//! и срок токена; автопоиск метрик добавит этап O3.
+//! не выводится: `openshift`, `dropapp` (Platform V DropApp) и любой другой `kubernetes`.
+//! Определяется чистой функцией `detect` по discovery при подключении; ручного выбора в профиле нет.
+//! Какие объекты читать и показывать, решают группы API (`ApiGroups`), а не платформа. Поведение,
+//! которое зависит от платформы, — в её адаптере (`adapters`): обзор кластера и срок токена;
+//! автопоиск метрик выбирается по платформе в `metrics::discovery`.
 
 pub mod adapters;
 
@@ -12,7 +13,9 @@ use serde::Serialize;
 #[serde(rename_all = "lowercase")]
 pub enum PlatformKind {
     Openshift,
-    /// Любой другой Kubernetes; Platform V DropApp — тоже, пока нет его адаптера (этап O5).
+    /// Platform V DropApp (СберТех) 3.x и новее — кластеры с группой `config.dropapp.ru`.
+    Dropapp,
+    /// Любой другой Kubernetes.
     Kubernetes,
 }
 
@@ -58,7 +61,8 @@ impl Distribution {
     }
 }
 
-/// Что кластер сообщил о себе: группы API, `/version`, версия ClusterVersion и метки ноды.
+/// Что кластер сообщил о себе: группы API, `/version`, версия ClusterVersion или ClusterMetadata
+/// и метки ноды.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Discovery {
     /// `group/version` всех групп API из `/apis`, например `route.openshift.io/v1`.
@@ -68,6 +72,8 @@ pub struct Discovery {
     /// `status.desired.version` объекта ClusterVersion OpenShift, если он читается:
     /// `4.18.3`, `4.15.0-0.okd-2024-03-10-010116`.
     pub cluster_version: Option<String>,
+    /// `spec.dappVersion` первого объекта ClusterMetadata DropApp, если он читается: `5.1.2`.
+    pub dropapp_version: Option<String>,
     /// Имена меток первой ноды, если ноды читаются.
     pub node_labels: Vec<String>,
 }
@@ -95,6 +101,9 @@ pub struct ApiGroups {
     pub routes: bool,
     /// `project.openshift.io` — проекты вместо списка namespace.
     pub projects: bool,
+    /// `projects.dropapp.ru` (DropApp 5.x) — проекты вместо списка namespace, если нет
+    /// `project.openshift.io`.
+    pub dropapp_projects: bool,
     /// `apps.openshift.io` — DeploymentConfig.
     pub deployment_configs: bool,
     /// `gateway.networking.k8s.io/v1` — Gateway API (Gateway, HTTPRoute, GRPCRoute).
@@ -106,11 +115,54 @@ impl ApiGroups {
         Self {
             routes: d.has_group("route.openshift.io"),
             projects: d.has_group("project.openshift.io"),
+            dropapp_projects: d.has_group("projects.dropapp.ru"),
             deployment_configs: d.has_group("apps.openshift.io"),
             gateway_api: d
                 .group_versions
                 .iter()
                 .any(|gv| gv == "gateway.networking.k8s.io/v1"),
+        }
+    }
+
+    /// Откуда берётся список проектов: проекты OpenShift, иначе DropApp, иначе namespace.
+    pub fn project_source(&self) -> ProjectSource {
+        if self.projects {
+            ProjectSource::Openshift
+        } else if self.dropapp_projects {
+            ProjectSource::Dropapp
+        } else {
+            ProjectSource::Namespaces
+        }
+    }
+}
+
+/// Источник списка проектов (спец. §4.3, O5 §4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectSource {
+    /// `projects.project.openshift.io/v1`.
+    Openshift,
+    /// `projects.projects.dropapp.ru/v1alpha1`: проекция namespace, имя проекта — имя namespace;
+    /// пользователь видит только свои проекты.
+    Dropapp,
+    /// `namespaces`.
+    Namespaces,
+}
+
+impl ProjectSource {
+    /// Группа API списка — для проверки права.
+    pub fn group(self) -> &'static str {
+        match self {
+            ProjectSource::Openshift => "project.openshift.io",
+            ProjectSource::Dropapp => "projects.dropapp.ru",
+            ProjectSource::Namespaces => "",
+        }
+    }
+
+    /// Ресурс списка — для проверки права и текста отказа.
+    pub fn resource(self) -> &'static str {
+        match self {
+            ProjectSource::Openshift | ProjectSource::Dropapp => "projects",
+            ProjectSource::Namespaces => "namespaces",
         }
     }
 }
@@ -120,10 +172,12 @@ impl ApiGroups {
 pub struct PlatformInfo {
     pub kind: PlatformKind,
     pub distribution: Option<Distribution>,
-    /// Версия платформы «major.minor»: OpenShift — из ClusterVersion (если он читается),
-    /// Kubernetes — из `/version`.
+    /// Версия платформы: OpenShift — «major.minor» из ClusterVersion (если он читается);
+    /// DropApp — версия из ClusterMetadata как есть (`5.1.2`), без неё — «major.minor» Kubernetes;
+    /// Kubernetes — «major.minor» из `/version`.
     pub version: Option<String>,
-    /// Название в интерфейсе и MCP: «OpenShift 4.18», «OKD 4.15», «Kubernetes 1.31 (EKS)».
+    /// Название в интерфейсе и MCP: «OpenShift 4.18», «OKD 4.15», «DropApp 5.1.2»,
+    /// «DropApp (Kubernetes 1.29)», «Kubernetes 1.31 (EKS)».
     pub label: String,
 }
 
@@ -167,7 +221,7 @@ fn distribution(d: &Discovery) -> Option<Distribution> {
 }
 
 /// Платформа по discovery (спец. §4.3). Признаки проверяются по порядку: группа
-/// `config.openshift.io` → `openshift`; признак DropApp — этап O5; иначе `kubernetes`.
+/// `config.openshift.io` → `openshift`; `config.dropapp.ru` → `dropapp`; иначе `kubernetes`.
 pub fn detect(d: &Discovery) -> PlatformInfo {
     if d.has_group("config.openshift.io") {
         let full = d.cluster_version.as_deref().unwrap_or("");
@@ -183,6 +237,25 @@ pub fn detect(d: &Discovery) -> PlatformInfo {
         };
         return PlatformInfo {
             kind: PlatformKind::Openshift,
+            distribution: None,
+            version,
+            label,
+        };
+    }
+    if d.has_group("config.dropapp.ru") {
+        let (version, label) = match &d.dropapp_version {
+            Some(v) => (Some(v.clone()), format!("DropApp {v}")),
+            None => {
+                let k8s = major_minor(&d.git_version);
+                let label = match &k8s {
+                    Some(v) => format!("DropApp (Kubernetes {v})"),
+                    None => "DropApp".to_string(),
+                };
+                (k8s, label)
+            }
+        };
+        return PlatformInfo {
+            kind: PlatformKind::Dropapp,
             distribution: None,
             version,
             label,
@@ -223,6 +296,11 @@ mod tests {
         "apps.openshift.io/v1",
         "oauth.openshift.io/v1",
     ];
+    const DROPAPP: &[&str] = &[
+        "config.dropapp.ru/v1alpha1",
+        "nodes.dropapp.ru/v1alpha1",
+        "projects.dropapp.ru/v1alpha1",
+    ];
 
     fn snapshot(extra: &[&str], git_version: &str) -> Discovery {
         Discovery {
@@ -240,6 +318,15 @@ mod tests {
         let mut okd = snapshot(OPENSHIFT, "v1.28.7+6e2789b");
         okd.cluster_version = Some("4.15.0-0.okd-2024-03-10-010116".into());
         let ocp_no_cv = snapshot(OPENSHIFT, "v1.31.6");
+        let mut dapp = snapshot(DROPAPP, "v1.29.10");
+        dapp.dropapp_version = Some("5.1.2".into());
+        let dapp_no_meta = snapshot(DROPAPP, "v1.29.10");
+        let mut both = snapshot(
+            &["config.openshift.io/v1", "config.dropapp.ru/v1alpha1"],
+            "v1.31.6",
+        );
+        both.cluster_version = Some("4.18.3".into());
+        both.dropapp_version = Some("5.1.2".into());
         let mut aks = snapshot(&[], "v1.30.5");
         aks.node_labels = vec![
             "kubernetes.azure.com/cluster".into(),
@@ -254,6 +341,27 @@ mod tests {
                 PlatformKind::Openshift,
                 None,
                 "OpenShift",
+            ),
+            (
+                "DropApp",
+                dapp,
+                PlatformKind::Dropapp,
+                None,
+                "DropApp 5.1.2",
+            ),
+            (
+                "DropApp без ClusterMetadata",
+                dapp_no_meta,
+                PlatformKind::Dropapp,
+                None,
+                "DropApp (Kubernetes 1.29)",
+            ),
+            (
+                "обе группы: OpenShift важнее",
+                both,
+                PlatformKind::Openshift,
+                None,
+                "OpenShift 4.18",
             ),
             (
                 "Kubernetes",
@@ -360,12 +468,60 @@ mod tests {
             ApiGroups {
                 routes: true,
                 projects: true,
+                dropapp_projects: false,
                 deployment_configs: true,
                 gateway_api: false,
             }
         );
+        assert_eq!(
+            ApiGroups::of(&snapshot(DROPAPP, "v1.29.10")),
+            ApiGroups {
+                dropapp_projects: true,
+                ..Default::default()
+            }
+        );
         let beta_only = snapshot(&["gateway.networking.k8s.io/v1beta1"], "v1.29.0");
         assert!(!ApiGroups::of(&beta_only).gateway_api, "нужна версия v1");
+    }
+
+    /// Список проектов: OpenShift, иначе DropApp, иначе namespace (спец. O5 §4).
+    #[test]
+    fn project_source_by_api_groups() {
+        let cases = [
+            (
+                ApiGroups::of(&snapshot(OPENSHIFT, "v1.31.6")),
+                ProjectSource::Openshift,
+            ),
+            (
+                ApiGroups::of(&snapshot(DROPAPP, "v1.29.10")),
+                ProjectSource::Dropapp,
+            ),
+            (
+                ApiGroups {
+                    projects: true,
+                    dropapp_projects: true,
+                    ..Default::default()
+                },
+                ProjectSource::Openshift,
+            ),
+            (ApiGroups::default(), ProjectSource::Namespaces),
+        ];
+        for (groups, source) in cases {
+            assert_eq!(groups.project_source(), source, "{groups:?}");
+        }
+        assert_eq!(
+            [
+                ProjectSource::Openshift,
+                ProjectSource::Dropapp,
+                ProjectSource::Namespaces
+            ]
+            .map(|s| (s.group(), s.resource())),
+            [
+                ("project.openshift.io", "projects"),
+                ("projects.dropapp.ru", "projects"),
+                ("", "namespaces")
+            ]
+        );
     }
 
     #[test]
@@ -386,6 +542,19 @@ mod tests {
             serde_json::to_value(&p).unwrap(),
             serde_json::json!({"kind": "openshift", "distribution": null, "version": null,
                 "label": "OpenShift"})
+        );
+        let mut d = snapshot(&["config.dropapp.ru/v1alpha1"], "v1.29.10");
+        d.dropapp_version = Some("5.1.2".into());
+        assert_eq!(
+            serde_json::to_value(detect(&d)).unwrap(),
+            serde_json::json!({"kind": "dropapp", "distribution": null, "version": "5.1.2",
+                "label": "DropApp 5.1.2"})
+        );
+        d.dropapp_version = None;
+        assert_eq!(
+            serde_json::to_value(detect(&d)).unwrap(),
+            serde_json::json!({"kind": "dropapp", "distribution": null, "version": "1.29",
+                "label": "DropApp (Kubernetes 1.29)"})
         );
     }
 }

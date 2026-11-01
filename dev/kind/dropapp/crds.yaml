@@ -1,0 +1,100 @@
+# CRD объектов DropApp, которые читает Glafira (src-tauri/src/k8s/dropapp.rs): имена ресурсов — константы оттуда,
+# версии v1alpha1. Схема не проверяет поля (x-kubernetes-preserve-unknown-fields), статус — подресурс: его пишет
+# up.sh. Область (Cluster/Namespaced) документация DropApp не называет — здесь выбрана так, как её читает приложение
+# (списком по всем namespace). projects.dropapp.ru у DropApp — агрегированный API dapp-apiserver с фильтрацией по
+# RBAC; здесь — обычный CRD, пользователь без прав на список проектов получает 403.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: clustermetadatas.config.dropapp.ru
+spec:
+  group: config.dropapp.ru
+  scope: Cluster
+  names: { plural: clustermetadatas, singular: clustermetadata, kind: ClusterMetadata }
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources: { status: {} }
+      schema:
+        openAPIV3Schema: { type: object, x-kubernetes-preserve-unknown-fields: true }
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: components.config.dropapp.ru
+spec:
+  group: config.dropapp.ru
+  scope: Cluster
+  names: { plural: components, singular: component, kind: Component }
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources: { status: {} }
+      schema:
+        openAPIV3Schema: { type: object, x-kubernetes-preserve-unknown-fields: true }
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: tools.config.dropapp.ru
+spec:
+  group: config.dropapp.ru
+  scope: Cluster
+  names: { plural: tools, singular: tool, kind: Tool }
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources: { status: {} }
+      schema:
+        openAPIV3Schema: { type: object, x-kubernetes-preserve-unknown-fields: true }
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: dropappnodes.nodes.dropapp.ru
+spec:
+  group: nodes.dropapp.ru
+  scope: Cluster
+  names: { plural: dropappnodes, singular: dropappnode, kind: DropAppNode }
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources: { status: {} }
+      schema:
+        openAPIV3Schema: { type: object, x-kubernetes-preserve-unknown-fields: true }
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: ingresstlses.tls.dropapp.ru
+spec:
+  group: tls.dropapp.ru
+  scope: Namespaced
+  names: { plural: ingresstlses, singular: ingresstls, kind: IngressTLS }
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources: { status: {} }
+      schema:
+        openAPIV3Schema: { type: object, x-kubernetes-preserve-unknown-fields: true }
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: projects.projects.dropapp.ru
+spec:
+  group: projects.dropapp.ru
+  scope: Cluster
+  names: { plural: projects, singular: project, kind: Project }
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources: { status: {} }
+      schema:
+        openAPIV3Schema: { type: object, x-kubernetes-preserve-unknown-fields: true }

@@ -14,8 +14,12 @@ pub async fn list_projects(
     let profile = state.connections.get(&connection_id)?;
     state
         .read(&connection_id, |c| async move {
-            crate::k8s::projects::list_projects(&c.reader(), c.info.api_groups.projects, &profile)
-                .await
+            crate::k8s::projects::list_projects(
+                &c.reader(),
+                c.info.api_groups.project_source(),
+                &profile,
+            )
+            .await
         })
         .await
 }

@@ -593,7 +593,7 @@ async fn cluster_overview_and_the_rights_of_a_service_account() {
     );
     let mut profile = import(&kubeconfig_path().unwrap(), "dev-token").0;
     profile.manual_namespaces = vec![NS.into()];
-    let p = projects::list_projects(&r, dev.info.api_groups.projects, &profile)
+    let p = projects::list_projects(&r, dev.info.api_groups.project_source(), &profile)
         .await
         .unwrap();
     assert_eq!(p.error.unwrap().code, ErrorCode::Forbidden);

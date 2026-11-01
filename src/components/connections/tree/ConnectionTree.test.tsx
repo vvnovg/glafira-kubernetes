@@ -599,7 +599,7 @@ describe("ConnectionTree", () => {
         path: "/home/u/.kube/config",
         contexts: [
           { name: "dev", cluster: "c", server: "https://api.dev:6443", user: "u", namespace: null, auth: "token",
-            insecure: false, current: true, exec: null, unsupported: null, existingId: null },
+            insecure: false, current: true, exec: null, oidc: null, execUnsupported: null, unsupported: null, existingId: null },
         ],
       });
       vi.mocked(api.applyKubeconfigImport).mockResolvedValue([{ ...newProfile(), id: "k", name: "dev" }]);
@@ -609,7 +609,7 @@ describe("ConnectionTree", () => {
       await user.click(within(menu).getByRole("menuitem", { name: "Импорт из kubeconfig сюда…" }));
       const dialog = await screen.findByRole("dialog", { name: "Импорт из kubeconfig" });
       await user.click(await within(dialog).findByRole("button", { name: "Импортировать 1 контекст" }));
-      expect(api.applyKubeconfigImport).toHaveBeenCalledWith("/home/u/.kube/config", ["dev"], "b", []);
+      expect(api.applyKubeconfigImport).toHaveBeenCalledWith("/home/u/.kube/config", ["dev"], "b", [], []);
       await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
       expect(screen.getByRole("status")).toHaveTextContent("Импортировано 1 подключение");
     });

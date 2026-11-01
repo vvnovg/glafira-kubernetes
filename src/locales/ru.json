@@ -74,6 +74,7 @@
       "badNamespace": "«{{name}}» — недопустимое имя проекта: строчные латинские буквы, цифры и «-»",
       "timeoutTooSmall": "Таймауты должны быть не меньше 1000 мс",
       "loginRequired": "Войдите в кластер: кнопка «Войти через браузер»",
+      "oidcLoginRequired": "Войдите в кластер: кнопка «Войти через OIDC»",
       "tokenMissing": "Для подключения не сохранён токен — вставьте токен",
       "clientKeyMissing": "Для подключения не сохранён ключ клиентского сертификата — добавьте ключ (PEM)",
       "insecureForbidden": "Подключения без проверки TLS-сертификата запрещены вашей организацией",
@@ -136,6 +137,21 @@
       "badTokenResponse": "OAuth-сервер вернул неожиданный ответ",
       "browser": "Не удалось открыть браузер: {{error}}"
     },
+    "oidc": {
+      "badIssuerUrl": "Неверный адрес издателя OIDC «{{url}}»: укажите https://хост[/путь]",
+      "clientIdMissing": "Укажите client ID OIDC",
+      "openidScopeMissing": "В scopes OIDC должен быть openid",
+      "noMetadata": "Издатель OIDC {{url}} не вернул конфигурацию OpenID — проверьте адрес издателя",
+      "insecureEndpoint": "Провайдер OIDC {{url}} указывает небезопасный (http) адрес",
+      "issuerMismatch": "Адрес издателя не совпадает: провайдер сообщает «{{actual}}», в подключении — «{{expected}}»",
+      "portsBusy": "Порты {{first}} и {{last}} заняты — закройте kubelogin или программу, которая их держит",
+      "providerError": "OIDC-провайдер отклонил вход: {{reason}}",
+      "badTokenResponse": "OIDC-провайдер вернул неожиданный ответ",
+      "noIdToken": "OIDC-провайдер не вернул ID-токен — проверьте, что в scopes есть openid",
+      "nonceMismatch": "ID-токен от OIDC-провайдера относится не к этому входу — войдите снова",
+      "issuerCaInvalid": "CA издателя OIDC должен быть в формате PEM (-----BEGIN CERTIFICATE-----)",
+      "issuerCaUntrusted": "Сертификат издателя OIDC {{url}} не доверен — добавьте CA издателя (PEM) в подключение"
+    },
     "exec": {
       "commandMissing": "Укажите команду exec-плагина",
       "commandNotAbsolute": "Укажите полный путь к «{{command}}» — кнопка «Найти»",
@@ -163,7 +179,8 @@
       "fileUnreadable": "Не удалось прочитать {{path}} из kubeconfig: {{error}}",
       "badBase64": "Данные сертификата или ключа в kubeconfig — не base64",
       "noContext": "Контекст «{{name}}» не найден в kubeconfig",
-      "noDefault": "Kubeconfig по умолчанию не найден — выберите файл"
+      "noDefault": "Kubeconfig по умолчанию не найден — выберите файл",
+      "issuerCaUnreadable": "Не удалось прочитать CA издателя OIDC {{path}}: {{error}} — подключение импортируется без него, добавьте CA в форме подключения"
     },
     "watch": {
       "cronJobPods": "Поды CronJob читаются списком, а не через watch"
@@ -253,6 +270,8 @@
     "import": {
       "addressChanged": "«{{name}}»: адрес API меняется с {{from}} на {{to}}. Сохранённые учётные данные (токен, ключ или подтверждённый exec-плагин) будут отправлены на новый адрес.",
       "proxyChanged": "«{{name}}»: меняются настройки прокси. Сохранённые учётные данные (токен, ключ или подтверждённый exec-плагин) пойдут через новый прокси.",
+      "oidcChanged": "«{{name}}»: меняется издатель OIDC, client id или CA издателя. Сохранённые токены входа и секрет клиента будут удалены — войдите заново.",
+      "oidcDropped": "«{{name}}»: подключение больше не входит через OIDC. Сохранённые токены входа и секрет клиента будут удалены.",
       "tlsChanged": "«{{name}}»: меняются настройки проверки сертификата (CA или имя сервера TLS). Сохранённые учётные данные (токен, ключ или подтверждённый exec-плагин) будут использоваться с новыми настройками."
     },
     "metrics": {
@@ -287,13 +306,13 @@
       "test": "Проверяет по шагам: адрес, TLS, вход, платформу и проекты. Несохранённые поля тоже проверяются.",
       "llmAccess": "Что читает LLM-ассистент по MCP. Метаданные: объекты, статусы, события — без значений env, ConfigMap и Secret. С логами: ещё логи подов и значения env и ConfigMap после маскировки. Выключен: ничего.",
       "llmScope": "Проекты, которые может читать LLM; пустой список — ни одного проекта. Кластер и ноды видны, если их можете читать вы. Настройка остаётся на этом компьютере: экспорт её не пишет.",
-      "metrics": "Автоматически: Thanos Querier у OpenShift, Prometheus через API-сервер у остальных, затем metrics.k8s.io. Свой — адрес Thanos или Prometheus. В экспорт не попадает.",
+      "metrics": "Автоматически: Thanos Querier у OpenShift, VictoriaMetrics у DropApp, Prometheus через API-сервер у остальных, затем metrics.k8s.io. Свой — адрес Thanos или Prometheus. В экспорт не попадает.",
       "metricsAuth": "Токен подключения — токен этого подключения. Свой токен хранится в системном хранилище секретов. Токен уходит только по https.",
       "mask": "Список заменяет стандартный. В экспорт не попадает: каждый пользователь решает сам."
     },
     "cluster": {
-      "platform": "Определяется по группам API и версии: OpenShift или Kubernetes с дистрибутивом (EKS, GKE, AKS, Rancher, Deckhouse, k3s, RKE2).",
-      "apiGroups": "Что есть в кластере сверх обычного Kubernetes: Route, проекты и DeploymentConfig (OpenShift), Gateway API. От этого зависит, какие объекты показываются.",
+      "platform": "Определяется по группам API и версии: OpenShift, Platform V DropApp или Kubernetes с дистрибутивом (EKS, GKE, AKS, Rancher, Deckhouse, k3s, RKE2).",
+      "apiGroups": "Что есть в кластере сверх обычного Kubernetes: Route, проекты и DeploymentConfig (OpenShift), проекты DropApp, Gateway API. От этого зависит, какие объекты показываются.",
       "readyz": "Проверки <code>/readyz</code> API-сервера. Их может читать любой пользователь; непройденная проверка называет часть сервера, которая не готова."
     },
     "kubeconfig": {
@@ -334,11 +353,23 @@
       "authMethod": "Способ входа",
       "auth": {
         "browser": "Браузер (OAuth OpenShift)",
+        "oidc": "Вход через OIDC (Dex)",
         "token": "Токен",
         "clientCert": "Клиентский сертификат",
         "exec": "Exec-плагин"
       },
       "browserNote": "После сохранения войдите на вкладке подключения кнопкой «Войти через браузер».",
+      "oidcNote": "После сохранения войдите на вкладке подключения кнопкой «Войти через OIDC».",
+      "oidc": {
+        "issuerUrl": "Issuer URL",
+        "clientId": "Client ID",
+        "clientSecret": "Секрет клиента",
+        "scopes": "Scopes",
+        "showSecret": "Показать",
+        "hint": "Значения есть в kubeconfig, который выдаёт Loginapp DropApp",
+        "issuerCaPem": "CA издателя (PEM)",
+        "issuerCaHint": "Нужен, если сертификат Dex выпущен другим CA, чем API-сервер (часто — CA ingress)"
+      },
       "token": "Токен",
       "certificate": "Сертификат (PEM)",
       "clientKey": "Ключ (PEM)",
@@ -456,6 +487,7 @@
     "session": {
       "title": "Войдите снова",
       "loginBrowser": "Войти через браузер",
+      "loginOidc": "Войти через OIDC",
       "waitingBrowser": "Ожидание входа в браузере…",
       "cancelLogin": "Отменить",
       "loginExec": "Запустить exec-плагин снова",
@@ -505,6 +537,22 @@
       "progressing": "Обновляется",
       "degraded": "Деградировал",
       "message": "Сообщение"
+    },
+    "dropapp": {
+      "clusterName": "Имя кластера",
+      "components": "Компоненты и инструменты",
+      "componentsOk": "Компонентов и инструментов: {{total}}, все в норме.",
+      "problems": "Не в норме: {{bad}} из {{total}}.",
+      "kind": "Вид",
+      "name": "Имя",
+      "status": "Статус",
+      "retry": "Повторов",
+      "event": "Последнее предупреждение",
+      "nodes": "Узлы DropApp",
+      "nodesOk": "Узлов: {{total}}, все готовы.",
+      "notReady": "Не готовы: {{bad}} из {{total}}.",
+      "ingressTls": "Сертификаты ingress (IngressTLS)",
+      "ingressTlsOk": "Сертификатов: {{total}}, все готовы."
     },
     "nodes": {
       "open": "Ноды",
@@ -684,8 +732,12 @@
       "token": "токен",
       "clientCert": "клиентский сертификат",
       "browser": "вход через браузер",
-      "exec": "exec-плагин"
+      "exec": "exec-плагин",
+      "oidc": "вход через OIDC"
     },
+    "signInChoice": "Способ входа",
+    "useOidc": "Вход через браузер (OIDC)",
+    "useExec": "exec-плагин",
     "apply_one": "Импортировать {{count}} контекст",
     "apply_few": "Импортировать {{count}} контекста",
     "apply_many": "Импортировать {{count}} контекстов",
@@ -1066,6 +1118,9 @@
       "cluster.operatorDegraded": "Деградировавшие ClusterOperators",
       "cluster.updateFailing": "Обновление кластера не проходит",
       "cluster.mcpDegraded": "Деградировавшие MachineConfigPools",
+      "cluster.componentFailed": "Компоненты DropApp в сбое",
+      "cluster.dropappNodeNotReady": "Узлы DropApp не готовы",
+      "cluster.ingressTlsNotReady": "IngressTLS не готовы",
       "node.notReady": "Ноды не готовы",
       "node.pressure": "Ноды под нагрузкой",
       "node.requestsHigh": "Ноды почти заняты запросами",
@@ -1120,6 +1175,21 @@
         "title": "MachineConfigPools деградировали",
         "details": "MachineConfigPools с Degraded=True: {{pools}} (всего {{count}}). Ноды этих пулов не получают обновления конфигурации.",
         "fix": "Проверьте условия пула и логи machine-config-daemon на его нодах."
+      },
+      "cluster.componentFailed": {
+        "title": "Компоненты DropApp в сбое",
+        "details": "Component и Tool в статусе failed или error: {{names}} (всего {{count}}).",
+        "fix": "Причина — в событиях объекта: kubectl describe tool ИМЯ (или component ИМЯ)."
+      },
+      "cluster.dropappNodeNotReady": {
+        "title": "Узлы DropApp не готовы",
+        "details": "DropAppNode не в статусе ready: {{names}} (всего {{count}}).",
+        "fix": "Проверьте узел: kubectl describe dropappnode ИМЯ и журнал dactl."
+      },
+      "cluster.ingressTlsNotReady": {
+        "title": "Сертификаты IngressTLS не готовы",
+        "details": "IngressTLS с Ready не True: {{names}} (всего {{count}}). Ingress может отдавать истёкший сертификат или не отдавать его вовсе.",
+        "fix": "Проверьте cert-manager (его поды и события) и объект IngressTLS: kubectl describe ingresstls ИМЯ."
       },
       "node.notReady": {
         "title": "Нода {{name}} не готова",

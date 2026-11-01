@@ -74,6 +74,7 @@
       "badNamespace": "“{{name}}” is not a valid project name: use lowercase letters, digits and “-”",
       "timeoutTooSmall": "Timeouts must be at least 1000 ms",
       "loginRequired": "Sign in to the cluster: use “Sign in via browser”",
+      "oidcLoginRequired": "Sign in to the cluster: use “Sign in via OIDC”",
       "tokenMissing": "No token is saved for this connection — paste a token",
       "clientKeyMissing": "No client key is saved for this connection — add the key (PEM)",
       "insecureForbidden": "Connections without TLS certificate verification are forbidden by your organization",
@@ -136,6 +137,21 @@
       "badTokenResponse": "The OAuth server returned an unexpected response",
       "browser": "Cannot open the browser: {{error}}"
     },
+    "oidc": {
+      "badIssuerUrl": "Invalid OIDC issuer address “{{url}}”: use https://host[/path]",
+      "clientIdMissing": "Specify the OIDC client ID",
+      "openidScopeMissing": "The OIDC scopes must include openid",
+      "noMetadata": "The OIDC issuer {{url}} returned no OpenID configuration — check the issuer address",
+      "insecureEndpoint": "The OIDC provider {{url}} advertises an insecure (http) endpoint",
+      "issuerMismatch": "The issuer address does not match: the provider reports “{{actual}}”, the connection has “{{expected}}”",
+      "portsBusy": "Ports {{first}} and {{last}} are busy — close kubelogin or the program that holds them",
+      "providerError": "The OIDC provider rejected the sign-in: {{reason}}",
+      "badTokenResponse": "The OIDC provider returned an unexpected response",
+      "noIdToken": "The OIDC provider returned no ID token — check that the scopes include openid",
+      "nonceMismatch": "The ID token from the OIDC provider does not belong to this sign-in — sign in again",
+      "issuerCaInvalid": "The OIDC issuer CA certificate must be in PEM format (-----BEGIN CERTIFICATE-----)",
+      "issuerCaUntrusted": "The certificate of the OIDC issuer {{url}} is not trusted — add the issuer CA (PEM) to the connection"
+    },
     "exec": {
       "commandMissing": "Specify the exec plugin command",
       "commandNotAbsolute": "Specify the full path to “{{command}}” — use “Find”",
@@ -163,7 +179,8 @@
       "fileUnreadable": "Cannot read {{path}} referenced by kubeconfig: {{error}}",
       "badBase64": "Certificate or key data in kubeconfig is not valid base64",
       "noContext": "Context “{{name}}” not found in kubeconfig",
-      "noDefault": "Cannot find the default kubeconfig — choose a file"
+      "noDefault": "Cannot find the default kubeconfig — choose a file",
+      "issuerCaUnreadable": "Cannot read the OIDC issuer CA {{path}}: {{error}} — the connection is imported without it; add it in the connection form"
     },
     "watch": {
       "cronJobPods": "Pods of a CronJob are read by the list, not by watch"
@@ -253,6 +270,8 @@
     "import": {
       "addressChanged": "“{{name}}”: the API address changes from {{from}} to {{to}}. The saved credentials (token, key or confirmed exec plugin) will be sent to the new address.",
       "proxyChanged": "“{{name}}”: the proxy settings change. The saved credentials (token, key or confirmed exec plugin) will go through the new proxy.",
+      "oidcChanged": "“{{name}}”: the OIDC issuer, client ID or issuer CA changes. The saved sign-in tokens and client secret will be deleted — sign in again.",
+      "oidcDropped": "“{{name}}”: the connection stops using OIDC sign-in. The saved sign-in tokens and client secret will be deleted.",
       "tlsChanged": "“{{name}}”: the certificate verification settings (CA or TLS server name) change. The saved credentials (token, key or confirmed exec plugin) will be used with the new settings."
     },
     "metrics": {
@@ -287,13 +306,13 @@
       "test": "Checks step by step: address, TLS, sign-in, platform and projects. Unsaved fields are tested too.",
       "llmAccess": "What an LLM assistant over MCP may read. Metadata: objects, statuses, events — no env, ConfigMap or Secret values. With logs: also pod logs, env and ConfigMap values, masked. Off: nothing.",
       "llmScope": "Projects the LLM may read; an empty list means it sees no projects. The cluster itself and nodes stay visible if you can read them. The setting stays on this computer: export does not write it.",
-      "metrics": "Automatic: Thanos Querier on OpenShift, Prometheus through the API server elsewhere, then metrics.k8s.io. Own: a Thanos or Prometheus address. Not exported.",
+      "metrics": "Automatic: Thanos Querier on OpenShift, VictoriaMetrics on DropApp, Prometheus through the API server elsewhere, then metrics.k8s.io. Own: a Thanos or Prometheus address. Not exported.",
       "metricsAuth": "Connection token — the token of this connection. Own token — saved in the system secret store. A token is sent only over https.",
       "mask": "The list replaces the standard one. Not exported: each user decides it."
     },
     "cluster": {
-      "platform": "Detected from the API groups and the version: OpenShift, or Kubernetes with its distribution (EKS, GKE, AKS, Rancher, Deckhouse, k3s, RKE2).",
-      "apiGroups": "What the cluster offers beyond plain Kubernetes: Route, projects and DeploymentConfig (OpenShift), Gateway API. They decide which objects are shown.",
+      "platform": "Detected from the API groups and the version: OpenShift, Platform V DropApp, or Kubernetes with its distribution (EKS, GKE, AKS, Rancher, Deckhouse, k3s, RKE2).",
+      "apiGroups": "What the cluster offers beyond plain Kubernetes: Route, projects and DeploymentConfig (OpenShift), DropApp projects, Gateway API. They decide which objects are shown.",
       "readyz": "The <code>/readyz</code> checks of the API server. Any user can read them; a failed check names the part of the server that is not ready."
     },
     "kubeconfig": {
@@ -334,11 +353,23 @@
       "authMethod": "Sign-in method",
       "auth": {
         "browser": "Browser (OpenShift OAuth)",
+        "oidc": "OIDC sign-in (Dex)",
         "token": "Token",
         "clientCert": "Client certificate",
         "exec": "Exec plugin"
       },
       "browserNote": "After saving, sign in on the connection tab with “Sign in via browser”.",
+      "oidcNote": "After saving, sign in on the connection tab with “Sign in via OIDC”.",
+      "oidc": {
+        "issuerUrl": "Issuer URL",
+        "clientId": "Client ID",
+        "clientSecret": "Client secret",
+        "scopes": "Scopes",
+        "showSecret": "Show",
+        "hint": "The values are in the kubeconfig that DropApp Loginapp issues",
+        "issuerCaPem": "Issuer CA (PEM)",
+        "issuerCaHint": "Needed if the Dex certificate is issued by another CA than the API server (often the ingress CA)"
+      },
       "token": "Token",
       "certificate": "Certificate (PEM)",
       "clientKey": "Key (PEM)",
@@ -454,6 +485,7 @@
     "session": {
       "title": "Sign in again",
       "loginBrowser": "Sign in via browser",
+      "loginOidc": "Sign in via OIDC",
       "waitingBrowser": "Waiting for sign-in in the browser…",
       "cancelLogin": "Cancel",
       "loginExec": "Run the exec plugin again",
@@ -501,6 +533,22 @@
       "progressing": "Progressing",
       "degraded": "Degraded",
       "message": "Message"
+    },
+    "dropapp": {
+      "clusterName": "Cluster name",
+      "components": "Components and tools",
+      "componentsOk": "Components and tools: {{total}}, all fine.",
+      "problems": "Not fine: {{bad}} of {{total}}.",
+      "kind": "Kind",
+      "name": "Name",
+      "status": "Status",
+      "retry": "Retries",
+      "event": "Last warning",
+      "nodes": "DropApp nodes",
+      "nodesOk": "Nodes: {{total}}, all ready.",
+      "notReady": "Not ready: {{bad}} of {{total}}.",
+      "ingressTls": "Ingress certificates (IngressTLS)",
+      "ingressTlsOk": "Certificates: {{total}}, all ready."
     },
     "nodes": {
       "open": "Nodes",
@@ -680,8 +728,12 @@
       "token": "token",
       "clientCert": "client certificate",
       "browser": "sign-in via browser",
-      "exec": "exec plugin"
+      "exec": "exec plugin",
+      "oidc": "OIDC sign-in"
     },
+    "signInChoice": "Sign-in method",
+    "useOidc": "Sign in via browser (OIDC)",
+    "useExec": "exec plugin",
     "apply_one": "Import {{count}} context",
     "apply_other": "Import {{count}} contexts",
     "imported_one": "Imported {{count}} connection",
@@ -1046,6 +1098,9 @@
       "cluster.operatorDegraded": "Degraded ClusterOperators",
       "cluster.updateFailing": "Cluster update failing",
       "cluster.mcpDegraded": "Degraded MachineConfigPools",
+      "cluster.componentFailed": "Failed DropApp components",
+      "cluster.dropappNodeNotReady": "DropApp nodes not ready",
+      "cluster.ingressTlsNotReady": "IngressTLS not ready",
       "node.notReady": "Nodes not ready",
       "node.pressure": "Nodes under pressure",
       "node.requestsHigh": "Nodes almost fully requested",
@@ -1100,6 +1155,21 @@
         "title": "MachineConfigPools are degraded",
         "details": "MachineConfigPools with Degraded=True: {{pools}} (total {{count}}). Nodes of these pools do not get configuration updates.",
         "fix": "Check the pool conditions and the machine-config-daemon logs on its nodes."
+      },
+      "cluster.componentFailed": {
+        "title": "DropApp components have failed",
+        "details": "Components and Tools in failed or error state: {{names}} (total {{count}}).",
+        "fix": "The cause is in the events of the object: kubectl describe tool NAME (or component NAME)."
+      },
+      "cluster.dropappNodeNotReady": {
+        "title": "DropApp nodes are not ready",
+        "details": "DropAppNodes that are not ready: {{names}} (total {{count}}).",
+        "fix": "Check the node with kubectl describe dropappnode NAME and the dactl log."
+      },
+      "cluster.ingressTlsNotReady": {
+        "title": "IngressTLS certificates are not ready",
+        "details": "IngressTLS objects with Ready other than True: {{names}} (total {{count}}). Ingress may serve an expired or missing certificate.",
+        "fix": "Check cert-manager (its pods and events) and the IngressTLS object: kubectl describe ingresstls NAME."
       },
       "node.notReady": {
         "title": "Node {{name}} is not ready",

@@ -463,22 +463,34 @@ fn mask_pod(m: &Masker, p: &mut PodDetails) -> usize {
     n
 }
 
-/// Сообщения ClusterOperator'ов и условий ClusterVersion.
+/// Сообщения ClusterOperator'ов и условий ClusterVersion, события компонентов DropApp и
+/// сообщения `IngressTLS`.
 fn mask_overview(m: &Masker, o: &mut ClusterOverview) {
-    let Some(openshift) = &mut o.openshift else {
-        return;
-    };
-    if let Part::Data(version) = &mut openshift.cluster_version {
-        for c in [&mut version.failing, &mut version.progressing]
-            .into_iter()
-            .flatten()
-        {
-            mask_opt(m, &mut c.message);
+    if let Some(openshift) = &mut o.openshift {
+        if let Part::Data(version) = &mut openshift.cluster_version {
+            for c in [&mut version.failing, &mut version.progressing]
+                .into_iter()
+                .flatten()
+            {
+                mask_opt(m, &mut c.message);
+            }
+        }
+        if let Part::Data(operators) = &mut openshift.operators {
+            for op in &mut operators.not_ok {
+                mask_opt(m, &mut op.message);
+            }
         }
     }
-    if let Part::Data(operators) = &mut openshift.operators {
-        for op in &mut operators.not_ok {
-            mask_opt(m, &mut op.message);
+    if let Some(dropapp) = &mut o.dropapp {
+        if let Part::Data(components) = &mut dropapp.components {
+            for c in &mut components.not_ok {
+                mask_opt(m, &mut c.last_warning);
+            }
+        }
+        if let Part::Data(tls) = &mut dropapp.ingress_tls {
+            for t in &mut tls.not_ready {
+                mask_opt(m, &mut t.message);
+            }
         }
     }
 }
@@ -622,7 +634,7 @@ impl KubeServer {
     }
 
     #[tool(
-        description = "Cluster overview: platform, version and distribution, API server readiness (/readyz with failed checks), nodes ready/total by role, ingress and gateway classes, what the user may read at cluster level; on OpenShift also the cluster version, channel, available updates, infrastructure, ClusterOperators and MachineConfigPools that are not healthy.",
+        description = "Cluster overview: platform, version and distribution, API server readiness (/readyz with failed checks), nodes ready/total by role, ingress and gateway classes, what the user may read at cluster level; on OpenShift also the cluster version, channel, available updates, infrastructure, ClusterOperators and MachineConfigPools that are not healthy; on DropApp the cluster name and version, Components and Tools that are not healthy (with the last Warning event), DropApp nodes that are not ready and IngressTLS certificates that are not Ready.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
