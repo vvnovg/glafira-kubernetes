@@ -3,7 +3,7 @@
 //! выбрала Glafira; без источника истории — текущие значения `metrics.k8s.io` с
 //! `confidence: "low"`, без них — `metrics_unavailable` с причинами.
 
-use glafira_mcp_core::fit::MAX_RESPONSE_BYTES;
+use glafira_mcp_core::fit::response_limit;
 use glafira_mcp_core::{BackendError, to_value};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -20,7 +20,7 @@ use crate::resources::{WINDOW_DEFAULT, WINDOWS};
 /// Ряды не поместились в предел ответа. Ряд всегда не длиннее 200 точек, размер ответа зависит
 /// от числа контейнеров, а не от окна: совет «окно короче» был бы ложным.
 const SERIES_OMITTED_HINT: &str =
-    "The series were omitted to fit the 100 KB response limit; the statistics are complete";
+    "The series were omitted to fit the response size limit; the statistics are complete";
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -58,7 +58,7 @@ impl KubeServer {
         };
         // Ряды — самая большая часть ответа: не поместились — без них.
         let size = serde_json::to_vec(&u).map_or(0, |v| v.len());
-        if size > MAX_RESPONSE_BYTES {
+        if size > response_limit() {
             u.series = None;
             let mut v = to_value(&u)?;
             v["hint"] = json!(SERIES_OMITTED_HINT);

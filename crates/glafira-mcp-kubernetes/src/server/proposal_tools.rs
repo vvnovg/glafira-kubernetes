@@ -17,7 +17,7 @@ use crate::health::{Severity, StatusFilter, in_scope};
 use crate::proposals::*;
 
 /// У `list_proposals` нет страниц: при обрезке остаются самые свежие, остальное — сужением по status.
-const PROPOSALS_TRUNCATED_HINT: &str = "The response was truncated to 100 KB: only the most recently updated proposals are shown; narrow with status";
+const PROPOSALS_TRUNCATED_HINT: &str = "The response was truncated to the size limit: only the most recently updated proposals are shown; narrow with status";
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

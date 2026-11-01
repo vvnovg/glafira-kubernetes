@@ -1126,10 +1126,10 @@ impl KubeServer {
                 };
                 mask_network(&text_masker(), &mut n);
                 let v = to_value(&n)?;
-                if serde_json::to_vec(&v).map_or(0, |b| b.len()) > fit::MAX_RESPONSE_BYTES {
+                if serde_json::to_vec(&v).map_or(0, |b| b.len()) > fit::response_limit() {
                     return Err(BackendError::new(
                         "response_too_large",
-                        "The network objects of this project do not fit into 100 KB; narrow them with filter",
+                        "The network objects of this project do not fit into the response size limit; narrow them with filter",
                     ));
                 }
                 Ok(v)
