@@ -356,3 +356,15 @@ impl KubeServer {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Компактные инструкции получаются заменой фрагментов: правка [`INSTRUCTIONS`] без правки
+    /// фрагмента молча оставила бы в них инструменты записи.
+    #[test]
+    fn write_tool_fragments_are_part_of_the_instructions() {
+        assert!(INSTRUCTIONS.contains(WRITE_TOOLS_TEXT) && INSTRUCTIONS.contains(NOTES_TEXT));
+    }
+}
