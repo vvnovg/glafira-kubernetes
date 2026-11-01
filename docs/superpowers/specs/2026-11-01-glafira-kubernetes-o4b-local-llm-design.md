@@ -56,8 +56,9 @@ MCP-шлюз должен надёжно работать с локальным�
 - строка, которая разбирается как JSON-объект или массив, заменяется разобранным значением, если схема на этом месте
   строку не допускает (`type` без `"string"`; у `anyOf`/`oneOf` — ни один вариант не строка) — в том числе внутри
   вложенных объектов, элементов массивов и вариантов `anyOf`/`oneOf`;
-- ключи со значением `null` и ключ `""` удаляются (`null` в обязательном поле даёт обычное `missing field` с
-  подсказкой §3.1);
+- `null` удаляется там, где схема поля его не допускает или схемы у ключа нет (`null`, который значит «убрать
+  значение», как в `setResources`, остаётся: его допускает `type` с `"null"` или вариант `anyOf`/`oneOf`); ключ `""`
+  удаляется всегда (`null` в обязательном поле даёт обычное `missing field` с подсказкой §3.1);
 - остальные лишние ключи не трогаются: serde их пропускает, а у форм с `deny_unknown_fields` (`ResourceValuesSpec`,
   `ContainerResourcesSpec`) лишнее поле остаётся ошибкой аргументов (§10.5 основной спеки).
 
@@ -70,13 +71,14 @@ MCP-шлюз должен надёжно работать с локальным�
 - Усечение — как сейчас (`fit`: главный список, `truncated: true`, `hint`); в подсказках «100 KB» заменяется на «the
   size limit», например: `The response was truncated to the size limit: narrow the filter or page with offset`.
 - Страховка: ответ больше `предел + HARD_LIMIT_MARGIN` (1 КБ) не отправляется — `response_too_large` с текстом
-  `The response is larger than the size limit even after truncation; narrow the request: a filter, fewer items or a smaller project`.
+  `The response is larger than the size limit even after truncation; narrow the request: a filter, fewer items or a smaller page`.
 - Логи: `get_pod_logs` отбрасывает самые старые строки, пока ответ не уложится в `response_limit()` (вместо
   постоянных 100 КБ), с `truncated: true` и прежней подсказкой; `search_workload_logs` укладывает в предел ответ с
   совпадениями: отбрасываются последние по порядку ответа совпадения с их контекстом, `truncated: true` и подсказка
   `Matches were truncated to the size limit: narrow the filter or the time range`. Длина одного значения (4 КБ у
   строки лога и значения переменной) и бюджет просмотра (20 подов, 50 МБ, 40 с) не меняются; у `observe_workload`
-  остаётся свой предел состояния 45 КБ, а итог больше предела клиента отклоняется обвязкой (`response_too_large`).
+  предел состояния 45 КБ, но не больше 45% предела клиента (больше — отказ `response_too_large` сразу после первого
+  образца, до окна наблюдения), а итог больше предела клиента отклоняется обвязкой (`response_too_large`).
 - Остальные подсказки и тексты об усечении («truncated to 100 KB», «fit into 100 KB») говорят «the size limit»;
   `get_network` и ряды `get_resource_usage` сверяются с пределом вызова.
 
@@ -147,9 +149,9 @@ MCP-шлюз должен надёжно работать с локальным�
 
 - `glafira-mcp-core`, модульные: `normalize_args` — строка с объектом и с массивом на месте объекта (верхний уровень,
   вложенный объект, элемент массива, вариант `anyOf`), строка на месте строки не меняется, невалидный JSON остаётся
-  строкой, `null` и `""` удаляются; `shape` — обязательные и необязательные ключи, `type` с `null`, перечисление,
-  `anyOf` из скаляров, массив, вложенный объект; обвязка — предел из `ClientOptions` виден телу через
-  `response_limit()`, `response_too_large` сверх `предел + 1 КБ`.
+  строкой, `null` удаляется, если схема его не допускает, и остаётся, если допускает, `""` удаляется; `shape` —
+  обязательные и необязательные ключи, `type` с `null`, перечисление, `anyOf` из скаляров, массив, вложенный объект;
+  обвязка — предел из `ClientOptions` виден телу через `response_limit()`, `response_too_large` сверх `предел + 1 КБ`.
 - `glafira-mcp-kubernetes`, тесты шлюза: `search_workload_logs` с `workload` строкой проходит; вызов без
   `connectionId` — ошибка с наброском формы; компактный клиент — `tools/list` без четырёх инструментов, вызов
   `propose_change` — `tool not found`, инструкции без `propose_change` и `annotate` и с заменяющей фразой (и через
