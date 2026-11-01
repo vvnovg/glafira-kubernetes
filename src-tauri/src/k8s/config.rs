@@ -79,7 +79,8 @@ pub const READ_TIMEOUT: Duration = Duration::from_secs(295);
 /// `kube::Config` профиля. Таймаут ответа — `READ_TIMEOUT`: он обрывает только соединение, по
 /// которому почти 5 минут ничего не приходит; таймаут запроса ставит вызывающий код
 /// (`request_timeout`). У exec-плагина учётных данных здесь нет: их выдаёт запуск плагина, и их
-/// подставляет `apply_exec_credential`.
+/// подставляет `apply_exec_credential`; токен входа через OIDC подставляет `pool::open`
+/// (`auth::oidc::credential_for`).
 pub fn build_kube_config(
     p: &ConnectionProfile,
     secrets: &dyn SecretStore,
@@ -133,7 +134,7 @@ pub fn build_kube_config(
         })
         .transpose()?;
     c.auth_info = match &p.auth {
-        AuthConfig::Exec(_) => AuthInfo::default(),
+        AuthConfig::Exec(_) | AuthConfig::Oidc(_) => AuthInfo::default(),
         AuthConfig::Token | AuthConfig::Browser => AuthInfo {
             token: Some(SecretString::from(token(p, secrets)?)),
             ..Default::default()
@@ -406,6 +407,20 @@ mod tests {
                 .to_lowercase()
                 .contains("authorization: bearer sha256~abc")
         );
+    }
+
+    #[test]
+    fn oidc_profile_gets_no_token_from_the_config() {
+        // Токен OIDC подставляет подключение (`auth::oidc::credential_for`), а не сборка конфига:
+        // ни токен, ни секрет клиента из keychain сюда не попадают.
+        let mut p = sample_profile("a");
+        p.auth = AuthConfig::Oidc(crate::storage::profile::sample_oidc());
+        let secrets = with_token("a");
+        secrets
+            .set(&secret_key("a", crate::secrets::OIDC_ID_TOKEN), "id")
+            .unwrap();
+        let c = build_kube_config(&p, &secrets, &no_env).unwrap();
+        assert!(c.auth_info.token.is_none() && c.auth_info.client_key_data.is_none());
     }
 
     #[tokio::test]

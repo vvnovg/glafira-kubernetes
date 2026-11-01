@@ -1,4 +1,5 @@
-//! Приём redirect на `http://127.0.0.1:<порт>/callback`: одна страница с кодом авторизации.
+//! Приём redirect на `http://127.0.0.1:<порт>/callback` (OAuth OpenShift) или на фиксированный
+//! порт `http://localhost:<порт>` (OIDC): одна страница с кодом авторизации.
 
 use std::time::Duration;
 
@@ -27,14 +28,14 @@ pub enum Callback {
     Other,
 }
 
-/// Разбирает первую строку HTTP-запроса: `GET /callback?code=…&state=… HTTP/1.1`.
-pub fn parse_request_line(line: &str) -> Callback {
+/// Разбирает первую строку HTTP-запроса: `GET <path>?code=…&state=… HTTP/1.1`.
+pub fn parse_request_line(line: &str, expected_path: &str) -> Callback {
     let mut parts = line.split_whitespace();
     let (Some("GET"), Some(target)) = (parts.next(), parts.next()) else {
         return Callback::Other;
     };
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
-    if path != "/callback" {
+    if path != expected_path {
         return Callback::Other;
     }
     let mut code = None;
@@ -76,6 +77,10 @@ const ACCEPT_RETRY_PAUSE: Duration = Duration::from_millis(50);
 
 pub struct CallbackServer {
     listener: TcpListener,
+    /// Тот же порт на `[::1]`: браузер может разрешить `localhost` в IPv6.
+    listener_v6: Option<TcpListener>,
+    /// Путь возврата в `redirect_uri`.
+    path: String,
     pub redirect_uri: String,
 }
 
@@ -86,8 +91,48 @@ impl CallbackServer {
         let port = listener.local_addr()?.port();
         Ok(Self {
             listener,
+            listener_v6: None,
+            path: "/callback".into(),
             redirect_uri: format!("http://127.0.0.1:{port}/callback"),
         })
+    }
+
+    /// Слушает первый свободный из `ports` на 127.0.0.1 и, если IPv6 доступен, на `[::1]`;
+    /// `redirect_uri` — `http://localhost:<порт>` с возвратом на корень. Провайдер (Dex)
+    /// сверяет `redirect_uri` вместе с портом, поэтому порты фиксированные — те же, что у
+    /// kubelogin. Порт, занятый на `[::1]`, тоже считается занятым: иначе браузер мог бы
+    /// отдать код другой программе.
+    pub async fn bind_fixed(ports: &[u16]) -> AppResult<Self> {
+        for &port in ports {
+            let Ok(listener) = TcpListener::bind(("127.0.0.1", port)).await else {
+                continue;
+            };
+            let listener_v6 = match TcpListener::bind(("::1", port)).await {
+                Ok(l) => Some(l),
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
+                // Нет IPv6 — хватит 127.0.0.1.
+                Err(_) => None,
+            };
+            return Ok(Self {
+                listener,
+                listener_v6,
+                path: "/".into(),
+                redirect_uri: format!("http://localhost:{port}"),
+            });
+        }
+        let (last, first) = ports.split_last().unwrap_or((&0, &[]));
+        let first = first
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(app_err!(
+            ErrorCode::AuthFailed,
+            "errors.oidc.portsBusy",
+            "Ports {{first}} and {{last}} are busy — close kubelogin or the program that holds them",
+            first = first,
+            last = last
+        ))
     }
 
     /// Ждёт redirect с `expected_state` не дольше `limit`: код или отказ (`error=…`) с этим `state`.
@@ -110,10 +155,11 @@ impl CallbackServer {
             let mut connections = JoinSet::new();
             loop {
                 tokio::select! {
-                    accepted = self.listener.accept() => match accepted {
-                        Ok((stream, _)) => {
+                    accepted = accept(&self.listener, self.listener_v6.as_ref()) => match accepted {
+                        Ok(stream) => {
                             connections.spawn(serve_connection(
                                 stream,
+                                self.path.clone(),
                                 expected_state.to_owned(),
                                 HEADER_TIMEOUT,
                             ));
@@ -138,6 +184,17 @@ impl CallbackServer {
                 "Sign-in in the browser was not completed in time"
             )),
         }
+    }
+}
+
+/// Следующее соединение с любого из адресов сервера.
+async fn accept(v4: &TcpListener, v6: Option<&TcpListener>) -> std::io::Result<TcpStream> {
+    match v6 {
+        None => v4.accept().await.map(|(s, _)| s),
+        Some(v6) => tokio::select! {
+            r = v4.accept() => r.map(|(s, _)| s),
+            r = v6.accept() => r.map(|(s, _)| s),
+        },
     }
 }
 
@@ -166,6 +223,7 @@ async fn read_request_line(stream: &mut TcpStream) -> std::io::Result<String> {
 /// чужой путь, чужой `state`), ожидание продолжается.
 async fn serve_connection(
     mut stream: TcpStream,
+    path: String,
     expected_state: String,
     header_timeout: Duration,
 ) -> Option<AppResult<String>> {
@@ -176,7 +234,7 @@ async fn serve_connection(
     if line.is_empty() {
         return None;
     }
-    let (status, page, result) = match parse_request_line(&line) {
+    let (status, page, result) = match parse_request_line(&line, &path) {
         Callback::Other => ("404 Not Found", "", None),
         // Ответ не на наш запрос (код или отказ с чужим или пропущенным `state`): показываем
         // страницу ошибки, но вход не прерываем — настоящий redirect ещё может прийти.
@@ -221,33 +279,48 @@ mod tests {
     #[test]
     fn request_lines() {
         assert_eq!(
-            parse_request_line("GET /callback?code=abc%2F1&state=s1 HTTP/1.1"),
+            parse_request_line("GET /callback?code=abc%2F1&state=s1 HTTP/1.1", "/callback"),
             Callback::Code {
                 code: "abc/1".into(),
                 state: "s1".into()
             }
         );
         assert_eq!(
-            parse_request_line("GET /callback?error=access_denied&state=s HTTP/1.1"),
+            parse_request_line(
+                "GET /callback?error=access_denied&state=s HTTP/1.1",
+                "/callback"
+            ),
             Callback::Denied {
                 error: "access_denied".into(),
                 state: "s".into()
             }
         );
         assert_eq!(
-            parse_request_line("GET /favicon.ico HTTP/1.1"),
+            parse_request_line("GET /favicon.ico HTTP/1.1", "/callback"),
             Callback::Other
         );
         assert_eq!(
-            parse_request_line("POST /callback HTTP/1.1"),
+            parse_request_line("POST /callback HTTP/1.1", "/callback"),
             Callback::Other
         );
         assert_eq!(
-            parse_request_line("GET /callback HTTP/1.1"),
+            parse_request_line("GET /callback HTTP/1.1", "/callback"),
             Callback::Denied {
                 error: "missing code".into(),
                 state: String::new()
             }
+        );
+        // Сервер на фиксированном порте ждёт возврат на корень (`http://localhost:<порт>`).
+        assert_eq!(
+            parse_request_line("GET /?code=c&state=s HTTP/1.1", "/"),
+            Callback::Code {
+                code: "c".into(),
+                state: "s".into()
+            }
+        );
+        assert_eq!(
+            parse_request_line("GET /callback?code=c&state=s HTTP/1.1", "/"),
+            Callback::Other
         );
     }
 
@@ -314,7 +387,13 @@ mod tests {
             client.write_all(sent).await.unwrap();
             let (stream, _) = listener.accept().await.unwrap();
             let started = std::time::Instant::now();
-            let result = serve_connection(stream, "s1".into(), Duration::from_millis(100)).await;
+            let result = serve_connection(
+                stream,
+                "/callback".into(),
+                "s1".into(),
+                Duration::from_millis(100),
+            )
+            .await;
             assert!(result.is_none());
             assert!(started.elapsed() < Duration::from_secs(2));
             // Сервер закрыл соединение: клиент видит конец потока и не получил страницу.
@@ -432,5 +511,48 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(e.key, "errors.oauth.timeout");
+    }
+
+    /// Свободный порт: занимаем 127.0.0.1:0 и отпускаем.
+    async fn free_port() -> u16 {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        l.local_addr().unwrap().port()
+    }
+
+    #[tokio::test]
+    async fn fixed_port_falls_back_to_the_next_and_reports_busy_ports() {
+        let busy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let first = busy.local_addr().unwrap().port();
+        let second = free_port().await;
+        let server = CallbackServer::bind_fixed(&[first, second]).await.unwrap();
+        assert_eq!(server.redirect_uri, format!("http://localhost:{second}"));
+        // Оба порта заняты: первый — посторонним, второй — сервером выше.
+        let e = CallbackServer::bind_fixed(&[first, second])
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(
+            (e.code, e.key.as_str()),
+            (ErrorCode::AuthFailed, "errors.oidc.portsBusy")
+        );
+        assert_eq!(
+            e.message,
+            format!(
+                "Ports {first} and {second} are busy — close kubelogin or the program that holds them"
+            )
+        );
+        let (_tx, rx) = oneshot::channel();
+        let wait =
+            tokio::spawn(async move { server.wait("s1", Duration::from_secs(10), rx).await });
+        let (status, _) = get(&format!(
+            "http://127.0.0.1:{second}/callback?code=x&state=s1"
+        ))
+        .await;
+        assert_eq!(status, 404, "путь возврата — корень");
+        let (status, page) = get(&format!("http://localhost:{second}?code=c-1&state=s1")).await;
+        assert_eq!(status, 200);
+        assert!(page.contains("Signed in"));
+        assert_eq!(wait.await.unwrap().unwrap(), "c-1");
+        drop(busy);
     }
 }

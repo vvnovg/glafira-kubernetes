@@ -173,6 +173,7 @@ fn prepare(
             token,
             client_key: Some(imported.client_key.unwrap_or_default()),
             metrics_token: None,
+            oidc_client_secret: None,
         },
         confirm_exec,
     })

@@ -74,6 +74,7 @@
       "badNamespace": "«{{name}}» — недопустимое имя проекта: строчные латинские буквы, цифры и «-»",
       "timeoutTooSmall": "Таймауты должны быть не меньше 1000 мс",
       "loginRequired": "Войдите в кластер: кнопка «Войти через браузер»",
+      "oidcLoginRequired": "Войдите в кластер: кнопка «Войти через OIDC»",
       "tokenMissing": "Для подключения не сохранён токен — вставьте токен",
       "clientKeyMissing": "Для подключения не сохранён ключ клиентского сертификата — добавьте ключ (PEM)",
       "insecureForbidden": "Подключения без проверки TLS-сертификата запрещены вашей организацией",
@@ -135,6 +136,18 @@
       "rejected": "OAuth-сервер отклонил вход: {{reason}}",
       "badTokenResponse": "OAuth-сервер вернул неожиданный ответ",
       "browser": "Не удалось открыть браузер: {{error}}"
+    },
+    "oidc": {
+      "badIssuerUrl": "Неверный адрес издателя OIDC «{{url}}»: укажите https://хост[/путь]",
+      "clientIdMissing": "Укажите client ID OIDC",
+      "openidScopeMissing": "В scopes OIDC должен быть openid",
+      "noMetadata": "Издатель OIDC {{url}} не вернул конфигурацию OpenID — проверьте адрес издателя",
+      "issuerMismatch": "Адрес издателя не совпадает: провайдер сообщает «{{actual}}», в подключении — «{{expected}}»",
+      "portsBusy": "Порты {{first}} и {{last}} заняты — закройте kubelogin или программу, которая их держит",
+      "providerError": "OIDC-провайдер отклонил вход: {{reason}}",
+      "badTokenResponse": "OIDC-провайдер вернул неожиданный ответ",
+      "noIdToken": "OIDC-провайдер не вернул ID-токен — проверьте, что в scopes есть openid",
+      "nonceMismatch": "ID-токен от OIDC-провайдера относится не к этому входу — войдите снова"
     },
     "exec": {
       "commandMissing": "Укажите команду exec-плагина",

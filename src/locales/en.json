@@ -74,6 +74,7 @@
       "badNamespace": "“{{name}}” is not a valid project name: use lowercase letters, digits and “-”",
       "timeoutTooSmall": "Timeouts must be at least 1000 ms",
       "loginRequired": "Sign in to the cluster: use “Sign in via browser”",
+      "oidcLoginRequired": "Sign in to the cluster: use “Sign in via OIDC”",
       "tokenMissing": "No token is saved for this connection — paste a token",
       "clientKeyMissing": "No client key is saved for this connection — add the key (PEM)",
       "insecureForbidden": "Connections without TLS certificate verification are forbidden by your organization",
@@ -135,6 +136,18 @@
       "rejected": "The OAuth server rejected the sign-in: {{reason}}",
       "badTokenResponse": "The OAuth server returned an unexpected response",
       "browser": "Cannot open the browser: {{error}}"
+    },
+    "oidc": {
+      "badIssuerUrl": "Invalid OIDC issuer address “{{url}}”: use https://host[/path]",
+      "clientIdMissing": "Specify the OIDC client ID",
+      "openidScopeMissing": "The OIDC scopes must include openid",
+      "noMetadata": "The OIDC issuer {{url}} returned no OpenID configuration — check the issuer address",
+      "issuerMismatch": "The issuer address does not match: the provider reports “{{actual}}”, the connection has “{{expected}}”",
+      "portsBusy": "Ports {{first}} and {{last}} are busy — close kubelogin or the program that holds them",
+      "providerError": "The OIDC provider rejected the sign-in: {{reason}}",
+      "badTokenResponse": "The OIDC provider returned an unexpected response",
+      "noIdToken": "The OIDC provider returned no ID token — check that the scopes include openid",
+      "nonceMismatch": "The ID token from the OIDC provider does not belong to this sign-in — sign in again"
     },
     "exec": {
       "commandMissing": "Specify the exec plugin command",

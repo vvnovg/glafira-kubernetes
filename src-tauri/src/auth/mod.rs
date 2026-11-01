@@ -4,6 +4,7 @@
 pub mod callback;
 pub mod exec;
 pub mod oauth;
+pub mod oidc;
 pub mod pkce;
 
 use std::collections::HashMap;

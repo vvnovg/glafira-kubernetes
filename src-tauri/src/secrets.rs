@@ -18,8 +18,22 @@ pub const CLIENT_KEY: &str = "clientKey";
 /// Bearer-токен своего источника метрик (`MetricsAuth::Bearer`).
 pub const METRICS_TOKEN: &str = "metricsToken";
 
+/// Секрет клиента OIDC (`client_secret_post`); у публичного клиента его нет.
+pub const OIDC_CLIENT_SECRET: &str = "oidcClientSecret";
+/// `id_token` входа через OIDC — его получает API-сервер.
+pub const OIDC_ID_TOKEN: &str = "oidcIdToken";
+/// `refresh_token` входа через OIDC.
+pub const OIDC_REFRESH_TOKEN: &str = "oidcRefreshToken";
+
 /// Все секреты подключения в keychain (для удаления).
-pub const CONNECTION_SECRET_FIELDS: [&str; 3] = [TOKEN, CLIENT_KEY, METRICS_TOKEN];
+pub const CONNECTION_SECRET_FIELDS: [&str; 6] = [
+    TOKEN,
+    CLIENT_KEY,
+    METRICS_TOKEN,
+    OIDC_CLIENT_SECRET,
+    OIDC_ID_TOKEN,
+    OIDC_REFRESH_TOKEN,
+];
 
 pub fn secret_key(connection_id: &str, field: &str) -> String {
     format!("{connection_id}/{field}")
@@ -148,6 +162,13 @@ mod tests {
     fn key_format() {
         assert_eq!(secret_key("c1", TOKEN), "c1/token");
         assert_eq!(secret_key("c1", CLIENT_KEY), "c1/clientKey");
+        assert_eq!(secret_key("c1", OIDC_CLIENT_SECRET), "c1/oidcClientSecret");
+        assert_eq!(secret_key("c1", OIDC_ID_TOKEN), "c1/oidcIdToken");
+        assert_eq!(secret_key("c1", OIDC_REFRESH_TOKEN), "c1/oidcRefreshToken");
+        // Удаление подключения удаляет и секреты входа через OIDC.
+        for f in [OIDC_CLIENT_SECRET, OIDC_ID_TOKEN, OIDC_REFRESH_TOKEN] {
+            assert!(CONNECTION_SECRET_FIELDS.contains(&f), "{f}");
+        }
     }
 
     #[test]

@@ -6,26 +6,35 @@ use tauri_plugin_opener::OpenerExt;
 use super::blocking;
 use super::connections::token_not_used;
 use crate::auth::oauth::{self, LOGIN_TIMEOUT};
+use crate::auth::oidc::{self, OIDC_PORTS};
 use crate::error::{AppResult, ErrorCode};
 use crate::k8s::cluster::ConnectionInfo;
 use crate::k8s::connectivity::ensure_allowed;
 use crate::secrets::{TOKEN, secret_key};
 use crate::state::AppState;
-use crate::storage::profile::ConnectionProfile;
+use crate::storage::profile::{AuthConfig, ConnectionProfile};
 
 /// Подключение, с которым можно входить через браузер: политика его разрешает (иначе вход
-/// и запрос метаданных OAuth шли бы мимо запрета небезопасного TLS) и способ входа хранит токен.
+/// и запрос метаданных OAuth шли бы мимо запрета небезопасного TLS) и способ входа хранит токен
+/// или это вход через OIDC.
 fn login_profile(st: &AppState, id: &str) -> AppResult<ConnectionProfile> {
     let profile = st.connections.get(id)?;
     ensure_allowed(&profile, &st.policy.status)?;
-    if !profile.auth.uses_token() {
+    if !profile.auth.uses_token() && !matches!(profile.auth, AuthConfig::Oidc(_)) {
         return Err(token_not_used());
     }
     Ok(profile)
 }
 
-/// Вход через браузер: открывает страницу входа OAuth OpenShift, ждёт redirect, сохраняет токен
-/// в keychain и подключается заново.
+/// Что получил вход через браузер.
+enum SignedIn {
+    Token(String),
+    Oidc(oidc::OidcTokens),
+}
+
+/// Вход через браузер: открывает страницу входа OAuth OpenShift или OIDC-провайдера, ждёт
+/// redirect, сохраняет токен (у OIDC — `id_token` и `refresh_token`) в keychain и подключается
+/// заново.
 #[tauri::command]
 pub async fn start_oauth_login(
     app: tauri::AppHandle,
@@ -34,6 +43,10 @@ pub async fn start_oauth_login(
 ) -> AppResult<ConnectionInfo> {
     let st = state.inner().clone();
     let profile = login_profile(&st, &connection_id)?;
+    let client_secret = match &profile.auth {
+        AuthConfig::Oidc(_) => oidc::client_secret(&st.secrets, &connection_id).await?,
+        _ => None,
+    };
     let (n, cancel) = st.logins.begin(&connection_id);
     let open = |url: &str| {
         app.opener().open_url(url, None::<&str>).map_err(|e| {
@@ -45,11 +58,30 @@ pub async fn start_oauth_login(
             )
         })
     };
-    let result = oauth::login(&profile, open, cancel, LOGIN_TIMEOUT).await;
+    let result = match &profile.auth {
+        AuthConfig::Oidc(auth) => oidc::login(
+            &profile,
+            auth,
+            client_secret.as_deref(),
+            &OIDC_PORTS,
+            open,
+            cancel,
+            LOGIN_TIMEOUT,
+        )
+        .await
+        .map(SignedIn::Oidc),
+        _ => oauth::login(&profile, open, cancel, LOGIN_TIMEOUT)
+            .await
+            .map(SignedIn::Token),
+    };
     st.logins.finish(&connection_id, n);
-    let token = result?;
+    let signed_in = result?;
     let (st2, id) = (st.clone(), connection_id.clone());
-    blocking(move || st2.secrets.set(&secret_key(&id, TOKEN), &token)).await?;
+    blocking(move || match &signed_in {
+        SignedIn::Token(token) => st2.secrets.set(&secret_key(&id, TOKEN), token),
+        SignedIn::Oidc(tokens) => oidc::store_tokens(st2.secrets.as_ref(), &id, tokens),
+    })
+    .await?;
     let c = st.connected(&connection_id, true).await?;
     Ok(c.info.clone())
 }
@@ -117,7 +149,7 @@ mod tests {
     use crate::policy::Policy;
     use crate::secrets::MemoryStore;
     use crate::storage::profile::{
-        AuthConfig, CaConfig, TEST_CERT_PEM, sample_exec, sample_profile,
+        AuthConfig, CaConfig, TEST_CERT_PEM, sample_exec, sample_oidc, sample_profile,
     };
 
     /// Адрес, на котором никто не слушает: запрос к нему — ошибка соединения, а не отказ политики.
@@ -158,8 +190,12 @@ mod tests {
         put(profile("exec", |p| {
             p.auth = AuthConfig::Exec(sample_exec())
         }));
+        put(profile("oidc", |p| {
+            p.auth = AuthConfig::Oidc(sample_oidc())
+        }));
         assert!(login_profile(&st, "token").is_ok());
         assert!(login_profile(&st, "browser").is_ok());
+        assert!(login_profile(&st, "oidc").is_ok(), "вход через OIDC");
         for (id, key) in [
             ("insecure", "errors.connections.insecureForbidden"),
             ("cert", "errors.connections.tokenNotUsed"),
