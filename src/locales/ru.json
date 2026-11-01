@@ -506,6 +506,22 @@
       "degraded": "Деградировал",
       "message": "Сообщение"
     },
+    "dropapp": {
+      "clusterName": "Имя кластера",
+      "components": "Компоненты и инструменты",
+      "componentsOk": "Компонентов и инструментов: {{total}}, все в норме.",
+      "problems": "Не в норме: {{bad}} из {{total}}.",
+      "kind": "Вид",
+      "name": "Имя",
+      "status": "Статус",
+      "retry": "Повторов",
+      "event": "Последнее предупреждение",
+      "nodes": "Узлы DropApp",
+      "nodesOk": "Узлов: {{total}}, все готовы.",
+      "notReady": "Не готовы: {{bad}} из {{total}}.",
+      "ingressTls": "Сертификаты ingress (IngressTLS)",
+      "ingressTlsOk": "Сертификатов: {{total}}, все готовы."
+    },
     "nodes": {
       "open": "Ноды",
       "title": "Ноды",

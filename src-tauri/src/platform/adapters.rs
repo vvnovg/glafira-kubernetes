@@ -1,12 +1,16 @@
 //! Адаптеры платформы (спец. §4.3): то, что у вендоров устроено по-разному и из групп API не
 //! выводится, — обзор уровня кластера и срок токена. Реализация выбирается по `PlatformKind`
-//! при подключении; адаптер Platform V DropApp добавит этап O5, автопоиск метрик — этап O3.
+//! при подключении; автопоиск метрик — этап O3.
 
 use futures::future::BoxFuture;
 use kube::api::ListParams;
 use serde::Serialize;
 
 use crate::k8s::cluster::Capabilities;
+use crate::k8s::dropapp::{
+    self, ComponentKind, ComponentRow, DropAppMetadata, DropAppNodeRow, IngressTlsRow,
+    cluster_metadata, component_problems, dropapp_node_row, ingress_tls_problem,
+};
 use crate::k8s::errors::not_allowed;
 use crate::k8s::openshift::{
     self, ClusterVersionInfo, MachineConfigPoolRow, OperatorRow, cluster_version_info,
@@ -32,16 +36,19 @@ pub trait Platform: Send + Sync {
 pub fn adapter(kind: PlatformKind) -> &'static dyn Platform {
     match kind {
         PlatformKind::Openshift => &OpenShift,
-        // Свой адаптер DropApp — задачи O5 далее.
-        PlatformKind::Dropapp | PlatformKind::Kubernetes => &Kubernetes,
+        PlatformKind::Dropapp => &DropApp,
+        PlatformKind::Kubernetes => &Kubernetes,
     }
 }
 
-/// Часть обзора, своя у каждой платформы.
+/// Часть обзора, своя у каждой платформы. Собирается раз на запрос и сразу отдаётся, поэтому
+/// разница размеров вариантов не важна.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
+#[allow(clippy::large_enum_variant)]
 pub enum PlatformOverview {
     Openshift(OpenShiftOverview),
+    Dropapp(DropAppOverview),
 }
 
 /// Обзор кластера OpenShift (спец. §6.2): обновления, инфраструктура, консоль, операторы
@@ -64,6 +71,41 @@ pub struct OpenShiftOverview {
 pub struct OperatorSummary {
     pub total: usize,
     pub problems: Vec<OperatorRow>,
+}
+
+/// Обзор кластера DropApp (спека O5 §7.1): версия и имя кластера, компоненты и инструменты,
+/// узлы DropApp и сертификаты ingress.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DropAppOverview {
+    pub metadata: Part<DropAppMetadata>,
+    pub components: Part<ComponentSummary>,
+    pub nodes: Part<DropAppNodeSummary>,
+    pub ingress_tls: Part<IngressTlsSummary>,
+}
+
+/// `Component` и `Tool`: сколько всего и какие в сбое или обновляются.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentSummary {
+    pub total: usize,
+    pub problems: Vec<ComponentRow>,
+}
+
+/// `DropAppNode`: сколько всего и какие не `ready`.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DropAppNodeSummary {
+    pub total: usize,
+    pub problems: Vec<DropAppNodeRow>,
+}
+
+/// `IngressTLS`: сколько всего и у каких `Ready` не `True`.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IngressTlsSummary {
+    pub total: usize,
+    pub problems: Vec<IngressTlsRow>,
 }
 
 /// Любой Kubernetes без адаптера: общий обзор без своей части, срока токена нет.
@@ -105,6 +147,94 @@ pub async fn cluster_operators(r: &ReadClient) -> crate::error::AppResult<Vec<Op
         )
         .await?;
     Ok(list.items.iter().map(operator_row).collect())
+}
+
+pub struct DropApp;
+
+/// Объекты DropApp вида `ar` по всем namespace.
+async fn dropapp_list(
+    r: &ReadClient,
+    ar: kube::api::ApiResource,
+) -> crate::error::AppResult<Vec<kube::api::DynamicObject>> {
+    Ok(r.list_dynamic(&ar, None, &ListParams::default())
+        .await?
+        .items)
+}
+
+/// `Component` и `Tool` с событиями проблемных. Нет одного из CRD (404) — он пустой; иная
+/// ошибка любого из списков — ошибка части.
+async fn dropapp_components(r: &ReadClient) -> crate::error::AppResult<ComponentSummary> {
+    let (components, tools) = tokio::join!(
+        dropapp_list(r, dropapp::components()),
+        dropapp_list(r, dropapp::tools())
+    );
+    let absent = |r: crate::error::AppResult<Vec<_>>| match r {
+        Err(e) if e.code == crate::error::ErrorCode::NotFound => Ok(Vec::new()),
+        r => r,
+    };
+    let objects: Vec<_> = absent(components)?
+        .into_iter()
+        .map(|o| (ComponentKind::Component, o))
+        .chain(absent(tools)?.into_iter().map(|o| (ComponentKind::Tool, o)))
+        .collect();
+    Ok(ComponentSummary {
+        total: objects.len(),
+        problems: component_problems(r, &objects).await,
+    })
+}
+
+impl Platform for DropApp {
+    /// Части без CRD (404) — пустые («—»), без прав — причина. Права на объекты DropApp
+    /// заранее не проверяются: каждая часть отвечает своей причиной.
+    fn overview<'a>(
+        &'a self,
+        r: &'a ReadClient,
+        _: &'a Capabilities,
+    ) -> BoxFuture<'a, Option<PlatformOverview>> {
+        Box::pin(async move {
+            let metadata = async {
+                absent_is_empty(
+                    dropapp_list(r, dropapp::cluster_metadatas())
+                        .await
+                        .map(|l| l.first().map(cluster_metadata).unwrap_or_default()),
+                )
+            };
+            let components = async { dropapp_components(r).await.into() };
+            let nodes = async {
+                absent_is_empty(dropapp_list(r, dropapp::dropapp_nodes()).await.map(|l| {
+                    DropAppNodeSummary {
+                        total: l.len(),
+                        problems: l
+                            .iter()
+                            .map(dropapp_node_row)
+                            .filter(DropAppNodeRow::has_problem)
+                            .collect(),
+                    }
+                }))
+            };
+            let ingress_tls = async {
+                absent_is_empty(dropapp_list(r, dropapp::ingress_tlses()).await.map(|l| {
+                    IngressTlsSummary {
+                        total: l.len(),
+                        problems: l.iter().filter_map(ingress_tls_problem).collect(),
+                    }
+                }))
+            };
+            let (metadata, components, nodes, ingress_tls) =
+                tokio::join!(metadata, components, nodes, ingress_tls);
+            Some(PlatformOverview::Dropapp(DropAppOverview {
+                metadata,
+                components,
+                nodes,
+                ingress_tls,
+            }))
+        })
+    }
+
+    /// Срок токена OIDC — задача входа через OIDC (спека O5 §5.3).
+    fn token_expiry<'a>(&'a self, _: &'a ReadClient, _: &'a str) -> BoxFuture<'a, Option<i64>> {
+        Box::pin(async { None })
+    }
 }
 
 impl Platform for OpenShift {
@@ -194,6 +324,7 @@ impl Platform for OpenShift {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::k8s::dropapp::fixtures as dropapp_fixtures;
     use crate::k8s::openshift::fixtures;
     use crate::k8s::testing::{Seen, mock_client, status};
     use std::time::Duration;
@@ -321,7 +452,9 @@ mod tests {
         else {
             panic!("OpenShift");
         };
-        let PlatformOverview::Openshift(o) = &overview;
+        let PlatformOverview::Openshift(o) = &overview else {
+            panic!("OpenShift");
+        };
         assert_eq!(
             o.infrastructure.data,
             Some(None),
@@ -422,6 +555,163 @@ mod tests {
         assert_eq!(k.token_expiry(&r, "sha256~abc").await, None);
         drop(r);
         assert!(server.await.unwrap().is_empty(), "запросов нет");
+    }
+
+    fn dropapp_cluster(s: &Seen) -> (u16, serde_json::Value) {
+        use dropapp_fixtures::*;
+        match s.path() {
+            "/apis/config.dropapp.ru/v1alpha1/clustermetadatas" => (200, cluster_metadata_list()),
+            "/apis/config.dropapp.ru/v1alpha1/components" => (200, component_list()),
+            "/apis/config.dropapp.ru/v1alpha1/tools" => (200, tool_list()),
+            "/apis/nodes.dropapp.ru/v1alpha1/dropappnodes" => (200, node_list()),
+            "/apis/tls.dropapp.ru/v1alpha1/ingresstlses" => (200, ingress_tls_list()),
+            "/api/v1/namespaces/dapp-system/events" if s.uri.contains("uid-cert-manager") => (
+                200,
+                events(vec![warning(
+                    "uid-cert-manager",
+                    "InstallFailed",
+                    "helm install failed: timed out",
+                    "2026-10-31T11:00:00Z",
+                )]),
+            ),
+            "/api/v1/events" if s.uri.contains("uid-dex") => (200, events(vec![])),
+            // События `grafana` не читаются — у строки нет события, обзор цел.
+            _ => status(500, "InternalError", "etcd is unavailable"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dropapp_overview_with_problems() {
+        let (client, server) = mock_client(dropapp_cluster);
+        let r = reader(client);
+        let Some(overview) = adapter(PlatformKind::Dropapp)
+            .overview(&r, &Capabilities::default())
+            .await
+        else {
+            panic!("у DropApp есть своя часть обзора");
+        };
+        let PlatformOverview::Dropapp(d) = &overview else {
+            panic!("DropApp");
+        };
+        let m = d.metadata.data.as_ref().unwrap();
+        assert_eq!(m.cluster_name.as_deref(), Some("prod-msk"));
+        assert_eq!(m.version.as_deref(), Some("5.1.2"));
+        let c = d.components.data.as_ref().unwrap();
+        assert_eq!(c.total, 6);
+        let names: Vec<_> = c.problems.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["cert-manager", "grafana", "dex"]);
+        assert_eq!(
+            c.problems[0].event.as_deref(),
+            Some("InstallFailed: helm install failed: timed out")
+        );
+        assert_eq!(c.problems[1].event, None);
+        let n = d.nodes.data.as_ref().unwrap();
+        assert_eq!(n.total, 3);
+        let names: Vec<_> = n.problems.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["worker-2"]);
+        let tls = d.ingress_tls.data.as_ref().unwrap();
+        assert_eq!(tls.total, 2);
+        assert_eq!(tls.problems[0].name, "apps");
+        let json = serde_json::to_value(&overview).unwrap();
+        assert_eq!(json["kind"], "dropapp");
+        assert_eq!(json["metadata"]["data"]["clusterName"], "prod-msk");
+        assert_eq!(
+            json["components"]["data"]["problems"][0]["kind"],
+            "Component"
+        );
+        assert_eq!(
+            json["ingressTls"]["data"]["problems"][0]["reason"],
+            "CertificateExpired"
+        );
+        assert_eq!(
+            adapter(PlatformKind::Dropapp)
+                .token_expiry(&r, "eyJhbGciOi.x.y")
+                .await,
+            None
+        );
+        drop(r);
+        let seen = server.await.unwrap();
+        let events: Vec<_> = seen
+            .iter()
+            .filter(|s| s.path().ends_with("/events"))
+            .collect();
+        assert_eq!(events.len(), 3, "события — только у проблемных");
+        assert_eq!(seen.len(), 5 + 3, "срок токена не спрашивается");
+    }
+
+    /// DropApp без части CRD (например, `tls.dropapp.ru` в старой версии): 404 — пустая часть.
+    #[tokio::test]
+    async fn dropapp_parts_without_crds_are_empty_not_errors() {
+        let (client, server) = mock_client(|_| {
+            status(
+                404,
+                "NotFound",
+                "the server could not find the requested resource",
+            )
+        });
+        let r = reader(client);
+        let Some(PlatformOverview::Dropapp(d)) = adapter(PlatformKind::Dropapp)
+            .overview(&r, &all_rights())
+            .await
+        else {
+            panic!("DropApp");
+        };
+        let m = d.metadata.data.unwrap();
+        assert_eq!((m.cluster_name, m.version), (None, None));
+        let c = d.components.data.unwrap();
+        assert_eq!((c.total, c.problems.len()), (0, 0));
+        assert_eq!(d.nodes.data.unwrap().total, 0);
+        assert_eq!(d.ingress_tls.data.unwrap().total, 0);
+        assert!(d.metadata.error.is_none() && d.components.error.is_none());
+        assert!(d.nodes.error.is_none() && d.ingress_tls.error.is_none());
+        drop(r);
+        assert_eq!(server.await.unwrap().len(), 5, "событий не спрашивали");
+    }
+
+    /// Нет `Tool`, а `Component` есть: часть компонентов — из одних `Component`.
+    #[tokio::test]
+    async fn dropapp_components_without_tools() {
+        let (client, _server) = mock_client(|s| match s.path() {
+            "/apis/config.dropapp.ru/v1alpha1/tools" => status(404, "NotFound", "not found"),
+            _ => dropapp_cluster(s),
+        });
+        let r = reader(client);
+        let Some(PlatformOverview::Dropapp(d)) = adapter(PlatformKind::Dropapp)
+            .overview(&r, &all_rights())
+            .await
+        else {
+            panic!("DropApp");
+        };
+        let c = d.components.data.unwrap();
+        assert_eq!(c.total, 3);
+        let names: Vec<_> = c.problems.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["cert-manager"]);
+    }
+
+    #[tokio::test]
+    async fn dropapp_overview_without_rights() {
+        let (client, server) = mock_client(forbidden);
+        let r = reader(client);
+        let Some(PlatformOverview::Dropapp(d)) = adapter(PlatformKind::Dropapp)
+            .overview(&r, &Capabilities::default())
+            .await
+        else {
+            panic!("DropApp");
+        };
+        for (part, resource) in [
+            (d.metadata.error, "clustermetadatas"),
+            (d.components.error, "components"),
+            (d.nodes.error, "dropappnodes"),
+            (d.ingress_tls.error, "ingresstlses"),
+        ] {
+            let e = part.unwrap_or_else(|| panic!("{resource}: причины нет"));
+            assert_eq!(e.key, "errors.k8s.forbiddenCluster");
+            assert_eq!(e.params["resource"], resource);
+        }
+        assert!(d.components.data.is_none());
+        drop(r);
+        let seen = server.await.unwrap();
+        assert!(!seen.iter().any(|s| s.path().ends_with("/events")));
     }
 
     #[tokio::test]

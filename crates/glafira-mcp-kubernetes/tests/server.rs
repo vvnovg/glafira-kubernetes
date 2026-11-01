@@ -2031,6 +2031,8 @@ enum Mode {
     Scheduling,
     /// Проверка отдаёт эту запись (запущенную человеком, например) вместо записи `Fake`.
     Run(Box<HealthRun>),
+    /// Обзор кластера DropApp.
+    Dropapp,
 }
 
 struct Odd {
@@ -2149,7 +2151,56 @@ fn leaky_overview() -> ClusterOverview {
             }),
             machine_config_pools_not_ok: Part::Data(vec![]),
         }),
+        dropapp: None,
         capabilities: Capabilities::default(),
+    }
+}
+
+/// Обзор DropApp: секреты в событии компонента и в сообщении условия `IngressTLS`.
+fn dropapp_overview() -> ClusterOverview {
+    ClusterOverview {
+        platform: Platform {
+            kind: PlatformKind::Dropapp,
+            label: "DropApp 5.1.2".into(),
+            version: Some("5.1.2".into()),
+            distribution: None,
+        },
+        server_version: "v1.29.15".into(),
+        openshift: None,
+        dropapp: Some(DropApp {
+            metadata: Part::Data(DropAppMetadata {
+                cluster_name: Some("prod-msk".into()),
+                version: Some("5.1.2".into()),
+            }),
+            components: Part::Data(DropAppComponents {
+                total: 12,
+                not_ok: vec![DropAppComponent {
+                    kind: "Tool".into(),
+                    name: "grafana".into(),
+                    namespace: None,
+                    status: Some("failed".into()),
+                    retry: Some(2),
+                    last_warning: Some(format!("InstallFailed: login rejected {JWT}")),
+                }],
+            }),
+            nodes: Part::Data(DropAppNodes {
+                total: 3,
+                not_ready: vec![DropAppNode {
+                    name: "worker-2".into(),
+                    status: Some("NotReady".into()),
+                }],
+            }),
+            ingress_tls: Part::Data(DropAppIngressTlsList {
+                total: 2,
+                not_ready: vec![DropAppIngressTls {
+                    name: "apps".into(),
+                    namespace: Some("dapp-system".into()),
+                    reason: Some("IssueFailed".into()),
+                    message: Some(format!("issuer rejected {JWT}")),
+                }],
+            }),
+        }),
+        ..leaky_overview()
     }
 }
 
@@ -2221,6 +2272,9 @@ impl Backend for Odd {
             match (&self.mode, &op) {
                 (Mode::Leaky, ReadOp::ClusterOverview { .. }) => {
                     return Ok(ReadOutput::Cluster(leaky_overview()));
+                }
+                (Mode::Dropapp, ReadOp::ClusterOverview { .. }) => {
+                    return Ok(ReadOutput::Cluster(dropapp_overview()));
                 }
                 (Mode::Leaky, ReadOp::DescribeNode { .. }) => {
                     return Ok(ReadOutput::Node(leaky_node()));
@@ -2611,6 +2665,34 @@ async fn cluster_text_of_nodes_operators_and_routes_goes_through_the_builtin_pat
     assert_eq!(
         v["httpRoutes"][0]["parents"][0]["accepted"]["message"],
         "rejected ***"
+    );
+    assert_masked(&v, 2);
+}
+
+#[tokio::test]
+async fn dropapp_overview_has_its_part_and_its_cluster_text_is_masked() {
+    let e = env_over(odd(Mode::Dropapp)).await;
+    let c = client(&e.ep).await;
+    let v = ok(call(&c, "get_cluster_overview", json!({"connectionId": "c1"})).await);
+    assert_eq!(v["platform"]["kind"], "dropapp");
+    assert!(v.get("openshift").is_none(), "{v}");
+    let d = &v["dropapp"];
+    assert_eq!(
+        d["metadata"],
+        json!({"clusterName": "prod-msk", "version": "5.1.2"})
+    );
+    assert_eq!(
+        d["components"],
+        json!({"total": 12, "notOk": [{"kind": "Tool", "name": "grafana", "status": "failed",
+            "retry": 2, "lastWarning": "InstallFailed: login rejected ***"}]})
+    );
+    assert_eq!(
+        d["nodes"],
+        json!({"total": 3, "notReady": [{"name": "worker-2", "status": "NotReady"}]})
+    );
+    assert_eq!(
+        d["ingressTls"]["notReady"][0]["message"],
+        "issuer rejected ***"
     );
     assert_masked(&v, 2);
 }

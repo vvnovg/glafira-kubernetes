@@ -461,6 +461,40 @@ export interface OpenShiftOverview {
   machineConfigPools: Part<MachineConfigPoolRow[]>;
 }
 
+/** `Component` или `Tool` DropApp в сбое или обновлении. */
+export interface ComponentRow {
+  kind: "Component" | "Tool";
+  name: string;
+  namespace: string | null;
+  status: string | null;
+  /** RETRY: сколько раз установка повторялась. */
+  retry: number | null;
+  /** `причина: сообщение` последнего события Warning по объекту. */
+  event: string | null;
+}
+
+export interface DropAppNodeRow {
+  name: string;
+  status: string | null;
+}
+
+/** `IngressTLS`, у которого условие `Ready` не `True`. */
+export interface IngressTlsRow {
+  name: string;
+  namespace: string | null;
+  reason: string | null;
+  message: string | null;
+}
+
+/** Часть обзора DropApp; нет CRD — пустые значения (`total: 0`). */
+export interface DropAppOverview {
+  kind: "dropapp";
+  metadata: Part<{ clusterName: string | null; version: string | null }>;
+  components: Part<{ total: number; problems: ComponentRow[] }>;
+  nodes: Part<{ total: number; problems: DropAppNodeRow[] }>;
+  ingressTls: Part<{ total: number; problems: IngressTlsRow[] }>;
+}
+
 export interface ClusterOverview {
   platform: PlatformInfo;
   serverVersion: string;
@@ -470,7 +504,7 @@ export interface ClusterOverview {
   /** null — в кластере нет Gateway API. */
   gatewayClasses: Part<GatewayClassRow[]> | null;
   projects: Part<ProjectCount>;
-  platformDetails: OpenShiftOverview | null;
+  platformDetails: OpenShiftOverview | DropAppOverview | null;
 }
 
 export interface NodeRow {

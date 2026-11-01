@@ -502,6 +502,22 @@
       "degraded": "Degraded",
       "message": "Message"
     },
+    "dropapp": {
+      "clusterName": "Cluster name",
+      "components": "Components and tools",
+      "componentsOk": "Components and tools: {{total}}, all fine.",
+      "problems": "Not fine: {{bad}} of {{total}}.",
+      "kind": "Kind",
+      "name": "Name",
+      "status": "Status",
+      "retry": "Retries",
+      "event": "Last warning",
+      "nodes": "DropApp nodes",
+      "nodesOk": "Nodes: {{total}}, all ready.",
+      "notReady": "Not ready: {{bad}} of {{total}}.",
+      "ingressTls": "Ingress certificates (IngressTLS)",
+      "ingressTlsOk": "Certificates: {{total}}, all ready."
+    },
     "nodes": {
       "open": "Nodes",
       "title": "Nodes",

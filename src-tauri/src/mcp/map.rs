@@ -226,6 +226,11 @@ pub fn capabilities(c: &Capabilities) -> m::Capabilities {
 }
 
 pub fn cluster(o: ClusterOverview, caps: &Capabilities, now: i64) -> m::ClusterOverview {
+    let (openshift, dropapp) = match o.platform_details {
+        Some(PlatformOverview::Openshift(os)) => (Some(os), None),
+        Some(PlatformOverview::Dropapp(d)) => (None, Some(d)),
+        None => (None, None),
+    };
     m::ClusterOverview {
         platform: platform(&o.platform),
         server_version: o.server_version,
@@ -267,46 +272,89 @@ pub fn cluster(o: ClusterOverview, caps: &Capabilities, now: i64) -> m::ClusterO
                     .collect()
             })
         }),
-        openshift: o.platform_details.map(|d| match d {
-            PlatformOverview::Openshift(os) => m::OpenShift {
-                cluster_version: part(os.cluster_version, |v| m::ClusterVersion {
-                    version: v.version,
-                    channel: v.channel,
-                    available_updates: v.available_updates,
-                    failing: v.failing.as_ref().map(|c| condition(c, now)),
-                    progressing: v.progressing.as_ref().map(|c| condition(c, now)),
-                }),
-                infrastructure: part(os.infrastructure, |i| i),
-                operators: part(os.operators, |s| m::Operators {
-                    total: s.total,
-                    not_ok: s
-                        .problems
-                        .into_iter()
-                        .map(|o| m::Operator {
-                            name: o.name,
-                            version: o.version,
-                            available: o.available,
-                            progressing: o.progressing,
-                            degraded: o.degraded,
-                            message: o.message,
-                        })
-                        .collect(),
-                }),
-                machine_config_pools_not_ok: part(os.machine_config_pools, |v| {
-                    v.into_iter()
-                        .filter(|p| p.degraded || p.updating)
-                        .map(|p| m::MachineConfigPool {
-                            name: p.name,
-                            degraded: p.degraded,
-                            updating: p.updating,
-                            machines: p.machines,
-                            ready: p.ready,
-                            updated: p.updated,
-                            degraded_machines: p.degraded_machines,
-                        })
-                        .collect()
-                }),
-            },
+        openshift: openshift.map(|os| m::OpenShift {
+            cluster_version: part(os.cluster_version, |v| m::ClusterVersion {
+                version: v.version,
+                channel: v.channel,
+                available_updates: v.available_updates,
+                failing: v.failing.as_ref().map(|c| condition(c, now)),
+                progressing: v.progressing.as_ref().map(|c| condition(c, now)),
+            }),
+            infrastructure: part(os.infrastructure, |i| i),
+            operators: part(os.operators, |s| m::Operators {
+                total: s.total,
+                not_ok: s
+                    .problems
+                    .into_iter()
+                    .map(|o| m::Operator {
+                        name: o.name,
+                        version: o.version,
+                        available: o.available,
+                        progressing: o.progressing,
+                        degraded: o.degraded,
+                        message: o.message,
+                    })
+                    .collect(),
+            }),
+            machine_config_pools_not_ok: part(os.machine_config_pools, |v| {
+                v.into_iter()
+                    .filter(|p| p.degraded || p.updating)
+                    .map(|p| m::MachineConfigPool {
+                        name: p.name,
+                        degraded: p.degraded,
+                        updating: p.updating,
+                        machines: p.machines,
+                        ready: p.ready,
+                        updated: p.updated,
+                        degraded_machines: p.degraded_machines,
+                    })
+                    .collect()
+            }),
+        }),
+        dropapp: dropapp.map(|d| m::DropApp {
+            metadata: part(d.metadata, |md| m::DropAppMetadata {
+                cluster_name: md.cluster_name,
+                version: md.version,
+            }),
+            components: part(d.components, |s| m::DropAppComponents {
+                total: s.total,
+                not_ok: s
+                    .problems
+                    .into_iter()
+                    .map(|c| m::DropAppComponent {
+                        kind: c.kind.as_str().into(),
+                        name: c.name,
+                        namespace: c.namespace,
+                        status: c.status,
+                        retry: c.retry,
+                        last_warning: c.event,
+                    })
+                    .collect(),
+            }),
+            nodes: part(d.nodes, |s| m::DropAppNodes {
+                total: s.total,
+                not_ready: s
+                    .problems
+                    .into_iter()
+                    .map(|n| m::DropAppNode {
+                        name: n.name,
+                        status: n.status,
+                    })
+                    .collect(),
+            }),
+            ingress_tls: part(d.ingress_tls, |s| m::DropAppIngressTlsList {
+                total: s.total,
+                not_ready: s
+                    .problems
+                    .into_iter()
+                    .map(|t| m::DropAppIngressTls {
+                        name: t.name,
+                        namespace: t.namespace,
+                        reason: t.reason,
+                        message: t.message,
+                    })
+                    .collect(),
+            }),
         }),
         capabilities: capabilities(caps),
     }
@@ -837,6 +885,94 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&p).unwrap(),
             serde_json::json!({"kind": "dropapp", "label": "DropApp 5.1.2", "version": "5.1.2"})
+        );
+    }
+
+    #[test]
+    fn dropapp_overview_reaches_mcp_as_its_own_part() {
+        use crate::k8s::dropapp::{ComponentKind, ComponentRow, DropAppMetadata, DropAppNodeRow};
+        use crate::k8s::overview::{ProjectCount, Readyz};
+        use crate::platform::adapters::{ComponentSummary, DropAppNodeSummary, DropAppOverview};
+        let o = ClusterOverview {
+            platform: PlatformInfo {
+                kind: PlatformKind::Dropapp,
+                distribution: None,
+                version: Some("5.1.2".into()),
+                label: "DropApp 5.1.2".into(),
+            },
+            server_version: "v1.29.15".into(),
+            readyz: Readyz {
+                ok: true,
+                failed: vec![],
+                error: None,
+            },
+            nodes: Part::ok(crate::k8s::nodes::NodeSummary {
+                total: 3,
+                ready: 3,
+                roles: vec![],
+            }),
+            ingress_classes: Part::ok(vec![]),
+            gateway_classes: None,
+            projects: Part::ok(ProjectCount {
+                count: 4,
+                more: false,
+            }),
+            platform_details: Some(PlatformOverview::Dropapp(DropAppOverview {
+                metadata: Part::ok(DropAppMetadata {
+                    cluster_name: Some("prod-msk".into()),
+                    version: Some("5.1.2".into()),
+                }),
+                components: Part::ok(ComponentSummary {
+                    total: 6,
+                    problems: vec![
+                        ComponentRow {
+                            kind: ComponentKind::Component,
+                            name: "cert-manager".into(),
+                            namespace: Some("dapp-system".into()),
+                            status: Some("Failed".into()),
+                            retry: Some(3),
+                            event: Some("InstallFailed: helm install failed".into()),
+                        },
+                        ComponentRow {
+                            kind: ComponentKind::Tool,
+                            name: "dex".into(),
+                            namespace: None,
+                            status: Some("upgrading".into()),
+                            retry: None,
+                            event: None,
+                        },
+                    ],
+                }),
+                nodes: Part::ok(DropAppNodeSummary {
+                    total: 3,
+                    problems: vec![DropAppNodeRow {
+                        name: "worker-2".into(),
+                        status: Some("NotReady".into()),
+                    }],
+                }),
+                ingress_tls: Part::err(crate::k8s::errors::not_allowed(
+                    "list",
+                    "ingresstlses",
+                    None,
+                )),
+            })),
+        };
+        let v = serde_json::to_value(cluster(o, &Capabilities::default(), 0)).unwrap();
+        assert!(v.get("openshift").is_none(), "{v}");
+        assert_eq!(
+            v["dropapp"],
+            serde_json::json!({
+                "metadata": {"clusterName": "prod-msk", "version": "5.1.2"},
+                "components": {"total": 6, "notOk": [
+                    {"kind": "Component", "name": "cert-manager", "namespace": "dapp-system",
+                        "status": "Failed", "retry": 3,
+                        "lastWarning": "InstallFailed: helm install failed"},
+                    {"kind": "Tool", "name": "dex", "status": "upgrading"}
+                ]},
+                "nodes": {"total": 3, "notReady": [{"name": "worker-2", "status": "NotReady"}]},
+                "ingressTls": {"error":
+                    "FORBIDDEN: Not allowed: list ingresstlses at the cluster level"}
+            })
         );
     }
 
