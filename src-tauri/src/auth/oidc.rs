@@ -72,6 +72,33 @@ fn no_metadata(url: &str) -> AppError {
     )
 }
 
+/// Адрес авторизации открывается в браузере, а на адрес токенов уходят код, verifier и секрет
+/// клиента: только https. http допустим лишь для локального издателя (127.0.0.1 и localhost,
+/// как в `validate_oidc`: тесты и имитация).
+fn check_endpoints(issuer: &str, meta: &OidcMetadata) -> AppResult<()> {
+    let local_http = url::Url::parse(issuer).is_ok_and(|u| {
+        u.scheme() == "http" && matches!(u.host_str(), Some("127.0.0.1" | "localhost"))
+    });
+    for (name, value) in [
+        ("authorization_endpoint", &meta.authorization_endpoint),
+        ("token_endpoint", &meta.token_endpoint),
+    ] {
+        if !is_http_url(value) {
+            return Err(no_metadata(issuer).with_details(format!("{name}: {value}")));
+        }
+        if !local_http && !value.trim().to_ascii_lowercase().starts_with("https://") {
+            return Err(app_err!(
+                ErrorCode::AuthFailed,
+                "errors.oidc.insecureEndpoint",
+                "The OIDC provider {{url}} advertises an insecure (http) endpoint",
+                url = issuer
+            )
+            .with_details(format!("{name}: {value}")));
+        }
+    }
+    Ok(())
+}
+
 /// `GET <issuer>/.well-known/openid-configuration`; `issuer` ответа должен совпасть с адресом
 /// издателя (без завершающего «/»).
 pub async fn fetch_metadata(http: &reqwest::Client, issuer_url: &str) -> AppResult<OidcMetadata> {
@@ -85,16 +112,7 @@ pub async fn fetch_metadata(http: &reqwest::Client, issuer_url: &str) -> AppResu
         .json::<OidcMetadata>()
         .await
         .map_err(|e| no_metadata(issuer).with_details(chain_text(&e)))?;
-    // Адрес авторизации открывается в браузере, а на адрес токенов уходят код, verifier и секрет
-    // клиента: только http(s).
-    for (name, value) in [
-        ("authorization_endpoint", &meta.authorization_endpoint),
-        ("token_endpoint", &meta.token_endpoint),
-    ] {
-        if !is_http_url(value) {
-            return Err(no_metadata(issuer).with_details(format!("{url}: {name}: {value}")));
-        }
-    }
+    check_endpoints(issuer, &meta)?;
     if meta.issuer.trim_end_matches('/') != issuer {
         return Err(app_err!(
             ErrorCode::AuthFailed,
@@ -500,6 +518,38 @@ mod tests {
         assert_eq!(
             (e.code, e.key.as_str()),
             (ErrorCode::AuthFailed, "errors.oidc.noMetadata")
+        );
+    }
+
+    #[test]
+    fn https_issuer_must_not_advertise_http_endpoints() {
+        let meta = |auth: &str, token: &str| OidcMetadata {
+            issuer: "https://auth.c1".into(),
+            authorization_endpoint: auth.into(),
+            token_endpoint: token.into(),
+        };
+        let ok = meta("https://auth.c1/auth", "https://auth.c1/token");
+        assert!(check_endpoints("https://auth.c1", &ok).is_ok());
+        for bad in [
+            meta("http://auth.c1/auth", "https://auth.c1/token"),
+            meta("https://auth.c1/auth", "http://auth.c1/token"),
+        ] {
+            let e = check_endpoints("https://auth.c1", &bad).unwrap_err();
+            assert_eq!(
+                (e.code, e.key.as_str()),
+                (ErrorCode::AuthFailed, "errors.oidc.insecureEndpoint")
+            );
+        }
+        // Локальный http-издатель (тесты и имитация) может отдавать http-адреса.
+        let local = meta("http://127.0.0.1:1/auth", "http://127.0.0.1:1/token");
+        assert!(check_endpoints("http://127.0.0.1:1", &local).is_ok());
+        // Адрес не http(s) отклоняется и для локального издателя.
+        let junk = meta("javascript:alert(1)", "http://127.0.0.1:1/token");
+        assert_eq!(
+            check_endpoints("http://127.0.0.1:1", &junk)
+                .unwrap_err()
+                .key,
+            "errors.oidc.noMetadata"
         );
     }
 

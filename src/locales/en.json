@@ -142,6 +142,7 @@
       "clientIdMissing": "Specify the OIDC client ID",
       "openidScopeMissing": "The OIDC scopes must include openid",
       "noMetadata": "The OIDC issuer {{url}} returned no OpenID configuration — check the issuer address",
+      "insecureEndpoint": "The OIDC provider {{url}} advertises an insecure (http) endpoint",
       "issuerMismatch": "The issuer address does not match: the provider reports “{{actual}}”, the connection has “{{expected}}”",
       "portsBusy": "Ports {{first}} and {{last}} are busy — close kubelogin or the program that holds them",
       "providerError": "The OIDC provider rejected the sign-in: {{reason}}",

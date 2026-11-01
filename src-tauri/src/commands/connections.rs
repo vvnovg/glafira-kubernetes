@@ -134,6 +134,20 @@ fn secret_ops(profile: &ConnectionProfile, s: &SecretsInput) -> [(&'static str, 
     ]
 }
 
+/// Прежний способ входа — OIDC, а издатель или client id другие (адреса сравниваются без
+/// завершающего «/»).
+fn oidc_identity_changed(before: &AuthConfig, after: &AuthConfig) -> bool {
+    match (before, after) {
+        (AuthConfig::Oidc(a), AuthConfig::Oidc(b)) => {
+            let issuer = |o: &crate::storage::profile::OidcAuth| {
+                o.issuer_url.trim().trim_end_matches('/').to_string()
+            };
+            issuer(a) != issuer(b) || a.client_id.trim() != b.client_id.trim()
+        }
+        _ => false,
+    }
+}
+
 #[tauri::command]
 pub fn list_connections(state: State<'_, AppState>) -> AppResult<Vec<ConnectionProfile>> {
     Ok(state.connections.list())
@@ -170,6 +184,17 @@ pub fn save_connection_blocking(
     // Сначала `Set`, потом `Delete`: если keychain не примет новый секрет после смены способа
     // входа, прежний ещё на месте, и откат профиля не оставляет его без секрета.
     let mut ops = secret_ops(&saved, &secrets);
+    // Токены выданы прежним издателем и клиенту: при смене любого из них они не годятся.
+    if previous
+        .as_ref()
+        .is_some_and(|p| oidc_identity_changed(&p.auth, &saved.auth))
+    {
+        for (field, op) in &mut ops {
+            if matches!(*field, OIDC_ID_TOKEN | OIDC_REFRESH_TOKEN) {
+                *op = SecretOp::Delete;
+            }
+        }
+    }
     ops.sort_by_key(|(_, op)| *op == SecretOp::Delete);
     let result = ops.into_iter().try_for_each(|(field, op)| {
         let key = secret_key(&saved.id, field);
@@ -421,6 +446,56 @@ mod tests {
         assert_eq!(
             secret_ops(&bearer, &SecretsInput::default())[2],
             (METRICS_TOKEN, SecretOp::Keep)
+        );
+    }
+
+    /// Сохраняет OIDC-подключение с токенами входа, затем сохраняет его же с правкой `edit`.
+    fn oidc_tokens_after_edit(
+        edit: impl FnOnce(&mut crate::storage::profile::OidcAuth),
+    ) -> [Option<String>; 2] {
+        let dir = tempfile::tempdir().unwrap();
+        let st = state(dir.path());
+        let mut p = sample_profile("");
+        p.id = String::new();
+        p.auth = AuthConfig::Oidc(crate::storage::profile::sample_oidc());
+        let saved = save_connection_blocking(&st, input(p, None, None)).unwrap();
+        st.secrets
+            .set(&secret_key(&saved.id, OIDC_ID_TOKEN), "idt")
+            .unwrap();
+        st.secrets
+            .set(&secret_key(&saved.id, OIDC_REFRESH_TOKEN), "rt")
+            .unwrap();
+        let mut next = saved.clone();
+        if let AuthConfig::Oidc(o) = &mut next.auth {
+            edit(o);
+        }
+        save_connection_blocking(&st, input(next, None, None)).unwrap();
+        [
+            secret(&st, &saved.id, OIDC_ID_TOKEN),
+            secret(&st, &saved.id, OIDC_REFRESH_TOKEN),
+        ]
+    }
+
+    #[test]
+    fn oidc_tokens_are_dropped_when_issuer_or_client_changes() {
+        // Другой издатель: токены прежнего нельзя отправлять новому.
+        assert_eq!(
+            oidc_tokens_after_edit(|o| o.issuer_url = "https://other.example.com".into()),
+            [None, None]
+        );
+        // Другой client id: refresh_token выдан прежнему клиенту.
+        assert_eq!(
+            oidc_tokens_after_edit(|o| o.client_id = "other-client".into()),
+            [None, None]
+        );
+        // Ничего не изменилось (завершающий «/» адреса — та же нормализация): токены остаются.
+        assert_eq!(
+            oidc_tokens_after_edit(|o| o.issuer_url.push('/')),
+            [Some("idt".into()), Some("rt".into())]
+        );
+        assert_eq!(
+            oidc_tokens_after_edit(|_| ()),
+            [Some("idt".into()), Some("rt".into())]
         );
     }
 

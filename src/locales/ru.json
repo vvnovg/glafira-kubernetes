@@ -142,6 +142,7 @@
       "clientIdMissing": "Укажите client ID OIDC",
       "openidScopeMissing": "В scopes OIDC должен быть openid",
       "noMetadata": "Издатель OIDC {{url}} не вернул конфигурацию OpenID — проверьте адрес издателя",
+      "insecureEndpoint": "Провайдер OIDC {{url}} указывает небезопасный (http) адрес",
       "issuerMismatch": "Адрес издателя не совпадает: провайдер сообщает «{{actual}}», в подключении — «{{expected}}»",
       "portsBusy": "Порты {{first}} и {{last}} заняты — закройте kubelogin или программу, которая их держит",
       "providerError": "OIDC-провайдер отклонил вход: {{reason}}",
