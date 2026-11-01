@@ -35,14 +35,16 @@ MCP-шлюз должен надёжно работать с локальным�
  Expected arguments ("?" marks optional, pass objects as JSON objects, not strings): <набросок>
 ```
 
-Набросок строится по схеме инструмента без `$ref` (`inline_refs`): объект — `{"ключ":значение,…}` с ключами в
-порядке схемы; обязательный ключ — как есть, необязательный — с `?` в конце имени; `"string"`, `"integer"`,
-`"number"`, `"boolean"` — по `type` (у `type: ["integer","null"]` — без `null`); перечисление — значения через `|`
+Набросок строится по схеме инструмента без `$ref` (`inline_refs`), как в Kafka-версии: объект —
+`{"ключ":значение,…}` с ключами по алфавиту (так их упорядочивает `serde_json`); обязательный ключ — как есть,
+необязательный — с `?` в конце имени; `"string"`, `"integer"`, `"number"`, `"boolean"`, `"object"` — по `type` (у
+`type: ["integer","null"]` — без `null`); перечисление — значения через `|`
 (`"Deployment|StatefulSet|DaemonSet|DeploymentConfig|Job|CronJob"`); `anyOf`/`oneOf` из скаляров — варианты через
-` | `, из объектов — первый вариант; массив — `[<набросок элемента>]`. Пример для `search_workload_logs`:
+` | `, из объектов — `{"oneOf":[…]}`; массив — `[<набросок элемента>]`; схема без типа — `"any"`. Пример для
+`search_workload_logs`:
 
 ```
-{"connectionId":"string","namespace":"string","workload":{"kind":"Deployment|StatefulSet|DaemonSet|DeploymentConfig|Job|CronJob","name":"string"},"filter":{"caseSensitive?":"boolean","contains?":"string","regex?":"string"},"sinceSeconds?":"integer","maxMatches?":"integer","contextLines?":"integer"}
+{"connectionId":"string","contextLines?":"integer","filter":{"caseSensitive?":"boolean","contains?":"string","regex?":"string"},"maxMatches?":"integer","namespace":"string","sinceSeconds?":"integer","workload":{"kind":"Deployment|StatefulSet|DaemonSet|DeploymentConfig|Job|CronJob","name":"string"}}
 ```
 
 Код ошибки и остальной текст не меняются; журнал MCP пишет вызов как прежде.
@@ -73,7 +75,10 @@ MCP-шлюз должен надёжно работать с локальным�
   постоянных 100 КБ), с `truncated: true` и прежней подсказкой; `search_workload_logs` укладывает в предел ответ с
   совпадениями: отбрасываются последние по порядку ответа совпадения с их контекстом, `truncated: true` и подсказка
   `Matches were truncated to the size limit: narrow the filter or the time range`. Длина одного значения (4 КБ у
-  строки лога и значения переменной) и бюджет просмотра (20 подов, 50 МБ, 40 с) не меняются.
+  строки лога и значения переменной) и бюджет просмотра (20 подов, 50 МБ, 40 с) не меняются; у `observe_workload`
+  остаётся свой предел состояния 45 КБ, а итог больше предела клиента отклоняется обвязкой (`response_too_large`).
+- Остальные подсказки и тексты об усечении («truncated to 100 KB», «fit into 100 KB») говорят «the size limit»;
+  `get_network` и ряды `get_resource_usage` сверяются с пределом вызова.
 
 ### 3.4 Компактный набор инструментов
 
@@ -133,10 +138,10 @@ MCP-шлюз должен надёжно работать с локальным�
   контекста 64k предел 48 или 24 КБ и компактный набор, если предложения не нужны, со ссылкой на
   `llm-mcp.md#response-limit`; пункт `invalid type: string, expected struct` в «Если не работает» —
   Glafira разбирает такие строки сама (с этой версии).
-- Основная спека: §10.4 — компактный набор и инструкции; §10.6 — части инструкций; §10.7 — предел (значения, `hint`,
-  `response_too_large`), подсказка формы, приведение аргументов; §13 — `mcp.responseLimitKb`,
-  `approvedClients[].compactTools`; §19 — строка этапа O4b.
-- CHANGELOG (en, ru).
+- Основная спека: §10.4 — компактный набор, схемы без `$ref`, приведение аргументов и подсказка формы; §10.6 —
+  инструкции компактного клиента; §10.7 — предел (значения, `hint`, `response_too_large`); §13 —
+  `mcp.responseLimitKb`, `approvedClients[].compactTools`; §19 — строка этапа O4b.
+- CHANGELOG не меняется: после 0.1.0 его ведут при выпуске версии, как и для этапов O3 и O4.
 
 ## 5. Тесты
 

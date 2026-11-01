@@ -57,6 +57,24 @@ An allowed client is remembered by name and appears in [[ui:settings.mcp.clients
 Glafira asks again the next time. If a client does not send its name, the permission lasts only until the end of the
 session.
 
+## Response limit and compact tool set {#response-limit}
+
+For an assistant on a local model with a small context (see [Local model](local-llm.md#glafira-settings)),
+[[ui:settings.mcp.section]] has two settings:
+
+- [[ui:settings.mcp.responseLimit]] — the largest answer of one tool call: 100, 48 or 24 KB (100 by default; a 100 KB
+  answer is about 25–30 thousand tokens). Lists, logs and search matches are truncated to the limit, and the assistant
+  sees `truncated` and a hint on how to narrow the request. The limit applies to all clients from the next call.
+- [[ui:settings.mcp.colCompact]] in the [[ui:settings.mcp.clients]] list — a tool set without notes and change
+  proposals (`annotate`, `remove_annotation`, `propose_change`, `withdraw_proposal`): their descriptions take about
+  2,300 tokens. An assistant with this set describes the needed changes in words. The checkbox appears once the client
+  connects and you approve it; the client sees the new tool list after it reconnects, and Glafira refuses a call to a
+  hidden tool at once.
+
+If the assistant gets the arguments of a call wrong, Glafira answers with an error that sketches the expected
+arguments, and it parses a nested object sent as a JSON string by itself: this way small models correct themselves on
+the first retry.
+
 ## What the assistant sees {#what-llm-sees}
 
 The assistant sees only connections with LLM access and only their projects from [[ui:connections.form.llmScope]];
