@@ -13,6 +13,12 @@ pub fn cluster_metadatas() -> ApiResource {
     resource("config.dropapp.ru", "ClusterMetadata", "clustermetadatas")
 }
 
+/// `Project` (DropApp 5.x): проекция namespace агрегированным API `dapp-apiserver`, имя проекта —
+/// имя namespace; в списке только проекты, доступные пользователю.
+pub fn projects() -> ApiResource {
+    resource("projects.dropapp.ru", "Project", "projects")
+}
+
 /// Версия DropApp из `ClusterMetadata` (`spec.dappVersion`) как есть: `5.1.2`. Нет поля или
 /// пустая строка — `None`.
 pub fn dapp_version(o: &DynamicObject) -> Option<String> {

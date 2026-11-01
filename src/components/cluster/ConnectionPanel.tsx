@@ -20,10 +20,11 @@ const CAPABILITIES: (keyof Capabilities)[] = ["listProjects", "listNodes", "list
 /** Права, которые бывают только у OpenShift. */
 const OPENSHIFT_ONLY: (keyof Capabilities)[] = ["readClusterOperators", "readClusterVersion"];
 
-/** Группы API, найденные в кластере; названия видов не переводятся. */
+/** Группы API, найденные в кластере; названия видов не переводятся. Project у OpenShift и DropApp — один вид. */
 const API_GROUPS: [keyof ApiGroups, string][] = [
   ["routes", "Route"],
   ["projects", "Project"],
+  ["dropappProjects", "Project"],
   ["deploymentConfigs", "DeploymentConfig"],
   ["gatewayApi", "Gateway API"],
 ];
@@ -102,7 +103,7 @@ function ConnectionError({ error, signIn, onRetry, profile }: { error: AppError;
 function ConnectionSummary({ info, now, busy, onReconnect }: { info: ConnectionInfo; now: number; busy: boolean; onReconnect: () => void }) {
   const { t } = useTranslation();
   const openShift = info.platform.kind === "openshift";
-  const found = API_GROUPS.filter(([k]) => info.apiGroups[k]).map(([, name]) => name);
+  const found = [...new Set(API_GROUPS.filter(([k]) => info.apiGroups[k]).map(([, name]) => name))];
   const expiresIn = info.tokenExpiresAt === null ? null : info.tokenExpiresAt - now / 1000;
   return (
     <>

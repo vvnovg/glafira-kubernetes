@@ -200,6 +200,8 @@ export interface PlatformInfo {
 export interface ApiGroups {
   routes: boolean;
   projects: boolean;
+  /** `projects.dropapp.ru`: проекты DropApp 5.x, если нет проектов OpenShift. */
+  dropappProjects: boolean;
   deploymentConfigs: boolean;
   gatewayApi: boolean;
 }

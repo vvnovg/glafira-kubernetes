@@ -488,7 +488,11 @@ async fn projects(
                 .read_required(
                     "projects",
                     None,
-                    crate::k8s::projects::list_projects(rd.r, info.api_groups.projects, profile),
+                    crate::k8s::projects::list_projects(
+                        rd.r,
+                        info.api_groups.project_source(),
+                        profile,
+                    ),
                 )
                 .await;
             let Some(list) = list else {

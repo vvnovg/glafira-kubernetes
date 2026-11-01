@@ -73,7 +73,7 @@ const INFO: ConnectionInfo = {
   groups: [],
   serverVersion: "v1.31.6",
   platform: OPENSHIFT.platform,
-  apiGroups: { routes: true, projects: true, deploymentConfigs: true, gatewayApi: false },
+  apiGroups: { routes: true, projects: true, dropappProjects: false, deploymentConfigs: true, gatewayApi: false },
   capabilities: { listProjects: true, listNodes: true, listAllPods: false, readClusterOperators: true, readClusterVersion: true },
   tokenExpiresAt: null,
 };

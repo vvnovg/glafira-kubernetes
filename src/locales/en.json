@@ -293,7 +293,7 @@
     },
     "cluster": {
       "platform": "Detected from the API groups and the version: OpenShift, or Kubernetes with its distribution (EKS, GKE, AKS, Rancher, Deckhouse, k3s, RKE2).",
-      "apiGroups": "What the cluster offers beyond plain Kubernetes: Route, projects and DeploymentConfig (OpenShift), Gateway API. They decide which objects are shown.",
+      "apiGroups": "What the cluster offers beyond plain Kubernetes: Route, projects and DeploymentConfig (OpenShift), DropApp projects, Gateway API. They decide which objects are shown.",
       "readyz": "The <code>/readyz</code> checks of the API server. Any user can read them; a failed check names the part of the server that is not ready."
     },
     "kubeconfig": {

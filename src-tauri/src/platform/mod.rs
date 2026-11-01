@@ -101,6 +101,9 @@ pub struct ApiGroups {
     pub routes: bool,
     /// `project.openshift.io` — проекты вместо списка namespace.
     pub projects: bool,
+    /// `projects.dropapp.ru` (DropApp 5.x) — проекты вместо списка namespace, если нет
+    /// `project.openshift.io`.
+    pub dropapp_projects: bool,
     /// `apps.openshift.io` — DeploymentConfig.
     pub deployment_configs: bool,
     /// `gateway.networking.k8s.io/v1` — Gateway API (Gateway, HTTPRoute, GRPCRoute).
@@ -112,11 +115,54 @@ impl ApiGroups {
         Self {
             routes: d.has_group("route.openshift.io"),
             projects: d.has_group("project.openshift.io"),
+            dropapp_projects: d.has_group("projects.dropapp.ru"),
             deployment_configs: d.has_group("apps.openshift.io"),
             gateway_api: d
                 .group_versions
                 .iter()
                 .any(|gv| gv == "gateway.networking.k8s.io/v1"),
+        }
+    }
+
+    /// Откуда берётся список проектов: проекты OpenShift, иначе DropApp, иначе namespace.
+    pub fn project_source(&self) -> ProjectSource {
+        if self.projects {
+            ProjectSource::Openshift
+        } else if self.dropapp_projects {
+            ProjectSource::Dropapp
+        } else {
+            ProjectSource::Namespaces
+        }
+    }
+}
+
+/// Источник списка проектов (спец. §4.3, O5 §4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectSource {
+    /// `projects.project.openshift.io/v1`.
+    Openshift,
+    /// `projects.projects.dropapp.ru/v1alpha1`: проекция namespace, имя проекта — имя namespace;
+    /// пользователь видит только свои проекты.
+    Dropapp,
+    /// `namespaces`.
+    Namespaces,
+}
+
+impl ProjectSource {
+    /// Группа API списка — для проверки права.
+    pub fn group(self) -> &'static str {
+        match self {
+            ProjectSource::Openshift => "project.openshift.io",
+            ProjectSource::Dropapp => "projects.dropapp.ru",
+            ProjectSource::Namespaces => "",
+        }
+    }
+
+    /// Ресурс списка — для проверки права и текста отказа.
+    pub fn resource(self) -> &'static str {
+        match self {
+            ProjectSource::Openshift | ProjectSource::Dropapp => "projects",
+            ProjectSource::Namespaces => "namespaces",
         }
     }
 }
@@ -422,12 +468,60 @@ mod tests {
             ApiGroups {
                 routes: true,
                 projects: true,
+                dropapp_projects: false,
                 deployment_configs: true,
                 gateway_api: false,
             }
         );
+        assert_eq!(
+            ApiGroups::of(&snapshot(DROPAPP, "v1.29.10")),
+            ApiGroups {
+                dropapp_projects: true,
+                ..Default::default()
+            }
+        );
         let beta_only = snapshot(&["gateway.networking.k8s.io/v1beta1"], "v1.29.0");
         assert!(!ApiGroups::of(&beta_only).gateway_api, "нужна версия v1");
+    }
+
+    /// Список проектов: OpenShift, иначе DropApp, иначе namespace (спец. O5 §4).
+    #[test]
+    fn project_source_by_api_groups() {
+        let cases = [
+            (
+                ApiGroups::of(&snapshot(OPENSHIFT, "v1.31.6")),
+                ProjectSource::Openshift,
+            ),
+            (
+                ApiGroups::of(&snapshot(DROPAPP, "v1.29.10")),
+                ProjectSource::Dropapp,
+            ),
+            (
+                ApiGroups {
+                    projects: true,
+                    dropapp_projects: true,
+                    ..Default::default()
+                },
+                ProjectSource::Openshift,
+            ),
+            (ApiGroups::default(), ProjectSource::Namespaces),
+        ];
+        for (groups, source) in cases {
+            assert_eq!(groups.project_source(), source, "{groups:?}");
+        }
+        assert_eq!(
+            [
+                ProjectSource::Openshift,
+                ProjectSource::Dropapp,
+                ProjectSource::Namespaces
+            ]
+            .map(|s| (s.group(), s.resource())),
+            [
+                ("project.openshift.io", "projects"),
+                ("projects.dropapp.ru", "projects"),
+                ("", "namespaces")
+            ]
+        );
     }
 
     #[test]

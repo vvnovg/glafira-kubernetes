@@ -35,7 +35,7 @@ const INFO: ConnectionInfo = {
   groups: ["system:authenticated", "team-a"],
   serverVersion: "v1.32.5",
   platform: { kind: "openshift", distribution: null, version: "4.18", label: "OpenShift 4.18" },
-  apiGroups: { routes: true, projects: true, deploymentConfigs: true, gatewayApi: false },
+  apiGroups: { routes: true, projects: true, dropappProjects: false, deploymentConfigs: true, gatewayApi: false },
   capabilities: { listProjects: true, listNodes: false, listAllPods: false, readClusterOperators: true, readClusterVersion: false },
   tokenExpiresAt: null,
 };
@@ -138,12 +138,24 @@ describe("ConnectionPanel", () => {
     vi.mocked(api.connect).mockResolvedValue({
       ...INFO,
       platform: { kind: "kubernetes", distribution: "eks", version: "1.31", label: "Kubernetes 1.31 (EKS)" },
-      apiGroups: { routes: false, projects: false, deploymentConfigs: false, gatewayApi: true },
+      apiGroups: { routes: false, projects: false, dropappProjects: false, deploymentConfigs: false, gatewayApi: true },
     });
     renderWithClient(<ConnectionPanel connectionId="c1" />);
     expect(await screen.findByText("Kubernetes 1.31 (EKS)")).toBeInTheDocument();
     expect(screen.getByText("Gateway API")).toBeInTheDocument();
     expect(screen.queryByText(/Операторы кластера/)).toBeNull();
+  });
+
+  it("DropApp: проекты из projects.dropapp.ru — тот же вид Project", async () => {
+    vi.mocked(api.listConnections).mockResolvedValue([profile({ method: "token" })]);
+    vi.mocked(api.connect).mockResolvedValue({
+      ...INFO,
+      platform: { kind: "dropapp", distribution: null, version: "5.1.2", label: "DropApp 5.1.2" },
+      apiGroups: { routes: false, projects: false, dropappProjects: true, deploymentConfigs: false, gatewayApi: false },
+    });
+    renderWithClient(<ConnectionPanel connectionId="c1" />);
+    expect(await screen.findByText("DropApp 5.1.2")).toBeInTheDocument();
+    expect(screen.getByText("Project")).toBeInTheDocument();
   });
 
   it("exec-плагин: ожидание с отменой, ошибка плагина и запуск снова", async () => {

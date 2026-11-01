@@ -293,7 +293,7 @@
     },
     "cluster": {
       "platform": "Определяется по группам API и версии: OpenShift или Kubernetes с дистрибутивом (EKS, GKE, AKS, Rancher, Deckhouse, k3s, RKE2).",
-      "apiGroups": "Что есть в кластере сверх обычного Kubernetes: Route, проекты и DeploymentConfig (OpenShift), Gateway API. От этого зависит, какие объекты показываются.",
+      "apiGroups": "Что есть в кластере сверх обычного Kubernetes: Route, проекты и DeploymentConfig (OpenShift), проекты DropApp, Gateway API. От этого зависит, какие объекты показываются.",
       "readyz": "Проверки <code>/readyz</code> API-сервера. Их может читать любой пользователь; непройденная проверка называет часть сервера, которая не готова."
     },
     "kubeconfig": {

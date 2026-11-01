@@ -490,10 +490,11 @@ impl ReadClient {
     }
 
     /// Имена проектов (или namespace): первые 500 и признак «есть ещё».
-    pub async fn project_names(&self, projects_api: bool) -> AppResult<(Vec<String>, bool)> {
-        noted(
-            crate::k8s::cluster::list_project_names(&self.client, self.timeout, projects_api).await,
-        )
+    pub async fn project_names(
+        &self,
+        source: crate::platform::ProjectSource,
+    ) -> AppResult<(Vec<String>, bool)> {
+        noted(crate::k8s::cluster::list_project_names(&self.client, self.timeout, source).await)
     }
 
     /// Поток строк лога контейнера; таймаут — только на открытие потока.

@@ -20,7 +20,7 @@ use super::prometheus::{
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::i18n::LocalizedText;
 use crate::k8s::read::ReadClient;
-use crate::platform::{PlatformInfo, PlatformKind};
+use crate::platform::{ApiGroups, PlatformInfo, PlatformKind};
 use crate::storage::profile::{ConnectionProfile, MetricsAuth, MetricsConfig};
 
 /// Сколько живёт выбор источника.
@@ -90,6 +90,8 @@ pub struct Inputs {
     pub reader: ReadClient,
     pub profile: ConnectionProfile,
     pub platform: PlatformInfo,
+    /// Группы API: из них — источник списка проектов для проверки tenancy-источника.
+    pub api_groups: ApiGroups,
     /// Токен подключения (если вход по токену): уходит Thanos и своему источнику.
     pub connection_token: Option<SecretString>,
     /// Свой токен источника из keychain (`metricsToken`).
@@ -257,8 +259,11 @@ async fn probe_namespace(i: &Inputs) -> Option<String> {
     if let Some(name) = listed {
         return Some(name.clone());
     }
-    let projects_api = i.platform.kind == PlatformKind::Openshift;
-    let (names, _) = i.reader.project_names(projects_api).await.ok()?;
+    let (names, _) = i
+        .reader
+        .project_names(i.api_groups.project_source())
+        .await
+        .ok()?;
     names.into_iter().next()
 }
 
@@ -325,6 +330,7 @@ pub async fn for_connection(
                 reader: c.reader(),
                 profile,
                 platform: c.info.platform.clone(),
+                api_groups: c.info.api_groups,
                 connection_token: c.bearer().cloned(),
                 metrics_token,
             };
@@ -361,6 +367,10 @@ mod tests {
             reader: ReadClient::new(mock_client(handler).0, StdDuration::from_secs(5)),
             profile: sample_profile("a"),
             platform: info,
+            api_groups: crate::platform::ApiGroups {
+                projects: platform == PlatformKind::Openshift,
+                ..Default::default()
+            },
             connection_token: None,
             metrics_token: None,
         }
@@ -565,6 +575,28 @@ mod tests {
         assert_eq!(s.status.rejected.len(), 1);
         assert_eq!(s.status.rejected[0].reason, Reason::BadResponse);
         assert!(!log.lock().unwrap()[0].contains("namespace="));
+    }
+
+    #[tokio::test]
+    async fn own_thanos_on_dropapp_is_probed_in_a_dropapp_project() {
+        // Группа `projects.dropapp.ru`: проект — первый из её списка, а не из namespace.
+        let (base, log) = tenancy_endpoint().await;
+        let mut i = inputs(PlatformKind::Dropapp, |s| {
+            if s.path() == "/apis/projects.dropapp.ru/v1alpha1/projects" {
+                (
+                    200,
+                    serde_json::json!({"apiVersion": "projects.dropapp.ru/v1alpha1",
+                        "kind": "ProjectList", "metadata": {},
+                        "items": [{"metadata": {"name": "team-a"}}]}),
+                )
+            } else {
+                status(403, "Forbidden", "no")
+            }
+        });
+        i.api_groups.dropapp_projects = true;
+        own_thanos(&mut i, &base);
+        assert!(select(&i, 100).await.history.is_some());
+        assert!(log.lock().unwrap()[0].contains("namespace=team-a"));
     }
 
     #[tokio::test]
