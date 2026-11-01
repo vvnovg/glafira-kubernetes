@@ -1,0 +1,105 @@
+{
+  "env": {
+    "LOCAL_LLM_API_KEY": "ollama"
+  },
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "qwen3.6-64k:35b-a3b",
+        "name": "Qwen3.6-35B-A3B, 64k context (local Ollama)",
+        "envKey": "LOCAL_LLM_API_KEY",
+        "baseUrl": "http://127.0.0.1:11434/v1",
+        "generationConfig": {
+          "timeout": 600000,
+          "streamIdleTimeoutMs": 600000,
+          "maxRetries": 1,
+          "contextWindowSize": 65536,
+          "samplingParams": {
+            "temperature": 0.2,
+            "max_tokens": 8192
+          }
+        }
+      }
+    ]
+  },
+  "security": {
+    "auth": {
+      "selectedType": "openai"
+    }
+  },
+  "model": {
+    "name": "qwen3.6-64k:35b-a3b"
+  },
+  "privacy": {
+    "usageStatisticsEnabled": false
+  },
+  "general": {
+    "enableAutoUpdate": false
+  },
+  "telemetry": {
+    "enabled": false
+  },
+  "tools": {
+    "disabled": [
+      "run_shell_command",
+      "exec",
+      "edit",
+      "write_file",
+      "notebook_edit",
+      "web_fetch",
+      "web_search",
+      "image_gen",
+      "agent",
+      "create_sub_session",
+      "list_agents",
+      "task_stop",
+      "send_message",
+      "task_create",
+      "task_update",
+      "task_list",
+      "team_create",
+      "team_delete",
+      "team_plan_approval",
+      "request_shutdown",
+      "cron_create",
+      "cron_list",
+      "cron_delete",
+      "loop_wakeup",
+      "monitor",
+      "autofix_pr",
+      "enter_worktree",
+      "exit_worktree",
+      "workflow",
+      "artifact",
+      "record_artifact",
+      "record_source",
+      "report_findings",
+      "skill",
+      "save_memory",
+      "manage_memory",
+      "search_memory",
+      "lsp",
+      "advisor",
+      "get_goal",
+      "update_goal",
+      "zoom_image",
+      "enter_plan_mode",
+      "exit_plan_mode",
+      "list_directory",
+      "glob"
+    ],
+    "approvalMode": "default"
+  },
+  "mcpServers": {
+    "glafira-kubernetes": {
+      "command": "/Applications/Glafira for Kubernetes.app/Contents/MacOS/glafira-kubernetes",
+      "args": [
+        "mcp"
+      ],
+      "timeout": 120000,
+      "trust": true,
+      "alwaysLoadTools": true
+    }
+  },
+  "$version": 4
+}
