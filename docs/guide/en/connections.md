@@ -51,23 +51,33 @@ in the browser; the wait lasts up to 5 minutes and can be cancelled. The provide
 `http://localhost:8000`, or to `http://localhost:18000` if port 8000 is busy: these are the addresses of kubelogin, and
 the client must allow them as redirect URIs. If both ports are busy, close kubelogin or the program that holds them.
 Glafira sends the ID token to the API server, as kubelogin does. The ID token and the refresh token are kept in the
-secret store.
+secret store. The provider must advertise `https://` sign-in and token addresses: an `http://` address is refused
+(“insecure (http) endpoint”); only a local test issuer on `127.0.0.1` or `localhost` may use `http://` addresses there.
+
+The tokens belong to the issuer and the client: if you change [[ui:connections.form.oidc.issuerUrl]],
+[[ui:connections.form.oidc.clientId]] or [[ui:connections.form.oidc.issuerCaPem]], saving deletes them, and you sign in
+again. Import of a settings file with such a change warns about it and also deletes the client secret: enter it again.
 
 The connection tab shows [[ui:cluster.connection.tokenExpires]] from the `exp` of the ID token and warns an hour
 before it expires. When the token has less than a minute left, Glafira reconnects at the next request to the cluster
-and gets a new token with the refresh token, without the browser. Without a refresh token (the scopes have no `offline_access`), or if the provider
-refuses the refresh, click [[ui:cluster.session.loginOidc]] again. [[ui:connections.form.test]] uses only a saved token
-with more than a minute left and does not refresh it; otherwise it asks you to sign in.
+and gets a new token with the refresh token, without the browser. Without a refresh token (the scopes have no
+`offline_access`), or if the provider refuses the refresh, click [[ui:cluster.session.loginOidc]] again.
+[[ui:connections.form.test]] uses only a saved token with more than a minute left and does not refresh it; otherwise
+it asks you to sign in. With a changed issuer, client ID or issuer CA in the unsaved form it does not use the saved
+token at all: save the connection and sign in.
 
 Import from kubeconfig (see [below](connections.md#kubeconfig)) recognizes a context with the exec plugin
 `kubectl oidc-login get-token` or `kubelogin get-token` and `--oidc-issuer-url` and offers two ways:
 [[ui:kubeconfig.useOidc]] (the default) and [[ui:kubeconfig.useExec]]. With OIDC the fields come from the plugin
 arguments: `--oidc-issuer-url`, `--oidc-client-id` (none — `dapp`), `--oidc-client-secret` (to the secret store; the
-preview shows only that there is one), the scopes (`openid`, every `--oidc-extra-scope` and `offline_access`; none — the defaults above)
-and the issuer CA from `--certificate-authority-data` or the file in `--certificate-authority` (a relative path counts
-from the kubeconfig folder). The plugin is not run. `offline_access` is added even if the plugin did not ask for it:
-without it the provider gives no refresh token. If the exec variant is unavailable (the command is not found, its `apiVersion` is
-unknown, your organization forbids exec plugins), the dialog says why, and OIDC stays available.
+preview shows only that there is one), the scopes (`openid`, every `--oidc-extra-scope` and `offline_access`; none —
+the defaults above) and the issuer CA from `--certificate-authority-data` or the file in `--certificate-authority` (a
+relative path counts from the kubeconfig folder). A CA file that cannot be read, is not a PEM certificate, also
+contains a private key, is larger than 1 MiB or is not a regular file is skipped with a warning: the connection is
+imported without the CA, paste it into the form. The plugin is not run. `offline_access` is added even if the plugin
+did not ask for it: without it the provider gives no refresh token. If the exec variant is unavailable (the command
+is not found, its `apiVersion` is unknown, your organization forbids exec plugins), the dialog says why, and OIDC
+stays available.
 
 Sign-in via OIDC differs from the OpenShift sign-in via browser: it goes to an external provider, not to the OAuth
 server of the cluster, so it works on any platform; the return port is fixed (8000 or 18000) instead of a random one;

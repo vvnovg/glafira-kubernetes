@@ -41,9 +41,11 @@ Dex client (they are in the default configuration).
 
 **Issuer CA.** Dex is behind the ingress, and its certificate is often issued by another CA than the API server. The
 Loginapp kubeconfig names that CA in the plugin argument `--certificate-authority` (a file) or
-`--certificate-authority-data`; the import copies it into [[ui:connections.form.oidc.issuerCaPem]]. If the file cannot be
-read, the import warns and creates the connection without the CA: paste the certificate into the form. Without the
-right CA the sign-in stops with “The certificate of the OIDC issuer … is not trusted”.
+`--certificate-authority-data`; the import copies it into [[ui:connections.form.oidc.issuerCaPem]]. If the file cannot
+be read, is not a PEM certificate, also contains a private key, is larger than 1 MiB or is not a regular file, the
+import warns and creates the connection without the CA: paste the certificate into the form. Without the right CA the
+sign-in stops with “The certificate of the OIDC issuer … is not trusted”. After changing the issuer, the client ID or
+the issuer CA, sign in again: the saved tokens are deleted.
 
 **The exec plugin as a fallback.** If sign-in via OIDC does not suit your cluster, choose [[ui:kubeconfig.useExec]] on
 import: Glafira runs `kubectl oidc-login` as the Loginapp kubeconfig says, and the plugin opens the browser itself (see
@@ -85,8 +87,8 @@ The cluster check (see [Cluster check and notes](health-check.md#rules)) adds th
 | [[ui:health.ruleNames.cluster.ingressTlsNotReady]] | the `Ready` condition of an `IngressTLS` is not `True` | [[ui:health.severity.warning]] | [[ui:health.severity.info]] |
 
 `upgrading` is not a failure: an update in progress cannot be told from a stuck one. The cause of a failure is in the
-events of the object: `kubectl describe tool NAME` (or `component`). If you may not read these objects, the check is
-marked [[ui:health.partial]].
+events of the object: `kubectl describe tool NAME` (or `component NAME`). If you may not read these objects, the check
+is marked [[ui:health.partial]].
 
 ## Metrics {#metrics}
 

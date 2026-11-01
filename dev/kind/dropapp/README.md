@@ -66,7 +66,8 @@ dev/kind/dropapp/down.sh        # удаляет кластер и out/
 `ghcr.io/dexidp/dex:v2.45.1`, `victoriametrics/vmstorage:v1.148.0-cluster`, `victoriametrics/vminsert:v1.148.0-cluster`,
 `victoriametrics/vmselect:v1.148.0-cluster`, `victoriametrics/vmagent:v1.148.0`. В ноду их кладёт `kind load
 docker-image`, а если он не справляется с многоплатформенным образом (хранилище containerd в Docker Desktop) —
-`docker save --platform` и `ctr images import` в ноде.
+`docker save --platform` и `ctr images import` в ноде. Образ ноды `kindest/node` скачивает сам `kind create cluster`,
+если его нет у Docker: без сети заранее нужен и он.
 
 `it_dropapp` запускается вручную: в CI второй кластер с OIDC не поднимается, и без `GO_IT_DROPAPP_KUBECONFIG` тест
 пропускается. `~/.kube/config` не меняется: `kind` пишет в `out/kind-admin.kubeconfig`, а `up.sh` — свой

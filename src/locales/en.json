@@ -305,7 +305,7 @@
       "test": "Checks step by step: address, TLS, sign-in, platform and projects. Unsaved fields are tested too.",
       "llmAccess": "What an LLM assistant over MCP may read. Metadata: objects, statuses, events — no env, ConfigMap or Secret values. With logs: also pod logs, env and ConfigMap values, masked. Off: nothing.",
       "llmScope": "Projects the LLM may read; an empty list means it sees no projects. The cluster itself and nodes stay visible if you can read them. The setting stays on this computer: export does not write it.",
-      "metrics": "Automatic: Thanos Querier on OpenShift, Prometheus through the API server elsewhere, then metrics.k8s.io. Own: a Thanos or Prometheus address. Not exported.",
+      "metrics": "Automatic: Thanos Querier on OpenShift, VictoriaMetrics on DropApp, Prometheus through the API server elsewhere, then metrics.k8s.io. Own: a Thanos or Prometheus address. Not exported.",
       "metricsAuth": "Connection token — the token of this connection. Own token — saved in the system secret store. A token is sent only over https.",
       "mask": "The list replaces the standard one. Not exported: each user decides it."
     },
