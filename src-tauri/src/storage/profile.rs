@@ -779,6 +779,27 @@ fn validate_exec(e: &ExecAuth) -> AppResult<()> {
     Ok(())
 }
 
+/// Прежний способ входа — OIDC, а издатель, client id или CA издателя другие (адреса
+/// сравниваются без завершающего «/», PEM — без пробелов по краям, пустой CA — как его
+/// отсутствие). Токены и секрет клиента выданы прежнему издателю и клиенту, которому доверяли по
+/// прежнему CA: при такой смене они не годятся.
+pub fn oidc_identity_changed(before: &AuthConfig, after: &AuthConfig) -> bool {
+    match (before, after) {
+        (AuthConfig::Oidc(a), AuthConfig::Oidc(b)) => {
+            let issuer = |o: &OidcAuth| o.issuer_url.trim().trim_end_matches('/').to_string();
+            let ca = |o: &OidcAuth| {
+                o.issuer_ca_pem
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string)
+            };
+            issuer(a) != issuer(b) || a.client_id.trim() != b.client_id.trim() || ca(a) != ca(b)
+        }
+        _ => false,
+    }
+}
+
 /// Exec-плагин для тестов: `kubectl oidc-login get-token` по абсолютному пути.
 #[cfg(test)]
 pub fn sample_exec() -> ExecAuth {

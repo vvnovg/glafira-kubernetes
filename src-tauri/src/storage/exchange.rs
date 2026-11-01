@@ -7,12 +7,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{AppResult, ErrorCode};
 use crate::i18n::LocalizedText;
-use crate::secrets::{CLIENT_KEY, OIDC_CLIENT_SECRET, SecretStore, TOKEN, secret_key};
+use crate::secrets::{
+    CLIENT_KEY, OIDC_CLIENT_SECRET, OIDC_ID_TOKEN, OIDC_REFRESH_TOKEN, SecretStore, TOKEN,
+    secret_key,
+};
 use crate::storage::connections::{
     ConnectionFolder, ConnectionProfile, ConnectionStore, StoreData, check_tree, folder_not_found,
     unique_name, validate_profile,
 };
-use crate::storage::profile::{AuthConfig, CaConfig, normalize_profile, strip_private_keys};
+use crate::storage::profile::{
+    AuthConfig, CaConfig, normalize_profile, oidc_identity_changed, strip_private_keys,
+};
 use crate::storage::tree::TreeItemKind;
 
 pub const EXCHANGE_FORMAT: &str = "glafira-kubernetes-connections";
@@ -359,6 +364,9 @@ pub struct ImportPreview {
 pub(crate) struct ImportPlan {
     pub next: StoreData,
     pub preview: ImportPreview,
+    /// Обновлённые подключения, у которых сменились издатель OIDC, client id или CA издателя: их
+    /// токены входа и секрет клиента удаляются после записи хранилища.
+    pub oidc_reset: Vec<String>,
 }
 
 /// Имена папок от корня до `folder` включительно.
@@ -443,12 +451,33 @@ fn same_settings(local: &ConnectionProfile, incoming: &ConnectionProfile) -> boo
 }
 
 /// Меняется ли то, куда уходят учётные данные подключения: адрес, прокси, CA или имя для
-/// проверки сертификата.
+/// проверки сертификата, издатель OIDC, client id или CA издателя.
 fn destination_changes(local: &ConnectionProfile, new: &ConnectionProfile) -> bool {
     local.api_url != new.api_url
         || local.proxy != new.proxy
         || local.ca != new.ca
         || local.tls_server_name != new.tls_server_name
+        || oidc_identity_changed(&local.auth, &new.auth)
+}
+
+/// Сохранены ли секреты, которые использует профиль: токен, ключ, секрет клиента OIDC или токены
+/// входа через OIDC (`id_token` уходит на API-сервер, `refresh_token` выдаёт новый).
+fn has_stored_secret(secrets: &dyn SecretStore, p: &ConnectionProfile) -> AppResult<bool> {
+    if needs_secret(secrets, p)?.any() {
+        return Ok(true);
+    }
+    if !matches!(p.auth, AuthConfig::Oidc(_)) {
+        return Ok(false);
+    }
+    for field in [OIDC_ID_TOKEN, OIDC_REFRESH_TOKEN] {
+        if secrets
+            .get(&secret_key(&p.id, field))?
+            .is_some_and(|v| !v.is_empty())
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Сохранены ли в keychain токен или ключ подключений, которые импорт обновит с новым
@@ -480,7 +509,7 @@ impl StoredSecrets {
                     .any(|local| local.id == incoming.id && destination_changes(local, incoming))
             })
             .map(|(incoming, _)| {
-                let stored = needs_secret(secrets, incoming).map_or(true, |n| n.any());
+                let stored = has_stored_secret(secrets, incoming).unwrap_or(true);
                 (incoming.id.clone(), stored)
             })
             .collect();
@@ -504,8 +533,9 @@ fn has_credentials(stored: &StoredSecrets, p: &ConnectionProfile) -> bool {
 }
 
 /// Предупреждения об обновлении подключения, у которого меняется то, куда уходят сохранённые
-/// учётные данные: адрес, прокси, CA или имя для проверки сертификата. `new` — профиль после
-/// обновления (подтверждение exec-плагина в нём уже сброшено, если изменилась строка запуска).
+/// учётные данные: адрес, прокси, CA или имя для проверки сертификата, издатель OIDC, client id
+/// или CA издателя (тогда токены и секрет клиента удаляются, `ImportPlan::oidc_reset`). `new` —
+/// профиль после обновления (подтверждение exec-плагина в нём уже сброшено, если изменилась строка запуска).
 fn destination_warnings(
     stored: &StoredSecrets,
     local: &ConnectionProfile,
@@ -514,6 +544,7 @@ fn destination_warnings(
     let address = local.api_url != new.api_url;
     let proxy = local.proxy != new.proxy;
     let tls = local.ca != new.ca || local.tls_server_name != new.tls_server_name;
+    let oidc = oidc_identity_changed(&local.auth, &new.auth);
     if !destination_changes(local, new) || !has_credentials(stored, new) {
         return Vec::new();
     }
@@ -539,6 +570,13 @@ fn destination_warnings(
         out.push(ltext!(
             "messages.import.tlsChanged",
             "“{{name}}”: the certificate verification settings (CA or TLS server name) change. The saved credentials (token, key or confirmed exec plugin) will be used with the new settings.",
+            name = name
+        ));
+    }
+    if oidc {
+        out.push(ltext!(
+            "messages.import.oidcChanged",
+            "“{{name}}”: the OIDC issuer, client ID or issuer CA changes. The saved sign-in tokens and client secret will be deleted — sign in again.",
             name = name
         ));
     }
@@ -572,6 +610,7 @@ pub(crate) fn plan_import(
     let mut added = Vec::new();
     let mut updated = Vec::new();
     let mut unchanged = Vec::new();
+    let mut oidc_reset = Vec::new();
 
     for (f, is_root) in parents_first(&parsed.folders) {
         if local_folders.contains(f.id.as_str()) {
@@ -661,6 +700,11 @@ pub(crate) fn plan_import(
             preview
                 .warnings
                 .extend(destination_warnings(stored, slot, &profile));
+            // Токены и секрет клиента выданы прежнему издателю и клиенту: после записи профиля
+            // они удаляются, как при сохранении формы.
+            if oidc_identity_changed(&slot.auth, &profile.auth) {
+                oidc_reset.push(profile.id.clone());
+            }
             updated.push((TreeItemKind::Connection, profile.id.clone()));
             *slot = profile;
             continue;
@@ -738,7 +782,11 @@ pub(crate) fn plan_import(
     preview.added = added.into_iter().map(item).collect();
     preview.updated = updated.into_iter().map(item).collect();
     preview.unchanged = unchanged.into_iter().map(item).collect();
-    Ok(ImportPlan { next, preview })
+    Ok(ImportPlan {
+        next,
+        preview,
+        oidc_reset,
+    })
 }
 
 #[cfg(test)]
@@ -1444,6 +1492,83 @@ mod tests {
         assert_eq!(warning_keys(&p), ["messages.import.addressChanged"]);
         let p = plan_update(local, &MemoryStore::default(), edit);
         assert!(p.warnings.is_empty());
+    }
+
+    /// OIDC-подключение `a` и файл, где его вход через OIDC изменён `edit`.
+    fn plan_oidc_update(
+        secrets: &dyn SecretStore,
+        edit: impl FnOnce(&mut crate::storage::profile::OidcAuth),
+    ) -> ImportPlan {
+        let mut local = sample_profile("a");
+        local.auth = AuthConfig::Oidc(crate::storage::profile::sample_oidc());
+        let mut changed = local.clone();
+        changed.environment = crate::storage::profile::Environment::Prod;
+        if let AuthConfig::Oidc(o) = &mut changed.auth {
+            edit(o);
+        }
+        let mut c = serde_json::to_value(&changed).unwrap();
+        c["needsSecret"] = serde_json::json!({"token": false, "clientKey": false});
+        let data = StoreData {
+            connections: vec![local],
+            ..Default::default()
+        };
+        let parsed = parse_exchange(&file(vec![], vec![c])).unwrap();
+        let p = plan_with(&data, &parsed, &opts(None), secrets).unwrap();
+        assert_eq!(preview_ids(&p.preview.updated), ["a"]);
+        p
+    }
+
+    /// Смена издателя, client id или CA издателя — смена направления: предупреждение, а токены
+    /// и секрет клиента прежнего издателя после применения удаляются (`oidc_reset`).
+    #[test]
+    fn oidc_identity_change_warns_and_resets_oidc_secrets() {
+        use crate::secrets::OIDC_REFRESH_TOKEN;
+        let secrets = MemoryStore::default();
+        secrets
+            .set(&secret_key("a", OIDC_REFRESH_TOKEN), "rt-s3cr3t")
+            .unwrap();
+        let edits: [fn(&mut crate::storage::profile::OidcAuth); 3] = [
+            |o| o.issuer_url = "https://other.example.com".into(),
+            |o| o.client_id = "other".into(),
+            |o| o.issuer_ca_pem = Some(TEST_CERT_PEM.into()),
+        ];
+        for edit in edits {
+            let p = plan_oidc_update(&secrets, edit);
+            assert_eq!(warning_keys(&p.preview), ["messages.import.oidcChanged"]);
+            assert_eq!(p.preview.warnings[0].params["name"], "conn-a");
+            assert_eq!(p.oidc_reset, ["a"]);
+            // Без сохранённых секретов предупреждать не о чем, но удаление всё равно планируется.
+            let p = plan_oidc_update(&MemoryStore::default(), edit);
+            assert!(p.preview.warnings.is_empty());
+            assert_eq!(p.oidc_reset, ["a"]);
+        }
+        // Издатель тот же (с «/» на конце), меняется другое поле: ни предупреждения, ни удаления.
+        let p = plan_oidc_update(&secrets, |o| o.issuer_url.push('/'));
+        assert!(p.preview.warnings.is_empty());
+        assert!(p.oidc_reset.is_empty());
+    }
+
+    /// Сохранённые токены входа через OIDC — тоже учётные данные: при смене адреса API туда
+    /// ушёл бы `id_token`, а `refresh_token` выдал бы новый.
+    #[test]
+    fn oidc_tokens_count_as_stored_credentials() {
+        use crate::secrets::{OIDC_ID_TOKEN, OIDC_REFRESH_TOKEN};
+        for field in [OIDC_ID_TOKEN, OIDC_REFRESH_TOKEN] {
+            let secrets = MemoryStore::default();
+            secrets.set(&secret_key("a", field), "s3cr3t").unwrap();
+            let mut local = sample_profile("a");
+            local.auth = AuthConfig::Oidc(crate::storage::profile::sample_oidc());
+            let auth = serde_json::to_value(&local.auth).unwrap();
+            let p = plan_update(local, &secrets, |c| {
+                c["auth"] = auth;
+                c["apiUrl"] = "https://api.other:6443".into();
+            });
+            assert_eq!(
+                warning_keys(&p),
+                ["messages.import.addressChanged"],
+                "{field}"
+            );
+        }
     }
 
     #[test]

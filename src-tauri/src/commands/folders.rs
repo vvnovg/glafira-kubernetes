@@ -163,14 +163,28 @@ fn import_from_file(
     } else {
         StoredSecrets::default()
     };
+    let planned = plan_import(&snapshot, &parsed, &opts, &stored)?;
     if !apply {
-        return Ok(plan_import(&snapshot, &parsed, &opts, &stored)?.preview);
+        return Ok(planned.preview);
     }
-    let preview = st.connections.update(|data| {
+    // Токены входа и секрет клиента подключений, у которых сменились издатель OIDC, client id или
+    // CA издателя, удаляются до записи профиля и вне блокировки хранилища: сбой keychain
+    // останавливает импорт, пока ничего не изменено, а секреты прежнего издателя не достаются
+    // новому. Подключения, которые план под блокировкой добавит к этому списку (хранилище
+    // изменилось между снимком и записью), чистятся после записи.
+    reset_oidc_secrets(st, &planned.oidc_reset)?;
+    let (preview, reset) = st.connections.update(|data| {
         let plan = plan_import(data, &parsed, &opts, &stored)?;
         *data = plan.next;
-        Ok(plan.preview)
+        Ok((plan.preview, plan.oidc_reset))
     })?;
+    let late: Vec<String> = reset
+        .into_iter()
+        .filter(|id| !planned.oidc_reset.contains(id))
+        .collect();
+    if let Err(e) = reset_oidc_secrets(st, &late) {
+        tracing::error!("failed to delete OIDC secrets after import: {e}");
+    }
     // Обновлённые подключения переподключатся с новым профилем, их сессии на прежнем клиенте
     // останавливаются — как при сохранении формы.
     for item in &preview.updated {
@@ -178,6 +192,17 @@ fn import_from_file(
         st.evict_connection(&item.id);
     }
     Ok(preview)
+}
+
+/// Удаляет токены входа и секрет клиента OIDC подключений `ids`.
+fn reset_oidc_secrets(st: &AppState, ids: &[String]) -> AppResult<()> {
+    use crate::secrets::{OIDC_CLIENT_SECRET, OIDC_ID_TOKEN, OIDC_REFRESH_TOKEN, secret_key};
+    for id in ids {
+        for field in [OIDC_ID_TOKEN, OIDC_REFRESH_TOKEN, OIDC_CLIENT_SECRET] {
+            st.secrets.delete(&secret_key(id, field))?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -299,6 +324,65 @@ mod tests {
                 .as_deref(),
             Some("sha256~t")
         );
+    }
+
+    /// Сохраняет OIDC-подключение `a` с токенами и секретом клиента, применяет файл, где его вход
+    /// изменён `edit`, и возвращает предпросмотр и оставшиеся секреты.
+    fn oidc_secrets_after_import(
+        edit: impl FnOnce(&mut crate::storage::profile::OidcAuth),
+    ) -> (ImportPreview, [Option<String>; 3]) {
+        use crate::secrets::{OIDC_CLIENT_SECRET, OIDC_ID_TOKEN, OIDC_REFRESH_TOKEN};
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(MemoryStore::default());
+        let fields = [OIDC_ID_TOKEN, OIDC_REFRESH_TOKEN, OIDC_CLIENT_SECRET];
+        for f in fields {
+            secrets.set(&secret_key("a", f), "s3cr3t").unwrap();
+        }
+        let st = AppState::new(dir.path(), secrets.clone()).unwrap();
+        let mut local = sample_profile("a");
+        local.auth =
+            crate::storage::profile::AuthConfig::Oidc(crate::storage::profile::sample_oidc());
+        st.connections.upsert(local.clone()).unwrap();
+        let mut changed = local;
+        changed.environment = crate::storage::profile::Environment::Prod;
+        if let crate::storage::profile::AuthConfig::Oidc(o) = &mut changed.auth {
+            edit(o);
+        }
+        let path = dir.path().join("in.glafira-kubernetes-connections.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "format": "glafira-kubernetes-connections", "version": 1,
+                "folders": [], "connections": [changed],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let preview = import_from_file(&st, &path, None, true, true).unwrap();
+        assert_eq!(preview.updated.len(), 1);
+        let left = fields.map(|f| secrets.get(&secret_key("a", f)).unwrap());
+        (preview, left)
+    }
+
+    /// Импорт с другим издателем, client id или CA издателя предупреждает и удаляет токены и
+    /// секрет клиента прежнего издателя, как сохранение формы (`oidc_identity_changed`).
+    #[test]
+    fn import_changing_the_oidc_identity_drops_oidc_secrets() {
+        let edits: [fn(&mut crate::storage::profile::OidcAuth); 3] = [
+            |o| o.issuer_url = "https://other.example.com".into(),
+            |o| o.client_id = "other-client".into(),
+            |o| o.issuer_ca_pem = Some(crate::storage::profile::TEST_CERT_PEM.into()),
+        ];
+        for edit in edits {
+            let (preview, left) = oidc_secrets_after_import(edit);
+            assert_eq!(preview.warnings.len(), 1);
+            assert_eq!(preview.warnings[0].key, "messages.import.oidcChanged");
+            assert_eq!(left, [None, None, None]);
+        }
+        // Вход тот же (завершающий «/» адреса — та же нормализация): секреты остаются.
+        let (preview, left) = oidc_secrets_after_import(|o| o.issuer_url.push('/'));
+        assert!(preview.warnings.is_empty());
+        assert_eq!(left, [(); 3].map(|_| Some("s3cr3t".to_string())));
     }
 
     /// Keychain, который запоминает для каждого чтения, держал ли кто-то в этот момент
