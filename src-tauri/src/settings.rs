@@ -99,8 +99,11 @@ pub struct McpSettings {
 }
 
 impl McpSettings {
+    /// Значение вне [`RESPONSE_LIMITS_KB`](glafira_mcp_core::fit::RESPONSE_LIMITS_KB) (файл
+    /// правили руками: 0, 50) — тоже по умолчанию.
     pub fn response_limit_kb(&self) -> u32 {
         self.response_limit_kb
+            .filter(|kb| glafira_mcp_core::fit::RESPONSE_LIMITS_KB.contains(&(*kb as usize)))
             .unwrap_or((glafira_mcp_core::fit::MAX_RESPONSE_BYTES / 1024) as u32)
     }
 }
@@ -404,6 +407,13 @@ mod tests {
         let mcp = SettingsStore::open(dir.path()).mcp();
         assert_eq!(mcp.response_limit_kb(), 24);
         assert!(mcp.approved_clients[1].compact_tools);
+        for hand_edited in [0, 50] {
+            let mcp = McpSettings {
+                response_limit_kb: Some(hand_edited),
+                ..mcp.clone()
+            };
+            assert_eq!(mcp.response_limit_kb(), 100, "{hand_edited}");
+        }
         assert!(again.revoke_client("cursor").unwrap());
         again.remember_client("cursor", "3", 40).unwrap();
         assert!(
