@@ -89,5 +89,28 @@ describe("SessionActions: страница токена — только у OAut
     expect(screen.queryByRole("button", { name: "Получить токен на странице кластера" })).toBeNull();
     expect(screen.getByLabelText("Токен")).toHaveAttribute("placeholder", "Bearer-токен");
     expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Войти через браузер" })).toBeNull();
+  });
+
+  it("вход по токену на OpenShift: «Войти через браузер» с ожиданием и отменой, поле токена и страница токена остаются", async () => {
+    vi.mocked(api.oauthTokenPage).mockResolvedValue(TOKEN_PAGE);
+    vi.mocked(api.cancelOauthLogin).mockResolvedValue(true);
+    let finish: (i: ConnectionInfo) => void = () => {};
+    vi.mocked(api.startOauthLogin).mockReturnValue(new Promise((r) => (finish = r)));
+    const user = userEvent.setup();
+    const { client } = renderWithClient(<SessionActions profile={PROFILE} />);
+    const login = await screen.findByRole("button", { name: "Войти через браузер" });
+    expect(login).toHaveClass("primary");
+    expect(screen.getByLabelText("Токен")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Получить токен на странице кластера" })).toBeInTheDocument();
+    await user.click(login);
+    expect(api.startOauthLogin).toHaveBeenCalledWith("c1");
+    expect(screen.getByText("Ожидание входа в браузере…")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Токен"), "sha256~new");
+    expect(screen.getByRole("button", { name: "Сохранить токен" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Отменить" }));
+    expect(api.cancelOauthLogin).toHaveBeenCalledWith("c1");
+    finish(INFO);
+    await waitFor(() => expect(client.getQueryData(["connection", "c1"])).toEqual(INFO));
   });
 });

@@ -42,9 +42,9 @@ export async function reconnect(queryClient: QueryClient, connectionId: string):
 }
 
 /**
- * Что сделать, если сессия истекла или токена нет: войти через браузер или OIDC, вставить токен
- * (в том числе со страницы токена кластера OpenShift), запустить exec-плагин снова или изменить
- * подключение (сертификат, строка запуска exec-плагина).
+ * Что сделать, если сессия истекла или токена нет: войти через браузер (у входа по токену — если у кластера
+ * есть OAuth-сервер OpenShift) или OIDC, вставить токен (в том числе со страницы токена кластера OpenShift),
+ * запустить exec-плагин снова или изменить подключение (сертификат, строка запуска exec-плагина).
  */
 export function SessionActions({ profile }: { profile: ConnectionProfile }) {
   const { t } = useTranslation();
@@ -134,7 +134,8 @@ export function SessionActions({ profile }: { profile: ConnectionProfile }) {
 
   return (
     <div className="panel">
-      {profile.auth.method === "browser" && (
+      {/* У входа по токену браузерный вход — при OAuth-сервере OpenShift: тот же `start_oauth_login`, токен сохраняется, как вставленный. */}
+      {(profile.auth.method === "browser" || (profile.auth.method === "token" && tokenPageUrl.data)) && (
         <div className="toolbar">
           {login.isPending ? (
             <LoginWait connectionId={id} label={t("cluster.session.waitingBrowser")} />

@@ -96,6 +96,20 @@ describe("ConnectionNode", () => {
     expect(api.listProjects).toHaveBeenCalledTimes(2);
   });
 
+  it("истёк токен — сообщение и «Войти снова»: подключается заново и открывает вкладку подключения", async () => {
+    vi.mocked(api.listProjects).mockRejectedValue({ code: "SESSION_EXPIRED", key: "errors.k8s.unauthorized", message: "x", retryable: false });
+    vi.mocked(api.connect).mockReturnValue(new Promise(() => {}));
+    const user = renderNode();
+    await user.click(screen.getByRole("button", { name: /Проекты/ }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Кластер отклонил учётные данные");
+    expect(screen.queryByRole("button", { name: "Повторить" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Войти снова" }));
+    expect(useWorkspace.getState().tabs[0]).toMatchObject({ kind: "cluster", connectionId: "c1" });
+    expect(api.connect).toHaveBeenCalledWith("c1", true);
+    // Пока идёт подключение, второе не запускается.
+    expect(screen.getByRole("button", { name: "Войти снова" })).toBeDisabled();
+  });
+
   it("нет прав на список и в профиле пусто — одно сообщение, без «Проектов нет»", async () => {
     vi.mocked(api.listProjects).mockResolvedValue({ items: [], truncated: false, error: FORBIDDEN });
     const user = renderNode();

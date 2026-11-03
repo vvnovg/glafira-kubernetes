@@ -264,6 +264,7 @@
       "projectsOk": "Доступных проектов: {{count}}",
       "projectsManual": "Кластер не отдаёт вам список проектов; проектов в профиле: {{count}}",
       "authOkGroups": "Вход выполнен: {{user}}, группы: {{groups}}",
+      "authUnknownUser": "Вход выполнен; сервер не сообщает имя пользователя (Kubernetes старше 1.27 без API пользователей OpenShift)",
       "metricsHistory": "История потребления: {{source}}",
       "metricsCurrent": "Источника истории нет: только текущие значения из metrics.k8s.io"
     },
@@ -465,6 +466,7 @@
       "reconnect": "Подключиться заново",
       "edit": "Изменить подключение",
       "user": "Вход выполнен как",
+      "userUnknown": "неизвестен",
       "platform": "Платформа",
       "version": "Версия Kubernetes",
       "apiGroups": "Найдено в кластере",

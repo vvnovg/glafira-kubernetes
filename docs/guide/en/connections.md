@@ -31,6 +31,10 @@ OpenShift tokens usually expire after 24 hours. When the session expires, the co
 or to paste a new token. If sign-in via browser is not available on an OpenShift cluster, use
 [[ui:cluster.session.tokenPage]]: it opens the token page of the cluster; copy the token from it and paste it. Other
 clusters have no such page and no such button: paste a service account token, for example from `kubectl create token`.
+For a connection with the token sign-in method on an OpenShift cluster, the connection tab also offers
+[[ui:cluster.session.loginBrowser]]: the new token is saved to the connection like a pasted one. If the token has
+expired, the tree under [[ui:sidebar.projects]] shows [[ui:objects.signInAgain]] instead of [[ui:common.retry]]: it
+connects again and opens the connection tab with the ways to sign in.
 
 ## Sign-in via OIDC {#oidc}
 
@@ -174,6 +178,12 @@ operators). If the cluster does not let you list projects, enter them in
 [[ui:connections.form.manualNamespaces]]. The fields with lists of projects suggest the projects the tree has already
 shown and the projects from the connection's fields: start typing a name and pick it with the arrows and Enter or a
 click.
+
+Glafira learns your user name and groups from the cluster: on Kubernetes 1.27+ and OpenShift 4.14+ with a
+`SelfSubjectReview` request, on older OpenShift the way `oc whoami` does (`users/~`; the groups are often missing
+there: that answer usually does not list them). If the cluster reports neither (Kubernetes older than 1.27 without
+OpenShift), the [[ui:connections.form.step.auth]] step of the connection test passes with a note that the name is
+unknown, and [[ui:cluster.connection.user]] on the connection tab shows “unknown”.
 
 ## Cluster overview {#overview}
 

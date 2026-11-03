@@ -1,10 +1,12 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type HTMLAttributes, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../../api/client";
 import type { ConnectionProfile } from "../../../api/types";
 import { tr } from "../../../i18n/text";
+import { needsSignIn } from "../../../lib/signIn";
 import { useWorkspace } from "../../../state/workspace";
+import { reconnect, sessionMutationKey } from "../../cluster/SessionActions";
 import { EnvBadge } from "../../common/EnvBadge";
 import { TruncatedNote } from "../../common/TruncatedNote";
 import { matchProject } from "../../health/findings";
@@ -71,12 +73,19 @@ export function ConnectionNode({ connection: c, rowProps }: { connection: Connec
   );
 }
 
-/** Проекты подключения (спец. §6.1): избранные сверху, фильтр; без прав на список — проекты из профиля. */
+/**
+ * Проекты подключения (спец. §6.1): избранные сверху, фильтр; без прав на список — проекты из профиля. Сессия
+ * истекла — «Войти снова», как у `ReadError`: подключается заново и открывает вкладку подключения, где видны
+ * способы войти; прочие ошибки — «Повторить».
+ */
 function ProjectsNode({ connectionId }: { connectionId: string }) {
   const { t } = useTranslation();
   const open = useWorkspace((s) => s.open);
+  const queryClient = useQueryClient();
   const [filter, setFilter] = useState("");
   const q = useQuery({ queryKey: ["projects", connectionId], queryFn: () => api.listProjects(connectionId) });
+  // Тот же ключ, что у входа на вкладке подключения: пока идёт подключение, второе рядом не запускается.
+  const signIn = useMutation({ mutationKey: sessionMutationKey(connectionId), mutationFn: () => reconnect(queryClient, connectionId) });
   const all = q.data?.items;
   const items = useMemo(() => {
     const f = filter.trim().toLowerCase();
@@ -93,9 +102,23 @@ function ProjectsNode({ connectionId }: { connectionId: string }) {
             {tr(toAppError(q.error))}
           </p>
           <p className="tree-notice">
-            <button type="button" className="link" onClick={() => void q.refetch()}>
-              {t("common.retry")}
-            </button>
+            {needsSignIn(toAppError(q.error)) ? (
+              <button
+                type="button"
+                className="link"
+                disabled={signIn.isPending}
+                onClick={() => {
+                  signIn.mutate();
+                  open({ kind: "cluster", connectionId });
+                }}
+              >
+                {t("objects.signInAgain")}
+              </button>
+            ) : (
+              <button type="button" className="link" onClick={() => void q.refetch()}>
+                {t("common.retry")}
+              </button>
+            )}
           </p>
         </>
       )}

@@ -60,19 +60,93 @@ pub async fn timed<T>(limit: Duration, fut: impl Future<Output = kube::Result<T>
     }
 }
 
-/// Имя и группы текущего пользователя (`SelfSubjectReview`, Kubernetes 1.28+).
+/// Ресурсы группы-версии `gv` (`GET /apis/{gv}`); 404 — группа-версия не обслуживается (`None`).
+/// Остальные ответы (401, 403, 5xx) и ошибки транспорта — ошибки.
+async fn served_resources(
+    client: &kube::Client,
+    limit: Duration,
+    gv: &str,
+) -> AppResult<Option<Vec<String>>> {
+    match tokio::time::timeout(limit, client.list_api_group_resources(gv)).await {
+        Err(_) => Err(timeout()),
+        Ok(Ok(list)) => Ok(Some(list.resources.into_iter().map(|r| r.name).collect())),
+        Ok(Err(kube::Error::Api(s))) if s.code == 404 => Ok(None),
+        Ok(Err(e)) => Err(from_kube(&e)),
+    }
+}
+
+/// Есть ли `selfsubjectreviews` среди ресурсов (`None` — группа-версия не обслуживается).
+fn has_reviews(names: Option<Vec<String>>) -> bool {
+    names.is_some_and(|names| names.iter().any(|n| n == "selfsubjectreviews"))
+}
+
+/// Имя и группы из ответа `SelfSubjectReview` (`status.userInfo`) или `User` OpenShift.
+fn user_and_groups(name: &serde_json::Value, groups: &serde_json::Value) -> (String, Vec<String>) {
+    let groups = groups
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|g| g.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    (name.as_str().unwrap_or_default().to_string(), groups)
+}
+
+/// Имя и группы текущего пользователя (спец. §5.3). Источник выбирается по discovery, чтобы
+/// не прятать настоящие ошибки: `SelfSubjectReview` `authentication.k8s.io/v1` (Kubernetes
+/// 1.28+, OpenShift 4.15+), иначе `v1beta1` (Kubernetes 1.27, OpenShift 4.14), иначе
+/// `users/~` из `user.openshift.io/v1` (как `oc whoami`), иначе пользователь неизвестен —
+/// пустое имя и нет групп, подключение продолжается. 404 — «не обслуживается» только у
+/// `v1beta1` и `user.openshift.io/v1`; на документ `authentication.k8s.io/v1` это ошибка. Без
+/// ресурса старый API-сервер отвечает на POST не 404, а 403 (авторизация идёт раньше
+/// обработчика), поэтому сначала discovery.
 pub async fn whoami(client: &kube::Client, limit: Duration) -> AppResult<(String, Vec<String>)> {
-    let api: Api<SelfSubjectReview> = Api::all(client.clone());
-    let r = timed(
+    // `authentication.k8s.io/v1` (`tokenreviews`) обслуживает любой API-сервер с Kubernetes 1.6, а
+    // discovery читает только вошедший пользователь (`system:discovery`): 404 здесь — не Kubernetes
+    // или неверный адрес, это ошибка, а не «не обслуживается». Ответ 200 доказывает вход.
+    let v1 = timed(
         limit,
-        api.create(&PostParams::default(), &SelfSubjectReview::default()),
+        client.list_api_group_resources("authentication.k8s.io/v1"),
     )
     .await?;
-    let info = r.status.and_then(|s| s.user_info).unwrap_or_default();
-    Ok((
-        info.username.unwrap_or_default(),
-        info.groups.unwrap_or_default(),
-    ))
+    if has_reviews(Some(v1.resources.into_iter().map(|r| r.name).collect())) {
+        let api: Api<SelfSubjectReview> = Api::all(client.clone());
+        let r = timed(
+            limit,
+            api.create(&PostParams::default(), &SelfSubjectReview::default()),
+        )
+        .await?;
+        let info = r.status.and_then(|s| s.user_info).unwrap_or_default();
+        return Ok((
+            info.username.unwrap_or_default(),
+            info.groups.unwrap_or_default(),
+        ));
+    }
+    if has_reviews(served_resources(client, limit, "authentication.k8s.io/v1beta1").await?) {
+        // В k8s-openapi типа `v1beta1` нет: тело и ответ те же, что у `v1`.
+        let body = serde_json::json!({"apiVersion": "authentication.k8s.io/v1beta1",
+            "kind": "SelfSubjectReview", "metadata": {}});
+        let req = http::Request::post("/apis/authentication.k8s.io/v1beta1/selfsubjectreviews")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(serde_json::to_vec(&body).unwrap_or_default())
+            .map_err(|e| from_kube(&kube::Error::HttpError(e)))?;
+        let r: serde_json::Value = timed(limit, client.request(req)).await?;
+        let info = &r["status"]["userInfo"];
+        return Ok(user_and_groups(&info["username"], &info["groups"]));
+    }
+    if served_resources(client, limit, "user.openshift.io/v1")
+        .await?
+        .is_some()
+    {
+        let req = http::Request::get("/apis/user.openshift.io/v1/users/~")
+            .body(Vec::new())
+            .map_err(|e| from_kube(&kube::Error::HttpError(e)))?;
+        let u: serde_json::Value = timed(limit, client.request(req)).await?;
+        return Ok(user_and_groups(&u["metadata"]["name"], &u["groups"]));
+    }
+    tracing::debug!("the cluster does not report the user name");
+    Ok((String::new(), Vec::new()))
 }
 
 /// Версия OpenShift из ClusterVersion `version`; нет прав или объекта — `None`.
@@ -296,6 +370,10 @@ pub(crate) mod fixtures {
     /// (ClusterVersion и ноды не читаются).
     pub fn openshift(s: &Seen) -> (u16, serde_json::Value) {
         match s.path() {
+            "/apis/authentication.k8s.io/v1" => resource_list(
+                "authentication.k8s.io/v1",
+                &["tokenreviews", "selfsubjectreviews"],
+            ),
             "/apis/authentication.k8s.io/v1/selfsubjectreviews" => (
                 201,
                 serde_json::json!({"apiVersion": "authentication.k8s.io/v1", "kind": "SelfSubjectReview",
@@ -343,6 +421,22 @@ pub(crate) mod fixtures {
             }
             other => crate::k8s::testing::status(404, "NotFound", &format!("{other} not found")),
         }
+    }
+
+    /// Документ discovery группы-версии `gv` с ресурсами `names` (`GET /apis/{gv}`).
+    pub fn resource_list(gv: &str, names: &[&str]) -> (u16, serde_json::Value) {
+        let resources: Vec<_> = names
+            .iter()
+            .map(|n| {
+                serde_json::json!({"name": n, "singularName": "", "namespaced": false,
+                    "kind": "X", "verbs": ["create"]})
+            })
+            .collect();
+        (
+            200,
+            serde_json::json!({"kind": "APIResourceList", "apiVersion": "v1",
+                "groupVersion": gv, "resources": resources}),
+        )
     }
 }
 
@@ -417,6 +511,159 @@ mod tests {
         assert!(
             !seen.iter().any(|s| s.path() == "/api/v1/nodes"),
             "у OpenShift ноды для определения дистрибутива не читаются"
+        );
+    }
+
+    /// Ответ `SelfSubjectReview` версии `version` с пользователем `old1`.
+    fn review(version: &str) -> (u16, serde_json::Value) {
+        (
+            201,
+            serde_json::json!({"apiVersion": format!("authentication.k8s.io/{version}"),
+                "kind": "SelfSubjectReview", "metadata": {}, "status": {"userInfo": {
+                "username": "old1", "groups": ["system:authenticated"]}}}),
+        )
+    }
+
+    /// Пути запросов, которые увидел мок.
+    fn paths(seen: &[crate::k8s::testing::Seen]) -> Vec<String> {
+        seen.iter().map(|s| s.path().to_string()).collect()
+    }
+
+    /// Kubernetes 1.28+: `SelfSubjectReview` из `authentication.k8s.io/v1`, другие источники
+    /// не опрашиваются.
+    #[tokio::test]
+    async fn whoami_takes_v1_review_when_served() {
+        let (client, server) = mock_client(fixtures::openshift);
+        let (user, groups) = whoami(&client, LIMIT).await.unwrap();
+        assert_eq!(user, "dev1");
+        assert_eq!(groups, ["system:authenticated", "team-a"]);
+        drop(client);
+        let seen = server.await.unwrap();
+        assert_eq!(
+            paths(&seen),
+            [
+                "/apis/authentication.k8s.io/v1",
+                "/apis/authentication.k8s.io/v1/selfsubjectreviews"
+            ]
+        );
+        assert_eq!(seen[1].method, http::Method::POST);
+    }
+
+    /// Kubernetes 1.27 (OpenShift 4.14): `SelfSubjectReview` есть только в `v1beta1`.
+    #[tokio::test]
+    async fn whoami_takes_v1beta1_review_on_kubernetes_1_27() {
+        let (client, server) = mock_client(|s| match s.path() {
+            "/apis/authentication.k8s.io/v1" => {
+                fixtures::resource_list("authentication.k8s.io/v1", &["tokenreviews"])
+            }
+            "/apis/authentication.k8s.io/v1beta1" => {
+                fixtures::resource_list("authentication.k8s.io/v1beta1", &["selfsubjectreviews"])
+            }
+            "/apis/authentication.k8s.io/v1beta1/selfsubjectreviews" => review("v1beta1"),
+            other => status(404, "NotFound", &format!("{other} not found")),
+        });
+        let (user, groups) = whoami(&client, LIMIT).await.unwrap();
+        assert_eq!(user, "old1");
+        assert_eq!(groups, ["system:authenticated"]);
+        drop(client);
+        let seen = server.await.unwrap();
+        let post = seen
+            .iter()
+            .find(|s| s.path() == "/apis/authentication.k8s.io/v1beta1/selfsubjectreviews")
+            .unwrap();
+        assert_eq!(post.method, http::Method::POST);
+        assert_eq!(post.body["apiVersion"], "authentication.k8s.io/v1beta1");
+        assert_eq!(post.body["kind"], "SelfSubjectReview");
+        assert!(
+            !paths(&seen).iter().any(|p| p.contains("user.openshift.io")),
+            "{seen:?}"
+        );
+    }
+
+    /// OpenShift до 4.14 (Kubernetes до 1.27): имя и группы — из `users/~`, как у `oc whoami`.
+    #[tokio::test]
+    async fn whoami_takes_openshift_user_without_reviews() {
+        let (client, server) = mock_client(|s| match s.path() {
+            "/apis/authentication.k8s.io/v1" => {
+                fixtures::resource_list("authentication.k8s.io/v1", &["tokenreviews"])
+            }
+            "/apis/authentication.k8s.io/v1beta1" => {
+                fixtures::resource_list("authentication.k8s.io/v1beta1", &["tokenreviews"])
+            }
+            "/apis/user.openshift.io/v1" => {
+                fixtures::resource_list("user.openshift.io/v1", &["users", "groups"])
+            }
+            "/apis/user.openshift.io/v1/users/~" => (
+                200,
+                serde_json::json!({"apiVersion": "user.openshift.io/v1", "kind": "User",
+                    "metadata": {"name": "ivanov"}, "identities": ["ldap:ivanov"],
+                    "groups": ["ops", "dev"]}),
+            ),
+            other => status(404, "NotFound", &format!("{other} not found")),
+        });
+        let (user, groups) = whoami(&client, LIMIT).await.unwrap();
+        assert_eq!(user, "ivanov");
+        assert_eq!(groups, ["ops", "dev"]);
+        drop(client);
+        let seen = server.await.unwrap();
+        assert!(
+            !paths(&seen)
+                .iter()
+                .any(|p| p.ends_with("selfsubjectreviews")),
+            "{seen:?}"
+        );
+    }
+
+    /// Ни одного источника (Kubernetes до 1.27 без OpenShift): пользователь неизвестен, но
+    /// подключение продолжается.
+    #[tokio::test]
+    async fn whoami_unknown_user_without_any_source() {
+        let (client, _server) = mock_client(|s| match s.path() {
+            "/apis/authentication.k8s.io/v1" => {
+                fixtures::resource_list("authentication.k8s.io/v1", &["tokenreviews"])
+            }
+            other => status(404, "NotFound", &format!("{other} not found")),
+        });
+        assert_eq!(
+            whoami(&client, LIMIT).await.unwrap(),
+            (String::new(), Vec::new())
+        );
+        let (client, _server) = mock_client(|s| match s.path() {
+            "/apis/authentication.k8s.io/v1" => {
+                fixtures::resource_list("authentication.k8s.io/v1", &["tokenreviews"])
+            }
+            "/apis" => (
+                200,
+                serde_json::json!({"kind": "APIGroupList", "apiVersion": "v1", "groups": [
+                    {"name": "apps", "versions": [{"groupVersion": "apps/v1", "version": "v1"}]}]}),
+            ),
+            _ => fixtures::openshift(s),
+        });
+        let info = probe(&client, LIMIT).await.unwrap();
+        assert_eq!((info.user.as_str(), info.groups.len()), ("", 0));
+        assert_eq!(info.server_version, "v1.32.5");
+    }
+
+    /// 401 на первый же запрос — ошибка входа, а не «пользователь неизвестен»; 403 и 404 на документ
+    /// discovery `authentication.k8s.io/v1` — тоже ошибки, а не «не обслуживается».
+    #[tokio::test]
+    async fn whoami_keeps_auth_errors() {
+        let (client, server) = mock_client(|_| status(401, "Unauthorized", "Unauthorized"));
+        let e = whoami(&client, LIMIT).await.unwrap_err();
+        assert_eq!(e.code, ErrorCode::SessionExpired);
+        drop(client);
+        assert_eq!(server.await.unwrap().len(), 1);
+        let (client, _server) = mock_client(|_| status(403, "Forbidden", "forbidden"));
+        let e = whoami(&client, LIMIT).await.unwrap_err();
+        assert_eq!(e.code, ErrorCode::Forbidden);
+        // Документ `authentication.k8s.io/v1` есть у любого API-сервера: 404 на него — ошибка.
+        let (client, server) = mock_client(|s| status(404, "NotFound", s.path()));
+        let e = whoami(&client, LIMIT).await.unwrap_err();
+        assert_eq!(e.code, ErrorCode::NotFound);
+        drop(client);
+        assert_eq!(
+            paths(&server.await.unwrap()),
+            ["/apis/authentication.k8s.io/v1"]
         );
     }
 

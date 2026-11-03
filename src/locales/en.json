@@ -264,6 +264,7 @@
       "projectsOk": "Available projects: {{count}}",
       "projectsManual": "The cluster does not list projects for you; projects from the profile: {{count}}",
       "authOkGroups": "Signed in as {{user}}, groups: {{groups}}",
+      "authUnknownUser": "Signed in; the server does not report the user name (Kubernetes older than 1.27 without OpenShift user API)",
       "metricsHistory": "History of resource usage: {{source}}",
       "metricsCurrent": "No history source: only current values from metrics.k8s.io"
     },
@@ -465,6 +466,7 @@
       "reconnect": "Reconnect",
       "edit": "Edit connection",
       "user": "Signed in as",
+      "userUnknown": "unknown",
       "platform": "Platform",
       "version": "Kubernetes version",
       "apiGroups": "Found in the cluster",
