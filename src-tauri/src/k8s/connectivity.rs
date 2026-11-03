@@ -161,7 +161,8 @@ fn discovery_message(d: &Discovered) -> LocalizedText {
 /// Сколько групп пользователя показывает шаг «Вход»; остальные — числом.
 const SHOWN_GROUPS: usize = 10;
 
-/// Имя пользователя и его группы (спец. §5.3; имени нет — пользователь неизвестен): первые `SHOWN_GROUPS` через запятую, дальше «+N».
+/// Имя пользователя и его группы (спец. §5.3; имени нет — пользователь неизвестен): первые
+/// `SHOWN_GROUPS` через запятую, дальше «+N».
 fn auth_message(user: &str, groups: &[String]) -> LocalizedText {
     if user.is_empty() {
         // Ни `SelfSubjectReview`, ни `users/~` OpenShift (см. `whoami`).
@@ -772,10 +773,10 @@ mod tests {
         assert_eq!(steps[1].error.as_ref().unwrap().code, ErrorCode::Forbidden);
     }
 
-    /// Сервер отвечает 404 на всё: «кто я» узнать негде (документы discovery не обслуживаются),
-    /// пользователь неизвестен — вход проходит, падает discovery на `/version`.
+    /// 404 на документ `authentication.k8s.io/v1` (его обслуживает любой API-сервер с 1.6) —
+    /// это не Kubernetes или неверный адрес: шаг «Вход» падает, вход ничем не доказан.
     #[tokio::test]
-    async fn not_found_everywhere_passes_auth_and_fails_discovery() {
+    async fn not_found_whoami_fails_auth_not_tls() {
         // Статус API-сервера и «чужая» страница с кодом 404 (не `kind: Status`).
         for answer in [
             status(
@@ -787,15 +788,8 @@ mod tests {
         ] {
             let (ok, steps) = steps_for_answer(answer, &sample_profile("a")).await;
             assert!(!ok);
-            assert_eq!(
-                names(&steps),
-                [("tls", true), ("auth", true), ("discovery", false)]
-            );
-            assert_eq!(
-                steps[1].message.key,
-                "messages.connectionTest.authUnknownUser"
-            );
-            assert_eq!(steps[2].error.as_ref().unwrap().code, ErrorCode::NotFound);
+            assert_eq!(names(&steps), [("tls", true), ("auth", false)]);
+            assert_eq!(steps[1].error.as_ref().unwrap().code, ErrorCode::NotFound);
         }
     }
 

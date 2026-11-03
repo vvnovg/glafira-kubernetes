@@ -75,11 +75,9 @@ async fn served_resources(
     }
 }
 
-/// Обслуживает ли группа-версия `gv` ресурс `selfsubjectreviews`.
-async fn serves_reviews(client: &kube::Client, limit: Duration, gv: &str) -> AppResult<bool> {
-    Ok(served_resources(client, limit, gv)
-        .await?
-        .is_some_and(|names| names.iter().any(|n| n == "selfsubjectreviews")))
+/// Есть ли `selfsubjectreviews` среди ресурсов (`None` — группа-версия не обслуживается).
+fn has_reviews(names: Option<Vec<String>>) -> bool {
+    names.is_some_and(|names| names.iter().any(|n| n == "selfsubjectreviews"))
 }
 
 /// Имя и группы из ответа `SelfSubjectReview` (`status.userInfo`) или `User` OpenShift.
@@ -99,10 +97,20 @@ fn user_and_groups(name: &serde_json::Value, groups: &serde_json::Value) -> (Str
 /// не прятать настоящие ошибки: `SelfSubjectReview` `authentication.k8s.io/v1` (Kubernetes
 /// 1.28+, OpenShift 4.15+), иначе `v1beta1` (Kubernetes 1.27, OpenShift 4.14), иначе
 /// `users/~` из `user.openshift.io/v1` (как `oc whoami`), иначе пользователь неизвестен —
-/// пустое имя и нет групп, подключение продолжается. Без ресурса старый API-сервер отвечает
-/// на POST не 404, а 403 (авторизация идёт раньше обработчика), поэтому сначала discovery.
+/// пустое имя и нет групп, подключение продолжается. 404 — «не обслуживается» только у
+/// `v1beta1` и `user.openshift.io/v1`; на документ `authentication.k8s.io/v1` это ошибка. Без
+/// ресурса старый API-сервер отвечает на POST не 404, а 403 (авторизация идёт раньше
+/// обработчика), поэтому сначала discovery.
 pub async fn whoami(client: &kube::Client, limit: Duration) -> AppResult<(String, Vec<String>)> {
-    if serves_reviews(client, limit, "authentication.k8s.io/v1").await? {
+    // `authentication.k8s.io/v1` (`tokenreviews`) обслуживает любой API-сервер с Kubernetes 1.6, а
+    // discovery читает только вошедший пользователь (`system:discovery`): 404 здесь — не Kubernetes
+    // или неверный адрес, это ошибка, а не «не обслуживается». Ответ 200 доказывает вход.
+    let v1 = timed(
+        limit,
+        client.list_api_group_resources("authentication.k8s.io/v1"),
+    )
+    .await?;
+    if has_reviews(Some(v1.resources.into_iter().map(|r| r.name).collect())) {
         let api: Api<SelfSubjectReview> = Api::all(client.clone());
         let r = timed(
             limit,
@@ -115,7 +123,7 @@ pub async fn whoami(client: &kube::Client, limit: Duration) -> AppResult<(String
             info.groups.unwrap_or_default(),
         ));
     }
-    if serves_reviews(client, limit, "authentication.k8s.io/v1beta1").await? {
+    if has_reviews(served_resources(client, limit, "authentication.k8s.io/v1beta1").await?) {
         // В k8s-openapi типа `v1beta1` нет: тело и ответ те же, что у `v1`.
         let body = serde_json::json!({"apiVersion": "authentication.k8s.io/v1beta1",
             "kind": "SelfSubjectReview", "metadata": {}});
@@ -636,8 +644,8 @@ mod tests {
         assert_eq!(info.server_version, "v1.32.5");
     }
 
-    /// 401 на первый же запрос — ошибка входа, а не «пользователь неизвестен»; 403 на документ
-    /// discovery — тоже ошибка, а не «не обслуживается».
+    /// 401 на первый же запрос — ошибка входа, а не «пользователь неизвестен»; 403 и 404 на документ
+    /// discovery `authentication.k8s.io/v1` — тоже ошибки, а не «не обслуживается».
     #[tokio::test]
     async fn whoami_keeps_auth_errors() {
         let (client, server) = mock_client(|_| status(401, "Unauthorized", "Unauthorized"));
@@ -648,6 +656,15 @@ mod tests {
         let (client, _server) = mock_client(|_| status(403, "Forbidden", "forbidden"));
         let e = whoami(&client, LIMIT).await.unwrap_err();
         assert_eq!(e.code, ErrorCode::Forbidden);
+        // Документ `authentication.k8s.io/v1` есть у любого API-сервера: 404 на него — ошибка.
+        let (client, server) = mock_client(|s| status(404, "NotFound", s.path()));
+        let e = whoami(&client, LIMIT).await.unwrap_err();
+        assert_eq!(e.code, ErrorCode::NotFound);
+        drop(client);
+        assert_eq!(
+            paths(&server.await.unwrap()),
+            ["/apis/authentication.k8s.io/v1"]
+        );
     }
 
     #[tokio::test]
