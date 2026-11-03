@@ -149,7 +149,8 @@ function ConnectionSummary({
       <dl className="stats">
         <div>
           <dt>{t("cluster.connection.user")}</dt>
-          <dd>{breakAfterColons(info.user)}</dd>
+          {/* Старый Kubernetes без OpenShift не сообщает имя пользователя (спец. §5.3). */}
+          <dd>{info.user ? breakAfterColons(info.user) : t("cluster.connection.userUnknown")}</dd>
         </div>
         <div>
           <dt>

@@ -108,6 +108,15 @@ describe("ConnectionPanel", () => {
     expect(screen.getByText("2 группы")).toBeInTheDocument();
   });
 
+  it("сервер не сообщает имя пользователя (старый Kubernetes): «неизвестен», а не пустая строка", async () => {
+    vi.mocked(api.listConnections).mockResolvedValue([profile({ method: "token" })]);
+    vi.mocked(api.connect).mockResolvedValue({ ...INFO, user: "", groups: [] });
+    renderWithClient(<ConnectionPanel connectionId="c1" />);
+    const name = await screen.findByText("неизвестен");
+    expect(name.tagName).toBe("DD");
+    expect(screen.getByText("Вход выполнен как").nextElementSibling).toBe(name);
+  });
+
   it("длинное имя пользователя видно целиком: переносится по двоеточиям и в любом месте, а не уходит под соседнюю карточку", async () => {
     const style = document.createElement("style");
     style.textContent = appCss;

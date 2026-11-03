@@ -175,6 +175,11 @@ operators). If the cluster does not let you list projects, enter them in
 shown and the projects from the connection's fields: start typing a name and pick it with the arrows and Enter or a
 click.
 
+Glafira learns your user name and groups from the cluster: on Kubernetes 1.27+ and OpenShift 4.14+ with a
+`SelfSubjectReview` request, on older OpenShift the way `oc whoami` does (`users/~`). If the cluster reports neither
+(Kubernetes older than 1.27 without OpenShift), the [[ui:connections.form.step.auth]] step of the connection test
+passes with a note that the name is unknown, and [[ui:cluster.connection.user]] on the connection tab shows “unknown”.
+
 ## Cluster overview {#overview}
 
 Under the connection details, the connection tab shows the [[ui:cluster.overview.title]]: whether the API server is

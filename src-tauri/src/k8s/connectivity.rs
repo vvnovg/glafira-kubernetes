@@ -161,8 +161,15 @@ fn discovery_message(d: &Discovered) -> LocalizedText {
 /// Сколько групп пользователя показывает шаг «Вход»; остальные — числом.
 const SHOWN_GROUPS: usize = 10;
 
-/// Имя пользователя и его группы (спец. §5.3): первые `SHOWN_GROUPS` через запятую, дальше «+N».
+/// Имя пользователя и его группы (спец. §5.3; имени нет — пользователь неизвестен): первые `SHOWN_GROUPS` через запятую, дальше «+N».
 fn auth_message(user: &str, groups: &[String]) -> LocalizedText {
+    if user.is_empty() {
+        // Ни `SelfSubjectReview`, ни `users/~` OpenShift (см. `whoami`).
+        return ltext!(
+            "messages.connectionTest.authUnknownUser",
+            "Signed in; the server does not report the user name (Kubernetes older than 1.27 without OpenShift user API)"
+        );
+    }
     if groups.is_empty() {
         return ltext!(
             "messages.connectionTest.authOk",
@@ -765,8 +772,10 @@ mod tests {
         assert_eq!(steps[1].error.as_ref().unwrap().code, ErrorCode::Forbidden);
     }
 
+    /// Сервер отвечает 404 на всё: «кто я» узнать негде (документы discovery не обслуживаются),
+    /// пользователь неизвестен — вход проходит, падает discovery на `/version`.
     #[tokio::test]
-    async fn not_found_whoami_fails_auth_not_tls() {
+    async fn not_found_everywhere_passes_auth_and_fails_discovery() {
         // Статус API-сервера и «чужая» страница с кодом 404 (не `kind: Status`).
         for answer in [
             status(
@@ -778,9 +787,53 @@ mod tests {
         ] {
             let (ok, steps) = steps_for_answer(answer, &sample_profile("a")).await;
             assert!(!ok);
-            assert_eq!(names(&steps), [("tls", true), ("auth", false)]);
-            assert_eq!(steps[1].error.as_ref().unwrap().code, ErrorCode::NotFound);
+            assert_eq!(
+                names(&steps),
+                [("tls", true), ("auth", true), ("discovery", false)]
+            );
+            assert_eq!(
+                steps[1].message.key,
+                "messages.connectionTest.authUnknownUser"
+            );
+            assert_eq!(steps[2].error.as_ref().unwrap().code, ErrorCode::NotFound);
         }
+    }
+
+    /// Kubernetes старше 1.27 без OpenShift: имени пользователя нет, но проверка проходит, и шаг
+    /// «Вход» говорит, что пользователь неизвестен.
+    #[tokio::test]
+    async fn unknown_user_passes_auth_step() {
+        let (client, _server) = mock_client(|s| match s.path() {
+            "/apis/authentication.k8s.io/v1" => {
+                fixtures::resource_list("authentication.k8s.io/v1", &["tokenreviews"])
+            }
+            "/apis" => groups_reply(&[]),
+            "/api/v1/namespaces" => (
+                200,
+                serde_json::json!({"apiVersion": "v1", "kind": "NamespaceList", "metadata": {},
+                    "items": [{"metadata": {"name": "default"}}]}),
+            ),
+            _ => fixtures::openshift(s),
+        });
+        let mut steps = Vec::new();
+        assert!(
+            check_cluster(&mut steps, &client, &sample_profile("a"))
+                .await
+                .is_some()
+        );
+        assert_eq!(
+            names(&steps),
+            [
+                ("tls", true),
+                ("auth", true),
+                ("discovery", true),
+                ("projects", true)
+            ]
+        );
+        assert_eq!(
+            steps[1].message.key,
+            "messages.connectionTest.authUnknownUser"
+        );
     }
 
     #[tokio::test]
