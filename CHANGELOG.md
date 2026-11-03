@@ -2,6 +2,24 @@
 
 Versions in the other interface languages are in [docs/changelog](docs/changelog/). The section of a version is shown in About as the update notes, in the interface language.
 
+## 0.2.0
+Resources and changes, logs for LLM assistants, local models, Platform V DropApp and OIDC sign-in.
+- Platform V DropApp:
+  - detected by its API groups, with the DropApp version in the overview and for the assistant;
+  - projects from DropApp projects, VictoriaMetrics found automatically;
+  - the cluster overview shows DropApp components, tools, nodes and ingress certificates; three new cluster rules;
+  - the guide chapter «Platform V DropApp».
+- Sign-in via OIDC (Dex and other providers) in the browser: the values come from a kubeconfig with `kubectl oidc-login` (for DropApp — the one Loginapp issues), the token is refreshed on its own; the issuer CA can be set separately.
+- OpenShift 4.14 and older: connecting no longer fails with 403 when the server has no SelfSubjectReview API. A connection with an expired token offers sign-in via browser, and the tree offers to sign in again.
+- Resources and changes:
+  - CPU and memory usage from the cluster metrics (Thanos, Prometheus, metrics.k8s.io) with charts;
+  - requests and limits recommended from the actual usage;
+  - changes with a server-side dry run: requests and limits, scale, restart, HPA bounds;
+  - the assistant can propose a change; you see it next to the object and apply or reject it yourself.
+- Logs for LLM assistants: a separate access level «Metadata and logs», pod logs and a search over the logs of a workload, with masking of secret-looking values.
+- Local models: argument hints, a response size limit (100, 48 or 24 KB) and a compact tool set for a client; the guide chapter «Local model».
+- Fixes from the smoke tests: a queue for long operations, a live MCP log, clearer texts.
+
 ## 0.1.0
 First version of Glafira for Kubernetes: a desktop app for reading and diagnosing Kubernetes clusters, with a focus on OpenShift.
 - Connections:

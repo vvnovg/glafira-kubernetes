@@ -591,7 +591,7 @@ the third-party software listed below, each under its own license. The list is g
 | zvariant_derive | 5.15.1 | MIT | https://github.com/z-galaxy/zbus/ |
 | zvariant_utils | 4.2.0 | MIT | https://github.com/z-galaxy/zbus/ |
 
-## npm packages in the frontend (108)
+## npm packages in the frontend (109)
 
 | Package | Version | License | Homepage |
 |---|---|---|---|
@@ -698,6 +698,7 @@ the third-party software listed below, each under its own license. The list is g
 | unist-util-stringify-position | 4.0.0 | MIT | https://github.com/syntax-tree/unist-util-stringify-position#readme |
 | unist-util-visit | 5.1.0 | MIT | https://github.com/syntax-tree/unist-util-visit#readme |
 | unist-util-visit-parents | 6.0.2 | MIT | https://github.com/syntax-tree/unist-util-visit-parents#readme |
+| uplot | 1.6.32 | MIT | https://github.com/leeoniya/uPlot#readme |
 | vfile | 6.0.3 | MIT | https://github.com/vfile/vfile#readme |
 | vfile-message | 4.0.3 | MIT | https://github.com/vfile/vfile-message#readme |
 | void-elements | 3.1.0 | MIT | https://github.com/jadejs/void-elements |
