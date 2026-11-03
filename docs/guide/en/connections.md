@@ -31,6 +31,10 @@ OpenShift tokens usually expire after 24 hours. When the session expires, the co
 or to paste a new token. If sign-in via browser is not available on an OpenShift cluster, use
 [[ui:cluster.session.tokenPage]]: it opens the token page of the cluster; copy the token from it and paste it. Other
 clusters have no such page and no such button: paste a service account token, for example from `kubectl create token`.
+For a connection with the token sign-in method on an OpenShift cluster, the connection tab also offers
+[[ui:cluster.session.loginBrowser]]: the new token is saved to the connection like a pasted one. If the token has
+expired, the tree under [[ui:sidebar.projects]] shows [[ui:objects.signInAgain]] instead of [[ui:common.retry]]: it
+connects again and opens the connection tab with the ways to sign in.
 
 ## Sign-in via OIDC {#oidc}
 
