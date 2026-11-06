@@ -175,12 +175,14 @@ pub async fn cluster_overview(r: &ReadClient, info: &ConnectionInfo) -> ClusterO
             false => None,
         }
     };
+    // Запросы — в куче, как в `network::get_network`: в debug-сборке future обзора на стеке —
+    // больше 20 КБ, и кадры async-обёрток команды вокруг неё едва помещались в стек потока tokio.
     let (readyz, nodes, ingress_classes, gateway_classes, projects, platform_details) = tokio::join!(
-        readyz(r),
-        nodes,
-        async { ingress_classes(r).await.into() },
-        gateways,
-        projects,
+        Box::pin(readyz(r)),
+        Box::pin(nodes),
+        Box::pin(async { ingress_classes(r).await.into() }),
+        Box::pin(gateways),
+        Box::pin(projects),
         adapter(info.platform.kind).overview(r, caps),
     );
     ClusterOverview {
