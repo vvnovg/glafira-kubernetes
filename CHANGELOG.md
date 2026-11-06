@@ -2,6 +2,14 @@
 
 Versions in the other interface languages are in [docs/changelog](docs/changelog/). The section of a version is shown in About as the update notes, in the interface language.
 
+## 0.3.0
+A new look on macOS, one connection tree style, icons and keyboard shortcuts.
+- A new look on macOS: the title bar is merged with the sidebar and the tab bar, the system accent and the macOS colors in both themes, no text smaller than 11 px, focus rings on every control, segmented sub-tabs with type icons (workloads, pods, network, configuration, storage, events, resources, quotas, logs, YAML), striped tables with a sticky header, the selected row in the accent color. The window remembers its size and position; the sidebar is resized by dragging its edge.
+- Connection tree: one row style with a 16 px icon for every node (Overview, Projects, Nodes, Findings, a star for a favorite project), a 14 px indent per level with guide lines, and the item of the active tab is highlighted: a project, workload or pod tab highlights its project.
+- Icons instead of text symbols everywhere: tree actions, closing a tab, hints, state marks, read-only locks. “Refresh” buttons have an icon and show their key.
+- Keyboard: ⌘N new connection, ⌘W close tab, ⇧⌘W close window, ⌘R refresh, ⌘F find on the screen, ⇧⌘F filter connections, ⌘1…⌘9 and ⌃Tab switch tabs, ⌘, settings. On macOS they are in the application menu (File, Edit, View, Window, Help); on Windows and Linux the same with Ctrl.
+- The project “Network” sub-tab and the cluster overview read the cluster with far less stack: a debug build aborted on them with a stack overflow.
+
 ## 0.2.0
 Resources and changes, logs for LLM assistants, local models, Platform V DropApp and OIDC sign-in.
 - Platform V DropApp:

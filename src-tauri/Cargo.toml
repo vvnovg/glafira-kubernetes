@@ -1,6 +1,6 @@
 [package]
 name = "glafira-kubernetes"
-version = "0.2.0"
+version = "0.3.0"
 description = "Glafira for Kubernetes — desktop-клиент для Kubernetes, OpenShift и Platform V DropApp"
 authors = ["Glafira for Kubernetes contributors"]
 edition = "2024"
