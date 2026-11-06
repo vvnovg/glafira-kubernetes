@@ -1,4 +1,4 @@
-import { act, renderHook, waitFor } from "@testing-library/react";
+import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 type Opts = { id?: string; text?: string; accelerator?: string; action?: (id: string) => void; item?: unknown; items?: Item[] };
@@ -6,13 +6,15 @@ type Item = { kind: string; opts: Opts; closed: boolean };
 
 // Мок меню Tauri: записывает созданные пункты и последнее меню приложения.
 const h = vi.hoisted(() => ({
-  menus: [] as { items: Item[]; removed: string[]; closed: boolean }[],
+  menus: [] as { items: Item[]; closed: boolean }[],
   appMenu: null as null | { items: Item[] },
   helpForNSApp: [] as string[],
+  windowsForNSApp: [] as string[],
   /** Хэндлы прежнего меню, которые вернул setAsAppMenu. */
   previous: [] as { closed: boolean }[],
   /** Как в Tauri: обработчики кликов по id пункта; Drop (close) пункта удаляет обработчик его id. */
   channels: new Map<string, (id: string) => void>(),
+  closedWindows: 0,
 }));
 
 vi.mock("@tauri-apps/api/menu", () => {
@@ -53,28 +55,20 @@ vi.mock("@tauri-apps/api/menu", () => {
     async setAsHelpMenuForNSApp() {
       h.helpForNSApp.push(this.opts.text ?? "");
     }
+    async setAsWindowsMenuForNSApp() {
+      h.windowsForNSApp.push(this.opts.text ?? "");
+    }
   }
   class Menu {
-    state = {
-      items: [new Submenu({ id: "__tauri_window_menu__", text: "Window" }), new Submenu({ id: "__tauri_help_menu__", text: "Help" })] as Item[],
-      removed: [] as string[],
-      closed: false,
-    };
-    static async default() {
+    state = { items: [] as Item[], closed: false };
+    static async new(opts: Opts) {
       const m = new Menu();
+      m.state.items = opts.items ?? [];
       h.menus.push(m.state);
       return m;
     }
-    async get(id: string) {
-      return this.state.items.find((i) => i.opts.id === id) ?? null;
-    }
-    async remove(item: Item) {
-      (this.state as { stock?: Item }).stock = item;
-      this.state.items = this.state.items.filter((i) => i !== item);
-      this.state.removed.push(item.opts.id ?? "");
-    }
-    async append(item: Item) {
-      this.state.items.push(item);
+    static async default() {
+      throw new Error("Menu.default не используется: у его File и Window ⌘W закрывает окно");
     }
     async setAsAppMenu() {
       h.appMenu = this.state;
@@ -95,6 +89,13 @@ vi.mock("@tauri-apps/api/menu", () => {
 });
 
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({
+    close: async () => {
+      h.closedWindows += 1;
+    },
+  }),
+}));
 
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { i18n } from "../i18n";
@@ -102,14 +103,18 @@ import { SUPPORT_URL } from "./links";
 import { useWorkspace } from "../state/workspace";
 import { useAppMenu } from "./useAppMenu";
 
-const helpSubmenu = () => h.appMenu?.items.find((i) => i.kind === "submenu" && (i.opts.id ?? "").startsWith("glafira-help"));
-const labels = () => helpSubmenu()?.opts.items?.map((i) => (i.kind === "predefined" ? "—" : i.opts.text));
+const submenu = (base: string) => h.appMenu?.items.find((i) => i.kind === "submenu" && (i.opts.id ?? "").startsWith(`${base}-`));
+const helpSubmenu = () => submenu("glafira-help");
+const labels = (s = helpSubmenu()) => s?.opts.items?.map((i) => (i.kind === "predefined" ? "—" : i.opts.text));
 /** Клик доставляется, как в Tauri: по id пункта через общую таблицу обработчиков. */
-const click = (id: string) => {
-  const item = helpSubmenu()?.opts.items?.find((i) => (i.opts.id ?? "").startsWith(`${id}-`));
+const click = (id: string, s = helpSubmenu()) => {
+  const item = s?.opts.items?.find((i) => (i.opts.id ?? "").startsWith(`${id}-`));
   const itemId = item?.opts.id ?? "";
   act(() => h.channels.get(itemId)?.(itemId));
 };
+const accelerator = (base: string, id: string) => submenu(base)?.opts.items?.find((i) => (i.opts.id ?? "").startsWith(`${id}-`))?.opts.accelerator;
+/** Все пункты меню, включая вложенные. */
+const allItems = (items: Item[] = h.appMenu?.items ?? []): Item[] => items.flatMap((i) => [i, ...allItems(i.opts.items ?? [])]);
 
 const realUA = navigator.userAgent;
 const setUA = (ua: string) => Object.defineProperty(window.navigator, "userAgent", { value: ua, configurable: true });
@@ -118,13 +123,17 @@ beforeEach(() => {
   h.menus = [];
   h.appMenu = null;
   h.helpForNSApp = [];
+  h.windowsForNSApp = [];
   h.previous = [];
   h.channels.clear();
+  h.closedWindows = 0;
   vi.mocked(openUrl).mockClear();
   useWorkspace.setState({ tabs: [], activeId: null });
 });
 
 afterEach(async () => {
+  // Сначала размонтировать хук: иначе смена языка ниже запустит сборку меню, которая закончится уже в следующем тесте.
+  cleanup();
   setUA(realUA);
   await i18n.changeLanguage("ru");
 });
@@ -141,18 +150,56 @@ describe("useAppMenu", () => {
     expect(useWorkspace.getState().tabs.map((t) => t.kind)).toEqual(["help"]);
   });
 
-  it("на macOS — меню приложения с подменю «Справка» на русском", async () => {
+  it("на macOS — полное меню приложения на русском: Glafira, Файл, Правка, Вид, Окно, Справка", async () => {
     setUA("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
     renderHook(() => useAppMenu());
     await waitFor(() => expect(helpSubmenu()).toBeDefined());
-    expect(helpSubmenu()?.opts.text).toBe("Справка");
+    expect(h.appMenu?.items.map((i) => i.opts.text)).toEqual(["Glafira", "Файл", "Правка", "Вид", "Окно", "Справка"]);
+    // Пункты Help Kubernetes-версии: без «Решения проблем» и диагностики (этап O6).
     expect(labels()).toEqual(["Руководство Glafira", "—", "Поддержать проект", "О программе"]);
-    // Стандартное пустое Help из меню по умолчанию заменено нашим; остальные подменю на месте.
-    expect(h.appMenu?.items.some((i) => i.opts.id === "__tauri_help_menu__")).toBe(false);
-    expect(h.appMenu?.items.some((i) => i.opts.id === "__tauri_window_menu__")).toBe(true);
+    expect(labels(submenu("file"))).toEqual(["Новое подключение", "—", "Закрыть вкладку", "Закрыть окно"]);
+    expect(labels(submenu("view"))).toEqual(["Обновить", "Найти", "Фильтр подключений", "—", "—"]);
     expect(helpSubmenu()?.opts.items?.[0].opts.accelerator).toBe("CmdOrCtrl+Shift+/");
-    // Не меню справки NSApp — без системного поиска macOS.
+    // Подменю «Окно» — список окон macOS; меню справки NSApp не назначается (иначе системный поиск).
+    expect(h.windowsForNSApp).toEqual(["Окно"]);
     expect(h.helpForNSApp).toEqual([]);
+  });
+
+  it("сочетания клавиш (спец. U1 §8): ⌘N, ⌘W, ⇧⌘W, ⌘R, ⌘F, ⇧⌘F, ⌃Tab, ⌘,", async () => {
+    setUA("Macintosh");
+    renderHook(() => useAppMenu());
+    await waitFor(() => expect(helpSubmenu()).toBeDefined());
+    expect(accelerator("file", "new-connection")).toBe("CmdOrCtrl+N");
+    expect(accelerator("file", "close-tab")).toBe("CmdOrCtrl+W");
+    expect(accelerator("file", "close-window")).toBe("CmdOrCtrl+Shift+W");
+    expect(accelerator("view", "refresh")).toBe("CmdOrCtrl+R");
+    expect(accelerator("view", "find")).toBe("CmdOrCtrl+F");
+    expect(accelerator("view", "filter-connections")).toBe("CmdOrCtrl+Shift+F");
+    expect(accelerator("window", "next-tab")).toBe("Ctrl+Tab");
+    expect(accelerator("window", "prev-tab")).toBe("Ctrl+Shift+Tab");
+    expect(accelerator("app", "settings")).toBe("CmdOrCtrl+Comma");
+    // Стандартного «Закрыть окно» с ⌘W нет: ⌘W закрывает вкладку.
+    expect(allItems().some((i) => i.kind === "predefined" && i.opts.item === "CloseWindow")).toBe(false);
+  });
+
+  it("пункты «Файл», «Вид» и «Окно» действуют: вкладки, настройки, закрытие окна", async () => {
+    setUA("Macintosh");
+    renderHook(() => useAppMenu());
+    await waitFor(() => expect(helpSubmenu()).toBeDefined());
+
+    click("new-connection", submenu("file"));
+    expect(useWorkspace.getState().tabs.map((t) => t.kind)).toEqual(["connection-form"]);
+    click("settings", submenu("app"));
+    expect(useWorkspace.getState().tabs.map((t) => t.kind)).toEqual(["connection-form", "settings"]);
+    expect(useWorkspace.getState().activeId).toBe("settings");
+    click("prev-tab", submenu("window"));
+    expect(useWorkspace.getState().activeId).toBe("connection-form:new");
+    click("next-tab", submenu("window"));
+    expect(useWorkspace.getState().activeId).toBe("settings");
+    click("close-tab", submenu("file"));
+    expect(useWorkspace.getState().tabs.map((t) => t.kind)).toEqual(["connection-form"]);
+    click("close-window", submenu("file"));
+    expect(h.closedWindows).toBe(1);
   });
 
   it("после смены языка меню перестроено с английскими подписями", async () => {
@@ -162,6 +209,7 @@ describe("useAppMenu", () => {
     await act(() => i18n.changeLanguage("en"));
     await waitFor(() => expect(helpSubmenu()?.opts.text).toBe("Help"));
     expect(labels()).toEqual(["Glafira Guide", "—", "Support the project", "About Glafira"]);
+    expect(h.appMenu?.items.map((i) => i.opts.text)).toEqual(["Glafira", "File", "Edit", "View", "Window", "Help"]);
     // Прежнее меню освобождено.
     expect(h.menus[0].closed).toBe(true);
   });
@@ -181,26 +229,21 @@ describe("useAppMenu", () => {
     expect(openUrl).toHaveBeenCalledWith(SUPPORT_URL);
   });
 
-  it("хэндлы освобождаются: стандартный Help, прежнее меню из setAsAppMenu, пункты заменённого меню", async () => {
+  it("хэндлы освобождаются: прежнее меню из setAsAppMenu, пункты заменённого меню", async () => {
     setUA("Macintosh");
-    const stockHelp = () => h.menus[0] && (h.menus[0] as unknown as { stock?: Item }).stock;
     renderHook(() => useAppMenu());
     await waitFor(() => expect(helpSubmenu()?.opts.text).toBe("Справка"));
-    expect(h.menus[0].removed).toEqual(["__tauri_help_menu__"]);
-    expect(stockHelp()?.closed).toBe(true);
     expect(h.previous.map((p) => p.closed)).toEqual([true]);
-    const first = helpSubmenu()!;
-    const firstItems = first.opts.items!;
-    expect([first, ...firstItems].every((i) => !i.closed)).toBe(true);
+    const firstItems = allItems();
+    expect(firstItems.length).toBeGreaterThan(20);
+    expect(firstItems.every((i) => !i.closed)).toBe(true);
 
     await act(() => i18n.changeLanguage("en"));
     await waitFor(() => expect(helpSubmenu()?.opts.text).toBe("Help"));
-    await waitFor(() => expect(first.closed).toBe(true));
-    expect(firstItems.every((i) => i.closed)).toBe(true);
+    await waitFor(() => expect(firstItems.every((i) => i.closed)).toBe(true));
     expect(h.previous.map((p) => p.closed)).toEqual([true, true]);
     // Пункты действующего меню не закрыты: иначе Tauri снимет обработчики нажатий.
-    const live = helpSubmenu()!;
-    expect([live, ...live.opts.items!].every((i) => !i.closed)).toBe(true);
+    expect(allItems().every((i) => !i.closed)).toBe(true);
     expect(h.menus[1].closed).toBe(false);
   });
 
@@ -208,10 +251,10 @@ describe("useAppMenu", () => {
     setUA("Macintosh");
     const { unmount } = renderHook(() => useAppMenu());
     await waitFor(() => expect(helpSubmenu()).toBeDefined());
-    const live = helpSubmenu()!;
+    const live = allItems();
     unmount();
     await waitFor(() => expect(h.menus[0].closed).toBe(true));
-    expect([live, ...live.opts.items!].every((i) => i.closed)).toBe(true);
+    expect(live.every((i) => i.closed)).toBe(true);
   });
 
   it("вне macOS меню не строится", async () => {

@@ -41,7 +41,7 @@ export function PodList({ connectionId, namespace, workload }: { connectionId: s
           <input type="checkbox" checked={problemsOnly} onChange={(e) => setProblemsOnly(e.target.checked)} />
           {t("objects.pods.problemsOnly", { count: problems })}
         </label>
-        <input aria-label={t("objects.pods.filter")} placeholder={t("objects.pods.filter")} value={filter} onChange={(e) => setFilter(e.target.value)} />
+        <input data-action="filter" aria-label={t("objects.pods.filter")} placeholder={t("objects.pods.filter")} value={filter} onChange={(e) => setFilter(e.target.value)} />
         {!cron && <WatchStatusLine state={watch} />}
       </div>
       {cron && listed.error && <ReadError error={listed.error} connectionId={connectionId} onRetry={() => void listed.refetch()} />}

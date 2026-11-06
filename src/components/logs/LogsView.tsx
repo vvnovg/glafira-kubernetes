@@ -224,7 +224,7 @@ export function LogsView({
         </label>
       </div>
       <div className="toolbar">
-        <input aria-label={t("logs.filter")} placeholder={t("logs.filter")} value={text} onChange={(e) => setText(e.target.value)} />
+        <input data-action="filter" aria-label={t("logs.filter")} placeholder={t("logs.filter")} value={text} onChange={(e) => setText(e.target.value)} />
         <label className="inline">
           <input type="checkbox" checked={regex} onChange={(e) => setRegex(e.target.checked)} />
           regex

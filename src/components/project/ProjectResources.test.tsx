@@ -106,8 +106,8 @@ describe("подвкладки проекта", () => {
     const [accepted, programmed] = within(screen.getByText("gw").closest("tr") as HTMLElement)
       .getAllByRole("cell")
       .slice(4);
-    expect(within(accepted).getByRole("img", { name: "в порядке" })).toHaveTextContent("✅");
-    expect(within(programmed).getByRole("img", { name: "проблема" })).toHaveTextContent("⚠");
+    expect(within(accepted).getByRole("img", { name: "в порядке" }).querySelector('svg[data-icon="check"]')).not.toBeNull();
+    expect(within(programmed).getByRole("img", { name: "проблема" }).querySelector('svg[data-icon="warning"]')).not.toBeNull();
     // Условия родителей HTTPRoute: принят — в порядке, ссылки не разрешены — проблема.
     expect(within(screen.getByText("True")).getByRole("img", { name: "в порядке" })).toBeInTheDocument();
     expect(within(screen.getByText(/BackendNotFound/)).getByRole("img", { name: "проблема" })).toBeInTheDocument();

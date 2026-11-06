@@ -2,6 +2,7 @@ import { Fragment } from "react";
 import { useTranslation } from "react-i18next";
 import type { ContainerSpecView, ContainerStatusView, StateView } from "../../api/types";
 import { formatDateTime } from "../../lib/age";
+import { StateMark } from "../common/StateMark";
 
 const isStatus = (c: ContainerSpecView | ContainerStatusView): c is ContainerStatusView => "restarts" in c;
 
@@ -56,7 +57,7 @@ export function ContainerCard({ c }: { c: ContainerSpecView | ContainerStatusVie
               </>
             )}
             <dt>{t("objects.container.ready")}</dt>
-            <dd>{c.ready ? "✅" : "—"}</dd>
+            <dd>{c.ready ? <StateMark state="ok" /> : "—"}</dd>
             <dt>{t("objects.container.restarts")}</dt>
             <dd>{c.restarts}</dd>
           </>

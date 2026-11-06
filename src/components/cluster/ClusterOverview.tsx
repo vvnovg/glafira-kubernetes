@@ -12,6 +12,7 @@ import { HealthBlock } from "../health/HealthBlock";
 import { PartView, Unavailable } from "../common/PartView";
 import { ReadError } from "../common/ReadError";
 import { RefreshControls, useRefreshInterval } from "../common/RefreshControls";
+import { StateMark } from "../common/StateMark";
 
 /** Какие части обзора скрыты правами (у них ошибка FORBIDDEN). */
 function hiddenByRights(o: ClusterOverview): boolean {
@@ -44,7 +45,8 @@ async function openConsole(url: string): Promise<void> {
   }
 }
 
-const flag = (v: boolean | null) => (v === true ? "✅" : v === false ? "⚠" : "—");
+/** Значок состояния; неизвестно (null) — «—». */
+const flag = (v: boolean | null) => (v === null ? "—" : <StateMark state={v ? "ok" : "warn"} />);
 
 /**
  * Обзор кластера (спец. §6.2): API-сервер, ноды, проекты, классы Ingress и Gateway, у OpenShift — обновления, операторы,
@@ -81,7 +83,15 @@ export function ClusterOverviewView({ connectionId }: { connectionId: string }) 
                 </span>
               </dt>
               {/* Нет ответа от /readyz — не «не готов»: состояние неизвестно, причина ниже. */}
-              <dd>{o.readyz.error ? "—" : o.readyz.ok ? `✅ ${t("cluster.overview.ready")}` : `⚠ ${t("cluster.overview.notReady")}`}</dd>
+              <dd>
+                {o.readyz.error ? (
+                  "—"
+                ) : (
+                  <>
+                    {flag(o.readyz.ok)} {o.readyz.ok ? t("cluster.overview.ready") : t("cluster.overview.notReady")}
+                  </>
+                )}
+              </dd>
             </div>
             <div>
               <dt>{t("cluster.overview.nodes")}</dt>
@@ -173,8 +183,8 @@ function OperatorList({ rows }: { rows: OperatorRow[] }) {
               <code>{r.name}</code> <span className="muted">{r.version ?? ""}</span>
             </td>
             <td>{flag(r.available)}</td>
-            <td>{r.progressing ? "⏳" : "—"}</td>
-            <td className={r.degraded ? "problem" : undefined}>{r.degraded ? "⚠" : "—"}</td>
+            <td>{r.progressing ? <StateMark state="progress" /> : "—"}</td>
+            <td className={r.degraded ? "problem" : undefined}>{r.degraded ? <StateMark state="warn" /> : "—"}</td>
             <td>{r.message ?? ""}</td>
           </tr>
         ))}

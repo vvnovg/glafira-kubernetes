@@ -8,6 +8,7 @@ import { formatCount, formatTimestamp } from "../../lib/format";
 import { MCP_STATUS_KEY, useMcpStatus } from "../../lib/useMcpStatus";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Hint } from "../common/Hint";
+import { Icon } from "../common/Icon";
 
 const STATE_KEYS: Record<McpServerState, string> = {
   off: "settings.mcp.state.off",
@@ -264,7 +265,8 @@ export function McpSection() {
 
       <div className="toolbar">
         <h4>{t("settings.mcp.audit.title")}</h4>
-        <button type="button" onClick={() => audit.refetch()}>
+        <button type="button" data-action="refresh" onClick={() => audit.refetch()}>
+          <Icon name="refresh" size={14} />
           {t("settings.mcp.audit.refresh")}
         </button>
         <button type="button" onClick={() => reveal.mutate()}>

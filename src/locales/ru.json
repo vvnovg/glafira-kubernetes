@@ -29,6 +29,12 @@
       "defaultLabel": "имя",
       "objectAria": "Подтверждение: {{label}}",
       "connectionAria": "Имя подключения"
+    },
+    "state": {
+      "ok": "В порядке",
+      "warn": "Предупреждение",
+      "error": "Ошибка",
+      "progress": "Выполняется"
     }
   },
   "errors": {
@@ -766,7 +772,20 @@
   "menu": {
     "help": "Справка",
     "guide": "Руководство Glafira",
-    "about": "О программе"
+    "about": "О программе",
+    "file": "Файл",
+    "newConnection": "Новое подключение",
+    "closeTab": "Закрыть вкладку",
+    "closeWindow": "Закрыть окно",
+    "view": "Вид",
+    "refresh": "Обновить",
+    "find": "Найти",
+    "filterConnections": "Фильтр подключений",
+    "window": "Окно",
+    "nextTab": "Следующая вкладка",
+    "prevTab": "Предыдущая вкладка",
+    "settings": "Настройки…",
+    "edit": "Правка"
   },
   "exchange": {
     "exported": "Сохранено: подключений {{connections}}, папок {{folders}}",

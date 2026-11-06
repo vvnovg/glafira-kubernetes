@@ -8,6 +8,7 @@ import { useNow } from "../../lib/useNow";
 import { useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Hint } from "../common/Hint";
+import { StateMark } from "../common/StateMark";
 import { ClusterOverviewView } from "./ClusterOverview";
 import { LoginWait, reconnect, SessionActions, sessionMutationKey } from "./SessionActions";
 
@@ -185,7 +186,7 @@ function ConnectionSummary({
       <ul className="steps">
         {CAPABILITIES.filter((c) => openShift || !OPENSHIFT_ONLY.includes(c)).map((c) => (
           <li key={c}>
-            {info.capabilities[c] ? "✅" : "—"} {t(`cluster.capability.${c}`)}
+            {info.capabilities[c] ? <StateMark state="ok" /> : "—"} {t(`cluster.capability.${c}`)}
           </li>
         ))}
       </ul>

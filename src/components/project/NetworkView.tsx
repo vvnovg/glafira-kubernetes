@@ -9,6 +9,7 @@ import { useRefetchInterval } from "../../lib/tabActive";
 import { PartView } from "../common/PartView";
 import { ReadError } from "../common/ReadError";
 import { RefreshControls, useRefreshInterval } from "../common/RefreshControls";
+import { StateMark } from "../common/StateMark";
 
 /** Сертификат Route, который истекает раньше, — с предупреждением (спец. §8.2, `route.certExpiring`). */
 const CERT_WARN_SEC = 30 * 86_400;
@@ -22,11 +23,7 @@ function certState(expires: number | null, now: number): "expired" | "soon" | nu
 /** Значок состояния: сам глиф скринридер читает как картинку, поэтому у него есть текст. */
 function Glyph({ ok }: { ok: boolean }) {
   const { t } = useTranslation();
-  return (
-    <span role="img" aria-label={ok ? t("project.network.flagOk") : t("project.network.flagProblem")}>
-      {ok ? "✅" : "⚠"}
-    </span>
-  );
+  return <StateMark state={ok ? "ok" : "warn"} label={ok ? t("project.network.flagOk") : t("project.network.flagProblem")} />;
 }
 
 function Flag({ v }: { v: boolean | null }) {

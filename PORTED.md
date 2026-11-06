@@ -9,17 +9,17 @@
 | `tsconfig.json` | `tsconfig.json` | `8bbd0bd` | как есть |
 | `tsconfig.node.json` | `tsconfig.node.json` | `8bbd0bd` | как есть |
 | `vite.config.ts` | `vite.config.ts` | `8bbd0bd` | как есть |
-| `vitest.config.ts` | `vitest.config.ts` | `8bbd0bd` | адаптирован: стили текстом (`?raw`) в тестах — для проверки правил `app.css` |
+| `vitest.config.ts` | `vitest.config.ts` | `6a3fcfe` | адаптирован: комментарий про стили текстом (`?raw`) |
 | `.gitattributes` | `.gitattributes` | `8bbd0bd` | как есть |
 | `LICENSE` | `LICENSE` | `8bbd0bd` | как есть |
 | `src/vite-env.d.ts` | `src/vite-env.d.ts` | `8bbd0bd` | как есть |
 | `src/polyfills.ts` | `src/polyfills.ts` | `8bbd0bd` | как есть |
 | `src/polyfills.test.ts` | `src/polyfills.test.ts` | `8bbd0bd` | как есть |
-| `src/styles.css` | `src/styles.css` | `8bbd0bd` | как есть |
+| `src/styles.css` | `src/styles.css` | `6a3fcfe` | как есть (этап U1); правила экранов Kubernetes — в `src/app.css` |
 | `scripts/check-dist-compat.mjs` | `scripts/check-dist-compat.mjs` | `8bbd0bd` | адаптирован: исправлено ложное срабатывание `...at(` (перенести в Kafka-версию) |
 | `scripts/check-dist-compat.test.mjs` | `scripts/check-dist-compat.test.mjs` | `8bbd0bd` | адаптирован: тест `...at(` |
 | `src-tauri/build.rs` | `src-tauri/build.rs` | `8bbd0bd` | как есть |
-| `src-tauri/capabilities/default.json` | `src-tauri/capabilities/default.json` | `8bbd0bd` | как есть |
+| `src-tauri/capabilities/default.json` | `src-tauri/capabilities/default.json` | `6a3fcfe` | как есть |
 | `index.html` | `index.html` | `8bbd0bd` | адаптирован: заголовок |
 | `.gitignore` | `.gitignore` | `8bbd0bd` | адаптирован: без путей Kafka-версии; `/logs` — только каталог в корне, не модули `logs/` |
 | `NOTICE` | `NOTICE` | `8bbd0bd` | адаптирован: имя продукта и товарные знаки |
@@ -62,14 +62,14 @@
 | `src/lib/plainInputs.test.ts` | `src/lib/plainInputs.test.ts` | `8bbd0bd` | как есть |
 | `src/lib/useDebouncedValue.ts` | `src/lib/useDebouncedValue.ts` | `8bbd0bd` | как есть |
 | `src/lib/useDebouncedValue.test.ts` | `src/lib/useDebouncedValue.test.ts` | `8bbd0bd` | как есть |
-| `src/lib/env.ts` | `src/lib/env.ts` | `8bbd0bd` | как есть |
+| `src/lib/env.ts` | `src/lib/env.ts` | `6a3fcfe` | как есть |
 | `src/lib/useLanguageSync.ts` | `src/lib/useLanguageSync.ts` | `8bbd0bd` | как есть |
 | `src/test/render.tsx` | `src/test/render.tsx` | `8bbd0bd` | как есть |
 | `src/components/common/ErrorBanner.tsx` | `src/components/common/ErrorBanner.tsx` | `8bbd0bd` | как есть |
 | `src/components/common/ErrorBanner.test.tsx` | `src/components/common/ErrorBanner.test.tsx` | `8bbd0bd` | адаптирован: ключи и коды Kubernetes |
-| `src/components/common/Hint.tsx` | `src/components/common/Hint.tsx` | `8bbd0bd` | как есть |
-| `src/components/common/Hint.test.tsx` | `src/components/common/Hint.test.tsx` | `8bbd0bd` | адаптирован: act вокруг focus() |
-| `src/components/common/EnvBadge.tsx` | `src/components/common/EnvBadge.tsx` | `8bbd0bd` | как есть |
+| `src/components/common/Hint.tsx` | `src/components/common/Hint.tsx` | `6a3fcfe` | как есть |
+| `src/components/common/Hint.test.tsx` | `src/components/common/Hint.test.tsx` | `6a3fcfe` | адаптирован: act вокруг focus() |
+| `src/components/common/EnvBadge.tsx` | `src/components/common/EnvBadge.tsx` | `6a3fcfe` | как есть |
 | `src/i18n/languages.ts` | `src/i18n/languages.ts` | `8bbd0bd` | адаптирован: языки en и ru |
 | `src/lib/links.ts` | `src/lib/links.ts` | `8bbd0bd` | адаптирован: адреса репозиториев |
 | `src/test/setup.ts` | `src/test/setup.ts` | `8bbd0bd` | как есть |
@@ -102,19 +102,19 @@
 | `scripts/guide-publish.test.mjs` | `scripts/guide-publish.test.mjs` | `8bbd0bd` | адаптирован: языки en и ru |
 | `scripts/guide-publish.d.mts` | `scripts/guide-publish.d.mts` | `8bbd0bd` | как есть |
 | `src/components/connections/tree/FolderMenu.tsx` | `src/components/connections/tree/FolderMenu.tsx` | `8bbd0bd` | как есть |
-| `src/components/connections/tree/ConnectionTree.tsx` | `src/components/connections/tree/ConnectionTree.tsx` | `8bbd0bd` | адаптирован: файл обмена Kubernetes, секреты, импорт kubeconfig |
+| `src/components/connections/tree/ConnectionTree.tsx` | `src/components/connections/tree/ConnectionTree.tsx` | `6a3fcfe` | адаптирован: файл обмена Kubernetes, секреты, импорт kubeconfig |
 | `src/components/connections/tree/ConnectionTree.test.tsx` | `src/components/connections/tree/ConnectionTree.test.tsx` | `8bbd0bd` | адаптирован: пункты подключения, секреты, kubeconfig, act вокруг ожидания |
 | `src/components/connections/tree/ImportDialog.tsx` | `src/components/connections/tree/ImportDialog.tsx` | `8bbd0bd` | адаптирован: флаги секретов |
 | `src/components/connections/tree/ImportDialog.test.tsx` | `src/components/connections/tree/ImportDialog.test.tsx` | `8bbd0bd` | адаптирован: флаги секретов |
-| `src/components/connections/tree/ConnectionNode.tsx` | `src/components/connections/tree/ConnectionNode.tsx` | `8bbd0bd` | адаптирован: пункты Kubernetes O1 |
+| `src/components/connections/tree/ConnectionNode.tsx` | `src/components/connections/tree/ConnectionNode.tsx` | `6a3fcfe` | адаптирован: узлы Kubernetes — обзор, проекты (с подсветкой проекта вкладок workload'а и пода), ноды, замечания; значки `namespace`, `star`, `server` |
 | `src/lib/useHelpShortcut.ts` | `src/lib/useHelpShortcut.ts` | `8bbd0bd` | адаптирован: комментарий про главу подключений |
 | `src/guide/noLookbehind.test.ts` | `src/guide/noLookbehind.test.ts` | `8bbd0bd` | адаптирован: порог числа файлов |
 | `src/components/TabContent.help.test.tsx` | `src/components/TabContent.help.test.tsx` | `8bbd0bd` | адаптирован: spy на console.error без возврата из beforeEach |
-| `src/lib/useAppMenu.ts` | `src/lib/useAppMenu.ts` | `8bbd0bd` | адаптирован: без пунктов решения проблем и диагностики (O6) |
-| `src/lib/useAppMenu.test.ts` | `src/lib/useAppMenu.test.ts` | `8bbd0bd` | адаптирован: пункты меню O1 |
-| `src/components/Layout.tsx` | `src/components/Layout.tsx` | `8bbd0bd` | адаптирован: вкладки O1–O2, комментарий про подключения; уведомление об обновлении — из `c5446fc` |
+| `src/lib/useAppMenu.ts` | `src/lib/useAppMenu.ts` | `6a3fcfe` | адаптирован: Help без пунктов решения проблем и диагностики (O6) |
+| `src/lib/useAppMenu.test.ts` | `src/lib/useAppMenu.test.ts` | `6a3fcfe` | адаптирован: пункты Help Kubernetes-версии |
+| `src/components/Layout.tsx` | `src/components/Layout.tsx` | `6a3fcfe` | адаптирован: вкладки O1–O2, контекст активной вкладки; уведомление об обновлении — из `c5446fc` |
 | `src/components/Layout.test.tsx` | `src/components/Layout.test.tsx` | `8bbd0bd` | адаптирован: профиль Kubernetes, вкладки O1 |
-| `src/components/Sidebar.tsx` | `src/components/Sidebar.tsx` | `8bbd0bd` | адаптирован: без индикатора MCP |
+| `src/components/Sidebar.tsx` | `src/components/Sidebar.tsx` | `6a3fcfe` | как есть |
 | `src/components/Sidebar.test.tsx` | `src/components/Sidebar.test.tsx` | `8bbd0bd` | адаптирован: пункты подключения O1 |
 | `src/components/TabContent.tsx` | `src/components/TabContent.tsx` | `8bbd0bd` | адаптирован: вкладки O1 |
 | `deny.toml` | `deny.toml` | `8bbd0bd` | адаптирован: без C-библиотек librdkafka и OpenSSL |
@@ -158,14 +158,14 @@
 | `src/test/mcp.ts` | `src/test/mcp.ts` | `8bbd0bd` | как есть |
 | `src/components/mcp/ApprovalDialog.tsx` | `src/components/mcp/ApprovalDialog.tsx` | `8bbd0bd` | адаптирован: ссылка на спеку |
 | `src/components/mcp/ApprovalDialog.test.tsx` | `src/components/mcp/ApprovalDialog.test.tsx` | `8bbd0bd` | как есть |
-| `src/components/mcp/McpIndicator.tsx` | `src/components/mcp/McpIndicator.tsx` | `8bbd0bd` | как есть |
+| `src/components/mcp/McpIndicator.tsx` | `src/components/mcp/McpIndicator.tsx` | `6a3fcfe` | как есть |
 | `src/components/mcp/McpIndicator.test.tsx` | `src/components/mcp/McpIndicator.test.tsx` | `8bbd0bd` | как есть |
 | `src/components/settings/McpSection.tsx` | `src/components/settings/McpSection.tsx` | `8bbd0bd` | как есть |
 | `src/components/settings/McpSection.test.tsx` | `src/components/settings/McpSection.test.tsx` | `8bbd0bd` | как есть |
 | `src/lib/useHealth.ts` | `src/lib/useHealth.ts` | `8bbd0bd` | адаптирован: без предложений LLM (этап O3) |
 | `src/components/health/findings.ts` | `src/components/health/findings.ts` | `8bbd0bd` | адаптирован: объекты Kubernetes, параметры и варианты текстов правил, без предложений LLM |
 | `src/components/health/findings.test.ts` | `src/components/health/findings.test.ts` | `8bbd0bd` | адаптирован: правила Kubernetes |
-| `src/components/health/parts.tsx` | `src/components/health/parts.tsx` | `8bbd0bd` | адаптирован: ссылки на вкладки объектов Kubernetes |
+| `src/components/health/parts.tsx` | `src/components/health/parts.tsx` | `6a3fcfe` | адаптирован: ссылки на вкладки объектов Kubernetes; `SeverityMark` — `Icon dot` |
 | `src/components/health/CheckBar.tsx` | `src/components/health/CheckBar.tsx` | `8bbd0bd` | адаптирован: охват проверки — проекты, поды, ноды |
 | `src/components/health/CheckBar.test.tsx` | `src/components/health/CheckBar.test.tsx` | `8bbd0bd` | адаптирован: охват проверки |
 | `src/components/health/FindingsPanel.tsx` | `src/components/health/FindingsPanel.tsx` | `8bbd0bd` | адаптирован: виды объектов Kubernetes, поиск и по проекту, без предложений LLM |
@@ -182,7 +182,7 @@
 | `scripts/third-party.mjs` | `scripts/third-party.mjs` | `c5446fc` | адаптирован: без C-библиотек librdkafka, раздел C-библиотек — только если они есть |
 | `scripts/third-party.test.mjs` | `scripts/third-party.test.mjs` | `c5446fc` | адаптирован: пустой список C-библиотек |
 | `scripts/make-pkg.sh` | `scripts/make-pkg.sh` | `c5446fc` | как есть |
-| `src/components/about/UpdateNotice.tsx` | `src/components/about/UpdateNotice.tsx` | `c5446fc` | как есть |
+| `src/components/about/UpdateNotice.tsx` | `src/components/about/UpdateNotice.tsx` | `6a3fcfe` | как есть |
 | `src/components/about/UpdateNotice.test.tsx` | `src/components/about/UpdateNotice.test.tsx` | `c5446fc` | как есть |
 | `src/components/about/ReleaseNotes.tsx` | `src/components/about/ReleaseNotes.tsx` | `c5446fc` | как есть |
 | `src/components/common/ChunkBoundary.tsx` | `src/components/common/ChunkBoundary.tsx` | `c5446fc` | как есть |
@@ -199,3 +199,15 @@
 | `src/components/health/ProposalItem.test.tsx` | `src/components/health/ProposalItem.test.tsx` | `8bbd0bd` | адаптирован: предложение о репликах |
 | `src/components/health/useActivePrefill.ts` | `src/components/health/useActivePrefill.ts` | `8bbd0bd` | как есть |
 | `src/components/health/proposals.ts` | `src/components/health/proposals.ts` | `8bbd0bd` | адаптирован: вкладка формы и описание изменений Kubernetes (§9) |
+| `src/components/common/Icon.tsx` | `src/components/common/Icon.tsx` | `6a3fcfe` | адаптирован: значки Kubernetes-версии (`server`, `namespace`, `star`, `cube`, `pod`, `logs`, `clock`, `network`, `config`, `storage`, `quota`, `chart`, `code`, `check`, `error`, `hourglass`) — в Kafka-версии их нет |
+| `src/components/common/Icon.test.tsx` | `src/components/common/Icon.test.tsx` | `6a3fcfe` | как есть |
+| `src/components/common/Kbd.tsx` | `src/components/common/Kbd.tsx` | `6a3fcfe` | как есть |
+| `src/components/common/Kbd.test.tsx` | `src/components/common/Kbd.test.tsx` | `6a3fcfe` | как есть |
+| `src/components/connections/tree/TreeRow.tsx` | `src/components/connections/tree/TreeRow.tsx` | `6a3fcfe` | как есть |
+| `src/components/connections/tree/TreeRow.test.tsx` | `src/components/connections/tree/TreeRow.test.tsx` | `6a3fcfe` | как есть |
+| `src/lib/platform.ts` | `src/lib/platform.ts` | `6a3fcfe` | как есть |
+| `src/lib/useResizable.ts` | `src/lib/useResizable.ts` | `6a3fcfe` | как есть |
+| `src/lib/shortcuts.ts` | `src/lib/shortcuts.ts` | `6a3fcfe` | как есть |
+| `src/lib/shortcuts.test.tsx` | `src/lib/shortcuts.test.tsx` | `6a3fcfe` | как есть |
+| `src/styles.test.ts` | `src/styles.test.ts` | `6a3fcfe` | адаптирован: в наборе глифов ещё `★ ✅ ⚠ ❌ ⏳` |
+| `src-tauri/tauri.conf.json` | `src-tauri/tauri.conf.json` | `6a3fcfe` | адаптирован: только окно (`titleBarStyle`, `hiddenTitle`); остальное — Kubernetes-версии |

@@ -29,6 +29,12 @@
       "defaultLabel": "name",
       "objectAria": "Confirmation: {{label}}",
       "connectionAria": "Connection name"
+    },
+    "state": {
+      "ok": "OK",
+      "warn": "Warning",
+      "error": "Error",
+      "progress": "In progress"
     }
   },
   "errors": {
@@ -758,7 +764,20 @@
   "menu": {
     "help": "Help",
     "guide": "Glafira Guide",
-    "about": "About Glafira"
+    "about": "About Glafira",
+    "file": "File",
+    "newConnection": "New Connection",
+    "closeTab": "Close Tab",
+    "closeWindow": "Close Window",
+    "view": "View",
+    "refresh": "Refresh",
+    "find": "Find",
+    "filterConnections": "Filter Connections",
+    "window": "Window",
+    "nextTab": "Next Tab",
+    "prevTab": "Previous Tab",
+    "settings": "Settings…",
+    "edit": "Edit"
   },
   "exchange": {
     "exported": "Saved: connections {{connections}}, folders {{folders}}",

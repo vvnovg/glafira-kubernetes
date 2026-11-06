@@ -116,7 +116,7 @@ describe("ClusterOverviewView", () => {
     vi.mocked(api.listClusterOperators).mockResolvedValue([op("dns", false), op("ingress", true)]);
     const user = userEvent.setup();
     renderWithClient(<ClusterOverviewView connectionId="c1" />);
-    expect(await screen.findByText("⚠ не готов")).toBeInTheDocument();
+    expect(await screen.findByText("не готов")).toBeInTheDocument();
     expect(screen.getByText("etcd")).toBeInTheDocument();
     expect(screen.getByText("5 / 6")).toBeInTheDocument();
     expect(screen.getByText("500+")).toBeInTheDocument();
@@ -300,7 +300,7 @@ describe("ClusterOverviewView", () => {
       expect(await screen.findByText("Кластер отклонил учётные данные: токен истёк или неверен")).toBeInTheDocument();
       await user.click(screen.getByRole("button", { name: "Войти снова" }));
       await waitFor(() => expect(api.connect).toHaveBeenCalledWith("c1", true));
-      expect(await screen.findByText("⚠ не готов")).toBeInTheDocument();
+      expect(await screen.findByText("не готов")).toBeInTheDocument();
       expect(api.getClusterOverview).toHaveBeenCalledTimes(2);
     });
 
@@ -324,7 +324,7 @@ describe("ClusterOverviewView", () => {
       expect(await screen.findByText("No route to host")).toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "Войти снова" })).not.toBeInTheDocument();
       await user.click(screen.getByRole("button", { name: "Повторить" }));
-      expect(await screen.findByText("⚠ не готов")).toBeInTheDocument();
+      expect(await screen.findByText("не готов")).toBeInTheDocument();
     });
   });
 
@@ -337,7 +337,7 @@ describe("ClusterOverviewView", () => {
       renderWithClient(<ClusterOverviewView connectionId="c1" />);
       expect(await screen.findByText("readyz timed out")).toBeInTheDocument();
       expect(screen.queryByText(/не готов/)).not.toBeInTheDocument();
-      expect(screen.queryByText(/✅ готов/)).not.toBeInTheDocument();
+      expect(screen.queryByText("готов")).not.toBeInTheDocument();
       expect(screen.getByText("API-сервер").closest("div")?.querySelector("dd")).toHaveTextContent(/^—$/);
       expect(screen.queryByText("Остальное скрыто правами.")).not.toBeInTheDocument();
     });
@@ -386,7 +386,7 @@ describe("ClusterOverviewView", () => {
       platformDetails: null,
     });
     renderWithClient(<ClusterOverviewView connectionId="c1" />);
-    expect(await screen.findByText("✅ готов")).toBeInTheDocument();
+    expect(await screen.findByText("готов")).toBeInTheDocument();
     expect(screen.getByText("— Нет прав: list nodes на уровне кластера")).toBeInTheDocument();
     expect(screen.getByText("cilium")).toBeInTheDocument();
     expect(screen.getByText("Остальное скрыто правами.")).toBeInTheDocument();

@@ -10,7 +10,7 @@ import { Conditions } from "../common/Conditions";
 import { KeyValues } from "../common/KeyValues";
 import { ReadError } from "../common/ReadError";
 import { RefreshControls, useRefreshInterval } from "../common/RefreshControls";
-import { SubTabs } from "../common/SubTabs";
+import { type SubTab, SubTabs } from "../common/SubTabs";
 import { YamlView } from "../common/YamlView";
 import { PodActions } from "../change/ChangeActions";
 import { PodResources } from "../resources/WorkloadResources";
@@ -30,12 +30,12 @@ export function PodPanel({ connectionId, namespace, name }: { connectionId: stri
   const [sub, setSub] = useState<Sub>("overview");
   // Контейнеры для логов — из того же запроса, что и обзор.
   const details = useQuery({ queryKey: ["pod", connectionId, namespace, name], queryFn: () => api.getPod(connectionId, namespace, name) });
-  const tabs: { id: Sub; label: string }[] = [
-    { id: "overview", label: t("objects.tabs.overview") },
-    { id: "logs", label: t("logs.title") },
-    { id: "events", label: t("objects.tabs.events") },
-    { id: "yaml", label: "YAML" },
-    { id: "resources", label: t("objects.tabs.resources") },
+  const tabs: SubTab<Sub>[] = [
+    { id: "overview", label: t("objects.tabs.overview"), icon: "grid" },
+    { id: "logs", label: t("logs.title"), icon: "logs" },
+    { id: "events", label: t("objects.tabs.events"), icon: "clock" },
+    { id: "yaml", label: "YAML", icon: "code" },
+    { id: "resources", label: t("objects.tabs.resources"), icon: "chart" },
   ];
   return (
     <div className="page">

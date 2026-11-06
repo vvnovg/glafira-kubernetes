@@ -8,6 +8,7 @@ import { restartSessions } from "../../lib/afterSignIn";
 import { useWorkspace } from "../../state/workspace";
 import { ErrorBanner } from "../common/ErrorBanner";
 import { Hint } from "../common/Hint";
+import { StateMark } from "../common/StateMark";
 import { formatArgs, formatEnv, hasSecretValues, launchKey, launchLine, maskArgs, maskEnv, needsExecConfirmation, newExec, parseArgs, parseEnv } from "./exec";
 import { STANDARD_MASK_FIELDS } from "./maskFields";
 import { formatNamespaces, newMetricsEndpoint, newOidc, parseNamespaces, withAuthMethod, withCaMode, withMetricsMode, withProxyMode } from "./profile";
@@ -720,7 +721,7 @@ export function ConnectionForm({ initial, tabId }: { initial: ConnectionProfile;
         <ul className="steps">
           {report.steps.map((s) => (
             <li key={s.name}>
-              {s.ok ? "✅" : s.name === "metrics" ? "⚠️" : "❌"} <strong>{t(`connections.form.step.${s.name}`)}:</strong> <span>{tr(s.message)}</span>
+              <StateMark state={s.ok ? "ok" : s.name === "metrics" ? "warn" : "error"} /> <strong>{t(`connections.form.step.${s.name}`)}:</strong> <span>{tr(s.message)}</span>
               {s.error?.details && <pre className="muted">{s.error.details}</pre>}
               {s.notes && s.notes.length > 0 && (
                 <ul className="muted">

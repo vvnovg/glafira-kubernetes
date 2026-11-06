@@ -65,7 +65,7 @@ export function WorkloadsTable({ connectionId, namespace, rows }: { connectionId
             ))}
           </select>
         </label>
-        <input aria-label={t("objects.pods.filter")} placeholder={t("objects.pods.filter")} value={filter} onChange={(e) => setFilter(e.target.value)} />
+        <input data-action="filter" aria-label={t("objects.pods.filter")} placeholder={t("objects.pods.filter")} value={filter} onChange={(e) => setFilter(e.target.value)} />
       </div>
       <VirtualTable
         label={t("project.workloads.title")}

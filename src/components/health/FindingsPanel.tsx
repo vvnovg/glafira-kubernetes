@@ -110,7 +110,7 @@ export function FindingsPanel({ connectionId }: { connectionId: string }) {
             </option>
           ))}
         </select>
-        <input aria-label={t("health.search")} placeholder={t("health.search")} value={query} onChange={(e) => setQuery(e.target.value)} />
+        <input data-action="filter" aria-label={t("health.search")} placeholder={t("health.search")} value={query} onChange={(e) => setQuery(e.target.value)} />
         <span className="field-label">
           <label>
             <input type="checkbox" checked={showHidden} onChange={(e) => setShowHidden(e.target.checked)} />

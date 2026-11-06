@@ -9,6 +9,8 @@ import { ChangeButton } from "../change/ChangeActions";
 import { canSetResources } from "../change/changes";
 import { ChangeDialog } from "../change/ChangeDialog";
 import { Hint } from "../common/Hint";
+import { Icon } from "../common/Icon";
+import { Kbd } from "../common/Kbd";
 import { ChunkBoundary } from "../common/ChunkBoundary";
 import { useNamespaceAccess } from "../project/useNamespaceAccess";
 import type { ChartLine } from "./chart";
@@ -89,8 +91,10 @@ export function WorkloadResources({ connectionId, namespace, kind, name }: Props
     <div className="section">
       <div className="toolbar">
         <WindowSelect days={days} onChange={setDays} disabledReason={a && !a.usage.source.history ? t("resources.currentOnly") : undefined} />
-        <button type="button" disabled={q.isFetching} onClick={reload}>
+        <button type="button" data-action="refresh" disabled={q.isFetching} onClick={reload}>
+          <Icon name="refresh" size={14} />
           {t("common.refresh")}
+          <Kbd keys="Mod+R" />
         </button>
         {change && change.kind === "setResources" && change.containers.length > 0 && canSetResources(kind) && (
           <ChangeButton change={change} access={access} readOnly={readOnly} label={t("resources.applyRecommendation")} onOpen={setForm} />
@@ -278,8 +282,10 @@ export function PodResources({ connectionId, namespace, pod }: { connectionId: s
   return (
     <div className="section">
       <div className="toolbar">
-        <button type="button" disabled={q.isFetching} onClick={reload}>
+        <button type="button" data-action="refresh" disabled={q.isFetching} onClick={reload}>
+          <Icon name="refresh" size={14} />
           {t("common.refresh")}
+          <Kbd keys="Mod+R" />
         </button>
       </div>
       {q.isPending && <p className="muted">{t("common.loading")}</p>}
