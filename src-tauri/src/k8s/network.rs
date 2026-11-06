@@ -589,14 +589,17 @@ pub async fn get_network(r: &ReadClient, namespace: &str, groups: &ApiGroups) ->
             false => None,
         }
     };
+    // Семь запросов — в куче: future каждого в debug-сборке около 5 КБ, а async-обёртки
+    // команды (tauri, `read_in`, `observe`) держат на стеке кадры в разы больше future внутри
+    // них, и с 35 КБ `tokio::join!` на стеке цепочка не помещалась в 2 МБ потока tokio.
     let (services, slices, routes, ingresses, gateways, http, grpc) = tokio::join!(
-        r.list::<Service>(ns, &lp),
-        r.list::<EndpointSlice>(ns, &lp),
-        routes,
-        r.list::<Ingress>(ns, &lp),
-        gateway_api(gateways()),
-        gateway_api(http_routes()),
-        gateway_api(grpc_routes()),
+        Box::pin(r.list::<Service>(ns, &lp)),
+        Box::pin(r.list::<EndpointSlice>(ns, &lp)),
+        Box::pin(routes),
+        Box::pin(r.list::<Ingress>(ns, &lp)),
+        Box::pin(gateway_api(gateways())),
+        Box::pin(gateway_api(http_routes())),
+        Box::pin(gateway_api(grpc_routes())),
     );
     let (endpoints, endpoints_error) = match slices {
         Ok(l) => (Some(endpoints_by_service(&l.items)), None),
@@ -1148,5 +1151,20 @@ mod tests {
         assert_eq!(n.ingresses.data.unwrap()[0].routes, ["web-abcde"]);
         let http = &n.http_routes.unwrap().data.unwrap()[0];
         assert_eq!(http.backends, ["web:80", "canary:80"]);
+    }
+
+    /// Регрессия: future `get_network` остаётся маленькой — запросы в куче. С ними на стеке
+    /// (около 35 КБ) debug-сборка падала на вкладке «Сеть» с переполнением стека потока tokio.
+    #[tokio::test]
+    async fn get_network_future_stays_small() {
+        let (client, _server) = mock_client(|_| list(vec![]));
+        let r = ReadClient::new(client, Duration::from_secs(5));
+        let groups = ApiGroups {
+            routes: true,
+            gateway_api: true,
+            ..Default::default()
+        };
+        let size = std::mem::size_of_val(&get_network(&r, "team-a", &groups));
+        assert!(size < 2048, "future get_network — {size} байт");
     }
 }

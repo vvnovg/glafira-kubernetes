@@ -148,7 +148,11 @@ impl AppState {
             Ok(c) => c,
             Err(e) => return (Err(e), Observed::default()),
         };
-        let (result, seen) = observe(f(c.clone())).await;
+        // Future чтения — в куче, как `open` в `connected`: в debug-сборке каждая async-обёртка
+        // команды (tauri, `read_in`, `observe`) держит на стеке кадр в разы больше future внутри,
+        // и с крупным чтением (`get_network` — семь запросов) цепочка не помещалась в 2 МБ
+        // потока tokio.
+        let (result, seen) = observe(Box::pin(f(c.clone()))).await;
         // Ошибка команды, а если она не о клиенте — ошибка части экрана или вида списка.
         let broken = match &result {
             Err(e) if breaks_client(e.code) => Some(e),
