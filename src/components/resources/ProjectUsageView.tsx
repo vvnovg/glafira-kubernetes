@@ -6,6 +6,8 @@ import { currentLocale } from "../../i18n";
 import { formatAgo } from "../../lib/formatAgo";
 import { cpuText, memoryText } from "../../lib/quantity";
 import { useWorkspace } from "../../state/workspace";
+import { Icon } from "../common/Icon";
+import { Kbd } from "../common/Kbd";
 import { KindErrors } from "../project/KindErrors";
 import { quotaAmount } from "../change/changes";
 import { MAX_ROWS, type Sort, excessText, projectRows, riskText } from "./projectRows";
@@ -76,9 +78,11 @@ export function ProjectUsageView({ connectionId, namespace }: { connectionId: st
           <input type="checkbox" checked={onlyActionable} onChange={(e) => setOnlyActionable(e.target.checked)} />
           {t("resources.onlyActionable")}
         </label>
-        <input aria-label={t("resources.filter")} placeholder={t("resources.filter")} value={query} onChange={(e) => setQuery(e.target.value)} />
-        <button type="button" disabled={state.status === "loading"} onClick={() => setNonce((n) => n + 1)}>
+        <input data-action="filter" aria-label={t("resources.filter")} placeholder={t("resources.filter")} value={query} onChange={(e) => setQuery(e.target.value)} />
+        <button type="button" data-action="refresh" disabled={state.status === "loading"} onClick={() => setNonce((n) => n + 1)}>
+          <Icon name="refresh" size={14} />
           {t("common.refresh")}
+          <Kbd keys="Mod+R" />
         </button>
       </div>
       {state.status === "loading" && <p className="muted">{t("resources.collecting")}</p>}

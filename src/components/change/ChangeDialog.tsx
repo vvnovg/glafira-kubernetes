@@ -8,6 +8,8 @@ import { healthKey } from "../../lib/useHealth";
 import { useConnection } from "../../lib/useConnection";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { ErrorBanner } from "../common/ErrorBanner";
+import { Icon } from "../common/Icon";
+import { StateMark } from "../common/StateMark";
 import { changeObject, hasValues, warningText, withValues } from "./changes";
 
 /** Текущие requests и limits контейнера из шаблона — подсказки в полях формы ресурсов. */
@@ -180,7 +182,9 @@ function PreviewView({ preview }: { preview: ChangePreview }) {
           {warningText(w, t)}
         </p>
       ))}
-      {preview.dryRun.status === "passed" && <p className="muted">✅ {t("change.dryRun.passed")}</p>}
+      {preview.dryRun.status === "passed" && <p className="muted">
+          <StateMark state="ok" /> {t("change.dryRun.passed")}
+        </p>}
       {preview.dryRun.status === "skipped" && <p className="muted">{t("change.dryRun.skipped")}</p>}
       {preview.dryRun.status === "rejected" && (
         <>
@@ -299,7 +303,7 @@ function ResourceFields({ change, hints, disabled, onChange }: FieldsProps & { c
                     disabled={disabled}
                     onClick={() => set(i, p, r, v === null ? undefined : null)}
                   >
-                    ✕
+                    <Icon name="close" size={14} />
                   </button>
                 </td>
               );

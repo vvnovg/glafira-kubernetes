@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import type { WorkloadRow } from "../../api/types";
 import { useWatchList, workloadKey } from "../../lib/useWatchList";
 import { ReadError } from "../common/ReadError";
-import { SubTabs } from "../common/SubTabs";
+import { type SubTab, SubTabs } from "../common/SubTabs";
 import { TruncatedNote } from "../common/TruncatedNote";
 import { ProjectEvents } from "../objects/EventList";
 import { KindErrors } from "./KindErrors";
@@ -43,16 +43,16 @@ export function ProjectPanel({ connectionId, namespace, proposal }: { connection
   // Права перечитываются по таймеру и по «Обновить» в обзоре, иначе подвкладка, скрытая по устаревшим правам, не вернулась бы.
   const access = useNamespaceAccess(connectionId, namespace);
   const a = access.data;
-  const tabs: { id: Sub; label: string; visible: boolean }[] = [
-    { id: "overview", label: t("objects.tabs.overview"), visible: true },
-    { id: "workloads", label: t("project.tabs.workloads"), visible: canList(a, ...WORKLOAD_RESOURCES) },
-    { id: "pods", label: t("objects.tabs.pods"), visible: canList(a, "pods") },
-    { id: "network", label: t("project.tabs.network"), visible: canList(a, ...NETWORK_RESOURCES) },
-    { id: "config", label: t("project.tabs.config"), visible: canList(a, "configmaps", "secrets") },
-    { id: "storage", label: t("project.tabs.storage"), visible: canList(a, "persistentvolumeclaims") },
-    { id: "events", label: t("objects.tabs.events"), visible: canList(a, "events") },
-    { id: "resources", label: t("objects.tabs.resources"), visible: canList(a, "pods") },
-    { id: "quotas", label: t("project.tabs.quotas"), visible: canList(a, "resourcequotas", "limitranges") },
+  const tabs: (SubTab<Sub> & { visible: boolean })[] = [
+    { id: "overview", label: t("objects.tabs.overview"), icon: "grid", visible: true },
+    { id: "workloads", label: t("project.tabs.workloads"), icon: "cube", visible: canList(a, ...WORKLOAD_RESOURCES) },
+    { id: "pods", label: t("objects.tabs.pods"), icon: "pod", visible: canList(a, "pods") },
+    { id: "network", label: t("project.tabs.network"), icon: "network", visible: canList(a, ...NETWORK_RESOURCES) },
+    { id: "config", label: t("project.tabs.config"), icon: "config", visible: canList(a, "configmaps", "secrets") },
+    { id: "storage", label: t("project.tabs.storage"), icon: "storage", visible: canList(a, "persistentvolumeclaims") },
+    { id: "events", label: t("objects.tabs.events"), icon: "clock", visible: canList(a, "events") },
+    { id: "resources", label: t("objects.tabs.resources"), icon: "chart", visible: canList(a, "pods") },
+    { id: "quotas", label: t("project.tabs.quotas"), icon: "quota", visible: canList(a, "resourcequotas", "limitranges") },
   ];
   const visible = tabs.filter((x) => x.visible);
   const active = visible.some((x) => x.id === sub) ? sub : "overview";

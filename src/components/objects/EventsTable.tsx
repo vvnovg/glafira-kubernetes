@@ -48,7 +48,7 @@ export function EventsTable({ rows }: { rows: EventRow[] }) {
             ))}
           </select>
         </label>
-        <input aria-label={t("objects.events.object")} placeholder={t("objects.events.objectFilter")} value={object} onChange={(e) => setObject(e.target.value)} />
+        <input data-action="filter" aria-label={t("objects.events.object")} placeholder={t("objects.events.objectFilter")} value={object} onChange={(e) => setObject(e.target.value)} />
       </div>
       <VirtualTable label={t("objects.events.title")} rows={shown} columns={columns} rowKey={eventKey} />
     </>

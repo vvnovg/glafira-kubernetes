@@ -523,9 +523,9 @@ describe("ConnectionForm", () => {
     const user = userEvent.setup();
     renderWithClient(<ConnectionForm initial={{ ...newProfile(), name: "dev", apiUrl: "https://api.dev:6443" }} tabId="t" />);
     await user.click(screen.getByRole("button", { name: "Проверить подключение" }));
-    const step = (await screen.findByText("Метрики:")).closest("li");
-    expect(step).toHaveTextContent("⚠️");
-    expect(step).not.toHaveTextContent("❌");
+    const step = (await screen.findByText("Метрики:")).closest("li")!;
+    expect(step.querySelector('svg[data-icon="warning"]')).not.toBeNull();
+    expect(step.querySelector('svg[data-icon="error"]')).toBeNull();
   });
 
   it("источник метрик: свой Prometheus с токеном — адрес в профиле, токен секретом; «Автоматически» — без них", async () => {

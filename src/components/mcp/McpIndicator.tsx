@@ -1,8 +1,10 @@
 import { useTranslation } from "react-i18next";
 import { useMcpStatus } from "../../lib/useMcpStatus";
 import { useWorkspace } from "../../state/workspace";
+import { Icon } from "../common/Icon";
+import { TreeRow } from "../connections/tree/TreeRow";
 
-/** «LLM: <клиент>» внизу боковой панели, пока есть сессии MCP; подсвечивается во время вызова. */
+/** «LLM: <клиент>» внизу боковой панели, пока есть сессии MCP; точка подсвечивается во время вызова. */
 export function McpIndicator() {
   const { t } = useTranslation();
   const open = useWorkspace((s) => s.open);
@@ -12,13 +14,13 @@ export function McpIndicator() {
   const active = s.sessions.some((x) => x.active);
   const label = names.length === 1 ? t("mcp.indicator.one", { client: names[0] }) : t("mcp.indicator.many", { n: names.length });
   return (
-    <button
-      type="button"
-      className={active ? "link mcp-indicator active" : "link mcp-indicator"}
+    <TreeRow
+      chevron="none"
+      className={active ? "mcp-indicator active" : "mcp-indicator"}
+      icon={<Icon name="dot" size={12} />}
+      name={label}
       title={t("mcp.indicator.title")}
-      onClick={() => open({ kind: "settings" })}
-    >
-      {label}
-    </button>
+      onActivate={() => open({ kind: "settings" })}
+    />
   );
 }

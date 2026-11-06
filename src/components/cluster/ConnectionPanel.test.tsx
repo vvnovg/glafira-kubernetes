@@ -101,9 +101,9 @@ describe("ConnectionPanel", () => {
     expect(api.connect).toHaveBeenCalledWith("c1", false);
     expect(screen.getByText("OpenShift 4.18")).toBeInTheDocument();
     expect(screen.getByText("Route, Project, DeploymentConfig")).toBeInTheDocument();
-    expect(screen.getByText("✅ Операторы кластера")).toBeInTheDocument();
+    expect(screen.getByText("Операторы кластера")).toBeInTheDocument();
     expect(screen.getByText("v1.32.5")).toBeInTheDocument();
-    expect(screen.getByText("✅ Список проектов")).toBeInTheDocument();
+    expect(screen.getByText("Список проектов")).toBeInTheDocument();
     expect(screen.getByText("— Ноды")).toBeInTheDocument();
     expect(screen.getByText("2 группы")).toBeInTheDocument();
   });

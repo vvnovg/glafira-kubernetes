@@ -1,4 +1,4 @@
-import { screen, within } from "@testing-library/react";
+import { act, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { checkedView, finding } from "../../../test/health";
@@ -37,11 +37,13 @@ describe("ConnectionNode", () => {
     );
     expect(api.listProjects).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: /Проекты/ }));
-    expect(await screen.findByRole("button", { name: "★ team-b" })).toBeInTheDocument();
+    // Избранный проект — со значком `star` (спец. U1), сверху списка.
+    const teamB = await screen.findByRole("button", { name: "team-b" });
+    expect(teamB.querySelector('svg[data-icon="star"]')).not.toBeNull();
     const names = screen.getAllByRole("button").map((b) => b.textContent);
-    expect(names.indexOf("★ team-b")).toBeLessThan(names.indexOf("alpha"));
+    expect(names.indexOf("team-b")).toBeLessThan(names.indexOf("alpha"));
     await user.type(screen.getByLabelText("Фильтр проектов"), "alp");
-    expect(screen.queryByRole("button", { name: "★ team-b" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "team-b" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "alpha" }));
     expect(useWorkspace.getState().tabs[0]).toMatchObject({ kind: "project", connectionId: "c1", namespace: "alpha" });
     expect(api.connect).not.toHaveBeenCalled();
@@ -67,7 +69,7 @@ describe("ConnectionNode", () => {
     expect(useWorkspace.getState().tabs[0]).toMatchObject({ kind: "nodes", connectionId: "c1" });
     await user.click(screen.getByRole("button", { name: /Проекты/ }));
     expect(await screen.findByText("Кластер не даёт список проектов — показаны проекты из профиля")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "★ team-a" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "team-a" }).querySelector('svg[data-icon="star"]')).not.toBeNull();
   });
 
   const FORBIDDEN = { code: "FORBIDDEN" as const, key: "errors.k8s.forbiddenCluster", params: { verb: "list", resource: "namespaces" }, message: "x", retryable: false };
@@ -185,9 +187,47 @@ describe("ConnectionNode", () => {
     const findings = screen.getByRole("button", { name: "Замечания" }).closest("li")!;
     expect(await within(findings).findByRole("img", { name: "Критично: 1" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Проекты/ }));
-    const teamB = (await screen.findByRole("button", { name: "team-b" })).closest("li")!;
+    const teamB = (await screen.findByRole("button", { name: /^team-b/ })).closest("li")!;
     expect(within(teamB).getByRole("img", { name: "Критично: 1" })).toBeInTheDocument();
     const alpha = screen.getByRole("button", { name: "alpha" }).closest("li")!;
     expect(within(alpha).queryByRole("img")).not.toBeInTheDocument();
+  });
+});
+
+describe("ConnectionNode: подсветка узла активной вкладки (спец. U1 §6)", () => {
+  const current = () => screen.queryAllByRole("button", { current: "page" }).map((b) => b.textContent);
+
+  it("«Обзор», «Замечания» и проект подсвечены для своей вкладки; вкладки workload'а и пода подсвечивают проект", async () => {
+    // Без находок: значок замечаний у проекта входит в имя его кнопки.
+    vi.mocked(api.getHealth).mockResolvedValue({ lastCheck: null, ignored: [], annotations: [], proposals: [] });
+    vi.mocked(api.listProjects).mockResolvedValue({ items: [project("alpha"), project("team-b")], truncated: false });
+    const user = userEvent.setup();
+    renderWithClient(
+      <ul>
+        <ConnectionNode connection={conn} />
+      </ul>,
+    );
+    expect(current()).toEqual([]);
+    act(() => useWorkspace.getState().open({ kind: "cluster", connectionId: "c1" }));
+    expect(current()).toEqual(["Обзор"]);
+    act(() => useWorkspace.getState().open({ kind: "findings", connectionId: "c1" }));
+    expect(current()).toEqual(["Замечания"]);
+
+    // Пока проекты свёрнуты, вкладку проекта отмечает строка «Проекты».
+    act(() => useWorkspace.getState().open({ kind: "project", connectionId: "c1", namespace: "team-b" }));
+    expect(current()).toEqual([]);
+    expect(screen.getByRole("button", { name: "Развернуть или свернуть Проекты" }).closest(".tree-row")).toHaveClass("current");
+    await user.click(screen.getByRole("button", { name: "Развернуть или свернуть Проекты" }));
+    expect(await screen.findByRole("button", { name: "team-b" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("button", { name: "Развернуть или свернуть Проекты" }).closest(".tree-row")).not.toHaveClass("current");
+
+    act(() => useWorkspace.getState().open({ kind: "workload", connectionId: "c1", namespace: "alpha", workloadKind: "Deployment", name: "web" }));
+    expect(current()).toEqual(["alpha"]);
+    act(() => useWorkspace.getState().open({ kind: "pod", connectionId: "c1", namespace: "team-b", name: "web-1" }));
+    expect(current()).toEqual(["team-b"]);
+
+    // Вкладка другого подключения узел не подсвечивает.
+    act(() => useWorkspace.getState().open({ kind: "cluster", connectionId: "c2" }));
+    expect(current()).toEqual([]);
   });
 });

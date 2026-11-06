@@ -3,6 +3,8 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../../api/client";
 import type { YamlKind } from "../../api/types";
+import { Icon } from "./Icon";
+import { Kbd } from "./Kbd";
 import { ReadError } from "./ReadError";
 
 /** Сколько показывается итог копирования. */
@@ -32,8 +34,10 @@ export function YamlView({ connectionId, namespace, kind, name }: { connectionId
   return (
     <div className="panel">
       <div className="toolbar">
-        <button type="button" disabled={q.isFetching} onClick={() => void q.refetch()}>
+        <button type="button" data-action="refresh" disabled={q.isFetching} onClick={() => void q.refetch()}>
+          <Icon name="refresh" size={14} />
           {t("common.refresh")}
+          <Kbd keys="Mod+R" />
         </button>
         <button
           type="button"

@@ -14,6 +14,7 @@ import {
   useInteractions,
   useRole,
 } from "@floating-ui/react";
+import { Icon } from "./Icon";
 
 /** Закрывает открытую сейчас подсказку: в каждый момент открыта не больше одной. */
 let closeOpenHint: (() => void) | null = null;
@@ -89,7 +90,7 @@ export function Hint({ k, label }: { k: string; label: string }) {
         aria-label={t("hints.label", { name: label })}
         {...getReferenceProps({ onClick, onKeyDown })}
       >
-        ?
+        <Icon name="help" />
       </span>
       {open && (
         <FloatingPortal>

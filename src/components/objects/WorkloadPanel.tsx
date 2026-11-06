@@ -10,7 +10,7 @@ import { KeyValues } from "../common/KeyValues";
 import { PartView } from "../common/PartView";
 import { ReadError } from "../common/ReadError";
 import { RefreshControls, useRefreshInterval } from "../common/RefreshControls";
-import { SubTabs } from "../common/SubTabs";
+import { type SubTab, SubTabs } from "../common/SubTabs";
 import { YamlView } from "../common/YamlView";
 import { WorkloadActions, hintsOf } from "../change/ChangeActions";
 import { ChangeDialog } from "../change/ChangeDialog";
@@ -45,12 +45,12 @@ export function WorkloadPanel({
   const [prefill, clearPrefill] = useActivePrefill(proposal);
   // Подсказки формы ресурсов — из того же запроса, что и обзор.
   const details = useQuery({ queryKey: ["workload", connectionId, namespace, kind, name], queryFn: () => api.getWorkload(connectionId, namespace, kind, name), enabled: prefill !== undefined });
-  const tabs: { id: Sub; label: string }[] = [
-    { id: "overview", label: t("objects.tabs.overview") },
-    { id: "pods", label: t("objects.tabs.pods") },
-    { id: "resources", label: t("objects.tabs.resources") },
-    { id: "events", label: t("objects.tabs.events") },
-    { id: "yaml", label: "YAML" },
+  const tabs: SubTab<Sub>[] = [
+    { id: "overview", label: t("objects.tabs.overview"), icon: "grid" },
+    { id: "pods", label: t("objects.tabs.pods"), icon: "pod" },
+    { id: "resources", label: t("objects.tabs.resources"), icon: "chart" },
+    { id: "events", label: t("objects.tabs.events"), icon: "clock" },
+    { id: "yaml", label: "YAML", icon: "code" },
   ];
   return (
     <div className="page">

@@ -1,84 +1,121 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type HTMLAttributes, useMemo, useState } from "react";
+import { type HTMLAttributes, type ReactNode, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, toAppError } from "../../../api/client";
 import type { ConnectionProfile } from "../../../api/types";
 import { tr } from "../../../i18n/text";
 import { needsSignIn } from "../../../lib/signIn";
-import { useWorkspace } from "../../../state/workspace";
+import { type TabSpec, useWorkspace } from "../../../state/workspace";
 import { reconnect, sessionMutationKey } from "../../cluster/SessionActions";
 import { EnvBadge } from "../../common/EnvBadge";
+import { Icon, type IconName } from "../../common/Icon";
 import { TruncatedNote } from "../../common/TruncatedNote";
 import { matchProject } from "../../health/findings";
 import { HealthBadge } from "../../health/HealthBlock";
+import { TreeRow } from "./TreeRow";
 
 /** С какого числа проектов показывается фильтр. */
 const FILTER_FROM = 8;
 
 /**
- * Узел подключения в дереве: точка цвета, имя, окружение и пункты подключения — «Кластер», «Проекты»
+ * Узел дерева, которому принадлежит активная вкладка (спец. U1 §6): `cluster`, `nodes`, `findings` или
+ * `project:<namespace>` — у вкладок workload'а и пода своих узлов нет, подсвечивается их проект. Строка,
+ * а не объект: селектор zustand должен возвращать одно и то же значение, пока состояние не изменилось.
+ */
+function useActiveNode(connectionId: string): string | null {
+  return useWorkspace((s) => {
+    const tab = s.tabs.find((x) => x.id === s.activeId);
+    if (!tab || !("connectionId" in tab) || tab.connectionId !== connectionId) return null;
+    switch (tab.kind) {
+      case "cluster":
+      case "nodes":
+      case "findings":
+        return tab.kind;
+      case "project":
+      case "workload":
+      case "pod":
+        return `project:${tab.namespace}`;
+      default:
+        return null;
+    }
+  });
+}
+
+/**
+ * Узел подключения в дереве: точка цвета, имя, окружение и пункты подключения — «Обзор», «Проекты»
  * (разворачиваются и читаются по щелчку) и «Ноды», если на них есть права. rowProps — атрибуты строки
- * (перетаскивание).
+ * (перетаскивание). Пункт активной вкладки подсвечен (`aria-current`).
  */
 export function ConnectionNode({ connection: c, rowProps }: { connection: ConnectionProfile; rowProps?: HTMLAttributes<HTMLDivElement> }) {
   const { t } = useTranslation();
   const open = useWorkspace((s) => s.open);
   const [projectsOpen, setProjectsOpen] = useState(false);
+  const active = useActiveNode(c.id);
+  const activeProject = active?.startsWith("project:") ? active.slice("project:".length) : null;
   // Сведения о подключении — из вкладки подключения; само дерево не подключается.
   const info = useQuery({ queryKey: ["connection", c.id], queryFn: () => api.connect(c.id, false), enabled: false });
 
+  const leaf = (kind: "cluster" | "nodes" | "findings", icon: IconName, name: string, spec: TabSpec, extra?: ReactNode) => (
+    <li>
+      <TreeRow icon={icon} name={name} extra={extra} current={active === kind} onActivate={() => open(spec)} />
+    </li>
+  );
+
   return (
     <li>
-      <div {...rowProps} className={rowProps?.className ? `tree-conn ${rowProps.className}` : "tree-conn"}>
-        <span className="dot" style={{ background: c.color }} />
-        <span className="tree-name">{c.name}</span>
+      <TreeRow
+        chevron="leaf"
+        icon={<span className="dot" style={{ background: c.color }} />}
+        name={c.name}
+        title={c.name}
+        rowProps={{ ...rowProps, className: rowProps?.className ? `tree-conn ${rowProps.className}` : "tree-conn" }}
+      >
         <EnvBadge environment={c.environment} readOnly={c.readOnly} />
         {(c.llmAccess === "metadata" || c.llmAccess === "logs") && (
-          <span className="llm-badge" title={t(c.llmAccess === "logs" ? "sidebar.llmAccessLogs" : "sidebar.llmAccess")}>
+          <span
+            className="llm-badge"
+            role="img"
+            title={t(c.llmAccess === "logs" ? "sidebar.llmAccessLogs" : "sidebar.llmAccess")}
+            aria-label={t(c.llmAccess === "logs" ? "sidebar.llmAccessLogs" : "sidebar.llmAccess")}
+          >
             LLM
           </span>
         )}
-        <button type="button" className="icon" title={t("sidebar.editConnection")} onClick={() => open({ kind: "connection-form", connectionId: c.id })}>
-          ✎
+        <button
+          type="button"
+          className="icon"
+          title={t("sidebar.editConnection")}
+          aria-label={t("sidebar.editConnection")}
+          onClick={() => open({ kind: "connection-form", connectionId: c.id })}
+        >
+          <Icon name="pencil" size={14} />
         </button>
-      </div>
+      </TreeRow>
       <ul>
+        {leaf("cluster", "grid", t("sidebar.cluster"), { kind: "cluster", connectionId: c.id })}
         <li>
-          <button type="button" className="link" onClick={() => open({ kind: "cluster", connectionId: c.id })}>
-            {t("sidebar.cluster")}
-          </button>
+          {/* Пока проекты свёрнуты, вкладка проекта подсвечивает их строку — иначе у неё не было бы следа в дереве. */}
+          <TreeRow
+            chevron={{ expanded: projectsOpen, onToggle: () => setProjectsOpen((v) => !v), label: t("sidebar.folderToggle", { name: t("sidebar.projects") }) }}
+            icon="namespace"
+            name={t("sidebar.projects")}
+            current={!projectsOpen && activeProject !== null}
+          />
+          {projectsOpen && <ProjectsNode connectionId={c.id} activeProject={activeProject} />}
         </li>
-        <li>
-          <button type="button" className="tree-folder-toggle" aria-expanded={projectsOpen} onClick={() => setProjectsOpen((v) => !v)}>
-            <span className="tree-caret">{projectsOpen ? "▾" : "▸"}</span>
-            {t("sidebar.projects")}
-          </button>
-          {projectsOpen && <ProjectsNode connectionId={c.id} />}
-        </li>
-        {info.data?.capabilities.listNodes && (
-          <li>
-            <button type="button" className="link" onClick={() => open({ kind: "nodes", connectionId: c.id })}>
-              {t("sidebar.nodes")}
-            </button>
-          </li>
-        )}
-        <li>
-          <button type="button" className="link" onClick={() => open({ kind: "findings", connectionId: c.id })}>
-            {t("sidebar.findings")}
-          </button>
-          <HealthBadge connectionId={c.id} />
-        </li>
+        {info.data?.capabilities.listNodes && leaf("nodes", "server", t("sidebar.nodes"), { kind: "nodes", connectionId: c.id })}
+        {leaf("findings", "flag", t("sidebar.findings"), { kind: "findings", connectionId: c.id }, <HealthBadge connectionId={c.id} />)}
       </ul>
     </li>
   );
 }
 
 /**
- * Проекты подключения (спец. §6.1): избранные сверху, фильтр; без прав на список — проекты из профиля. Сессия
- * истекла — «Войти снова», как у `ReadError`: подключается заново и открывает вкладку подключения, где видны
- * способы войти; прочие ошибки — «Повторить».
+ * Проекты подключения (спец. §6.1): избранные сверху (значок `star`), фильтр; без прав на список — проекты из
+ * профиля. Сессия истекла — «Войти снова», как у `ReadError`: подключается заново и открывает вкладку подключения,
+ * где видны способы войти; прочие ошибки — «Повторить».
  */
-function ProjectsNode({ connectionId }: { connectionId: string }) {
+function ProjectsNode({ connectionId, activeProject }: { connectionId: string; activeProject: string | null }) {
   const { t } = useTranslation();
   const open = useWorkspace((s) => s.open);
   const queryClient = useQueryClient();
@@ -125,18 +162,25 @@ function ProjectsNode({ connectionId }: { connectionId: string }) {
       {/* Кластер не отдал список: проекты берутся из профиля. Если и там пусто — одно сообщение вместо «из профиля» и «Проектов нет». */}
       {q.data?.error && <p className="tree-notice">{t(all?.length === 0 ? "sidebar.noProjectsFromProfile" : "sidebar.projectsFromProfile")}</p>}
       {all && all.length >= FILTER_FROM && (
-        <input className="tree-filter" aria-label={t("sidebar.projectsFilter")} placeholder={t("sidebar.projectsFilter")} value={filter} onChange={(e) => setFilter(e.target.value)} />
+        <div className="search-field tree-filter-wrap">
+          <Icon name="search" />
+          <input type="search" aria-label={t("sidebar.projectsFilter")} placeholder={t("sidebar.projectsFilter")} value={filter} onChange={(e) => setFilter(e.target.value)} />
+        </div>
       )}
       <TruncatedNote truncated={q.data?.truncated} className="tree-notice" />
       {all && all.length === 0 && !q.data?.error && <p className="tree-notice">{t("sidebar.noProjects")}</p>}
       {all && all.length > 0 && items.length === 0 && <p className="tree-notice">{t("sidebar.noMatches")}</p>}
-      <ul>
+      <ul className={activeProject !== null ? "tree-open" : undefined}>
         {items.map((p) => (
           <li key={p.name}>
-            <button type="button" className="link" title={p.displayName ?? undefined} onClick={() => open({ kind: "project", connectionId, namespace: p.name })}>
-              {p.favorite ? `★ ${p.name}` : p.name}
-            </button>
-            <HealthBadge connectionId={connectionId} match={matchProject(p.name)} />
+            <TreeRow
+              icon={p.favorite ? "star" : "namespace"}
+              name={p.name}
+              title={p.displayName ?? p.name}
+              extra={<HealthBadge connectionId={connectionId} match={matchProject(p.name)} />}
+              current={activeProject === p.name}
+              onActivate={() => open({ kind: "project", connectionId, namespace: p.name })}
+            />
           </li>
         ))}
       </ul>
